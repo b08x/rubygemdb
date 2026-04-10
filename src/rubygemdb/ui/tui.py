@@ -138,7 +138,7 @@ class C7SelectionScreen(ModalScreen[str]):
     def on_cancel(self):
         self.dismiss(None)
 
-class ExportTab(Vertical):
+class ExportTab(ScrollableContainer):
     """Export tab with format selection and path input."""
     
     def compose(self) -> ComposeResult:
@@ -154,7 +154,7 @@ class ExportTab(Vertical):
         yield Label("Export Preview:", classes="section-title")
         yield Markdown("*Select gems and format to see preview*", id="export-preview")
 
-        with Horizontal():
+        with Horizontal(id="export-actions"):
             yield Input(placeholder="/path/to/export", id="export-path-input")
             yield Button("Export", id="do-export-btn", variant="primary")
         yield Label("", id="export-status-label")
@@ -385,6 +385,18 @@ class GemApp(App):
         padding: 1;
         background: $surface;
     }
+    #export-actions {
+        height: auto;
+        margin-top: 1;
+        margin-bottom: 1;
+    }
+    #export-path-input {
+        width: 1fr;
+    }
+    #do-export-btn {
+        width: 15;
+        margin-left: 1;
+    }
     """
 
     def __init__(self, inventory_path=None):
@@ -544,6 +556,16 @@ class GemApp(App):
     @on(RadioSet.Changed)
     def on_filter_changed(self, event):
         self.update_table()
+
+    @on(TabbedContent.TabActivated)
+    def on_tab_activated(self, event: TabbedContent.TabActivated):
+        """Sync selected gems when switching to export tab manually."""
+        if event.pane.id == TabConstants.EXPORT:
+            export_tab = self.query_one("#export-tab", ExportTab)
+            with self._selection_lock:
+                selected = list(self._selected_gems)
+            export_tab.set_gems(selected)
+            self.log_debug(f"Export tab activated, synced {len(selected)} gems")
 
     @on(DataTable.RowSelected)
     def on_row_selected(self, event: DataTable.RowSelected):
