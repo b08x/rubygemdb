@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict
 
 class GemSignals(BaseModel):
     rails: bool = False
@@ -9,6 +9,7 @@ class GemSignals(BaseModel):
 class GemClassification(BaseModel):
     primary: str
     secondary: Optional[str] = None
+    sub_categories: List[str] = Field(default_factory=list)
     confidence: float = 0.0
 
 class GemRisks(BaseModel):

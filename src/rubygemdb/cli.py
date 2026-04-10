@@ -12,7 +12,6 @@ from rubygemdb.services.llm import LLMService
 from rubygemdb.services.classifier import GemClassifier
 from rubygemdb.services.context7 import Context7Service
 from rubygemdb.storage.sqlite_storage import SQLiteStorage
-from rubygemdb.core.config import settings
 
 console = Console()
 logging.basicConfig(level=logging.INFO, format="%(message)s")

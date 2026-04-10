@@ -1,7 +1,6 @@
 import time
 import requests
 import json
-import os
 from rubygemdb.core.config import settings
 
 class RubyGemsService:

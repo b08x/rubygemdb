@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple, Any
+from typing import List, Tuple, Optional
 from rubygemdb.models.gem import GemEntry, GemClassification, GemSignals, GemRisks
 from rubygemdb.services.rubygems import RubyGemsService
 from rubygemdb.services.llm import LLMService
@@ -8,7 +8,7 @@ class GemClassifier:
         self.rubygems = rubygems_service
         self.llm = llm_service
 
-    def heuristic_classify(self, name: str, info: dict, category: str = None) -> Tuple[GemClassification, GemSignals, list]:
+    def heuristic_classify(self, name: str, info: dict, category: Optional[str] = None) -> Tuple[GemClassification, GemSignals, list, List[str]]:
         lname = name.lower()
         def has(keys):
             return any(k in lname for k in keys)
@@ -17,6 +17,7 @@ class GemClassifier:
         signals = GemSignals()
         deps = [d["name"] for d in info.get("dependencies", {}).get("runtime", [])] if info else []
 
+        # Primary category classification
         if has(["active_support", "core_ext", "dry-"]):
             classification.primary = "runtime_substrate"
             classification.confidence += 0.2
@@ -42,7 +43,47 @@ class GemClassifier:
         if info and info.get("platform") not in (None, "ruby"):
             signals.native_ext = True
 
-        return classification, signals, deps
+        # Sub-category detection from dependencies (independent if statements allow multiple matches)
+        sub_cats = set()
+        for dep in deps:
+            dep_lower = dep.lower()
+            if "rails" in dep_lower:
+                sub_cats.add("rails")
+            if "sidekiq" in dep_lower:
+                sub_cats.add("sidekiq")
+                sub_cats.add("background_jobs")
+            if "active_job" in dep_lower or "activejob" in dep_lower:
+                sub_cats.add("activejob")
+            if "puma" in dep_lower or "unicorn" in dep_lower:
+                sub_cats.add("server")
+            if "redis" in dep_lower:
+                sub_cats.add("redis")
+            if "postgresql" in dep_lower or "pg" in dep_lower or "mysql" in dep_lower or "mysql2" in dep_lower or "mariadb" in dep_lower:
+                sub_cats.add("database")
+            if "elasticsearch" in dep_lower or "search" in dep_lower:
+                sub_cats.add("search")
+            if "jwt" in dep_lower or "oauth" in dep_lower:
+                sub_cats.add("auth")
+            if "graphql" in dep_lower or "grape" in dep_lower:
+                sub_cats.add("api")
+            if "json" in dep_lower or "xml" in dep_lower:
+                sub_cats.add("serialization")
+            if "csv" in dep_lower or "xlsx" in dep_lower or "excel" in dep_lower:
+                sub_cats.add("spreadsheet")
+            if "pdf" in dep_lower:
+                sub_cats.add("pdf")
+            if "aws" in dep_lower or "gcp" in dep_lower or "google" in dep_lower or "azure" in dep_lower:
+                sub_cats.add("cloud")
+            if "s3" in dep_lower:
+                sub_cats.add("cloud")
+            if "sentry" in dep_lower or "datadog" in dep_lower or "newrelic" in dep_lower or "honeybadger" in dep_lower:
+                sub_cats.add("monitoring")
+            if "delayed_job" in dep_lower or "resque" in dep_lower or "sidekiq" in dep_lower:
+                sub_cats.add("background_jobs")
+            if "kafka" in dep_lower or "bunny" in dep_lower or "mqtt" in dep_lower:
+                sub_cats.add("messaging")
+
+        return classification, signals, deps, list(sub_cats)
 
     def score_gem(self, primary_cat: str, deps: list) -> GemRisks:
         inv = 3
@@ -62,9 +103,12 @@ class GemClassifier:
 
         return GemRisks(invasiveness=inv, coupling=coupling, abstraction_leak=leak)
 
-    def classify(self, name: str, category: str = None, homepage: str = None, source_code_uri: str = None, context7_id: str = None) -> GemEntry:
+    def classify(self, name: str, category: Optional[str] = None, homepage: Optional[str] = None, source_code_uri: Optional[str] = None, context7_id: Optional[str] = None) -> GemEntry:
         info = self.rubygems.fetch_gem_info(name)
-        classification, signals, deps = self.heuristic_classify(name, info, category)
+        classification, signals, deps, sub_cats = self.heuristic_classify(name, info, category)
+        
+        # Add sub_categories to classification
+        classification.sub_categories = sub_cats
 
         if classification.confidence < 0.7:
             prompt = self.llm.build_prompt(name, info, deps)
@@ -79,7 +123,7 @@ class GemClassifier:
             name=name,
             classification=classification,
             role={
-                "description": info.get("info") if info else "",
+                "description": str(info.get("info", "")) if info else "",
                 "attaches_to": classification.primary.split("_")[0]
             },
             risks=risks,
