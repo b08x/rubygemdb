@@ -69,7 +69,9 @@ class GemDetails(Vertical):
             deps_list.append(ListItem(Label("No runtime dependencies")))
         else:
             for dep in gem.dependencies:
-                deps_list.append(ListItem(Label(dep), id=f"dep-{dep}"))
+                item = ListItem(Label(dep))
+                setattr(item, "dep_name", dep)
+                deps_list.append(item)
         
         # Reset button label to main gem
         self.update_button_label(self.target_name)
@@ -77,8 +79,6 @@ class GemDetails(Vertical):
     def update_button_label(self, name: str):
         self.target_name = name
         self.query_one("#fetch-cheatsheet-btn", Button).label = f"Fetch Context7: {name}"
-
-from textual.screen import ModalScreen
 
 class C7SelectionScreen(ModalScreen[str]):
     """A screen to select a Context7 library ID from a list of results."""
@@ -91,18 +91,23 @@ class C7SelectionScreen(ModalScreen[str]):
             yield Label("Select the correct Context7 Library ID:", classes="section-title")
             list_items = []
             for r in self.results:
-                lib_id = r.get("libraryId") or r.get("id")
+                lib_id = r.get("id") or r.get("libraryId")
+                if not lib_id:
+                    continue
                 desc = r.get("description", "No description")
-                name = r.get("name", "Unknown")
-                list_items.append(ListItem(Label(f"[b]{lib_id}[/b] - {name}\n[i]{desc[:100]}...[/i]"), id=lib_id))
+                name = r.get("title") or r.get("name") or "Unknown"
+                item = ListItem(Label(f"[b]{lib_id}[/b] - {name}\n[i]{desc[:100]}...[/i]"))
+                setattr(item, "lib_id", lib_id)
+                list_items.append(item)
             
             yield ListView(*list_items, id="results-list")
             yield Button("Cancel", id="cancel-btn", variant="error")
 
     @on(ListView.Selected)
     def on_selected(self, event: ListView.Selected):
-        if event.item and event.item.id:
-            self.dismiss(event.item.id)
+        lib_id = getattr(event.item, "lib_id", None)
+        if lib_id:
+            self.dismiss(lib_id)
 
     @on(Button.Pressed, "#cancel-btn")
     def on_cancel(self):
@@ -282,9 +287,9 @@ class GemApp(App):
     @on(ListView.Selected, "#details-deps-list")
     def on_dependency_selected(self, event: ListView.Selected):
         item = event.item
-        if not item or not item.id or not item.id.startswith("dep-"):
+        dep_name = getattr(item, "dep_name", None)
+        if not dep_name:
             return
-        dep_name = item.id.replace("dep-", "")
         sidebar = self.query_one("#details-sidebar", GemDetails)
         sidebar.update_button_label(dep_name)
         self.notify(f"Targeted dependency: {dep_name}")
