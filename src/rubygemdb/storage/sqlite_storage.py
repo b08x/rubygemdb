@@ -30,6 +30,7 @@ class SQLiteStorage(StorageBase):
                     category TEXT,
                     description TEXT,
                     homepage TEXT,
+                    source_code_uri TEXT,
                     context7_id TEXT,
                     verified INTEGER DEFAULT 0
                 )
@@ -65,33 +66,36 @@ class SQLiteStorage(StorageBase):
                     continue
                 
                 # Check if already verified in DB
-                cursor.execute("SELECT verified, homepage, context7_id FROM inventory WHERE name = ?", (name,))
+                cursor.execute("SELECT verified, homepage, source_code_uri, context7_id FROM inventory WHERE name = ?", (name,))
                 db_row = cursor.fetchone()
                 
-                if db_row and db_row[0] == 1:
+                if db_row and db_row[0] == 1 and db_row[2] is not None:
                     homepage = db_row[1]
-                    context7_id = db_row[2]
+                    source_code_uri = db_row[2]
+                    context7_id = db_row[3]
                 else:
                     logger.info(f"Verifying {name}...")
-                    # Verify homepage from RubyGems API
+                    # Verify homepage and source_code_uri from RubyGems API
                     gem_info = self.rubygems.fetch_gem_info(name)
                     homepage = gem_info.get("homepage_uri") if gem_info else row.get("homepage")
+                    source_code_uri = gem_info.get("source_code_uri") if gem_info else row.get("source_code_uri")
                     
                     # Verify context7_id
                     context7_id = self.context7.verify_library(name)
                     
                     # Insert or update
                     cursor.execute("""
-                        INSERT INTO inventory (name, version, category, description, homepage, context7_id, verified)
-                        VALUES (?, ?, ?, ?, ?, ?, 1)
+                        INSERT INTO inventory (name, version, category, description, homepage, source_code_uri, context7_id, verified)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 1)
                         ON CONFLICT(name) DO UPDATE SET
                             version=excluded.version,
                             category=excluded.category,
                             description=excluded.description,
                             homepage=excluded.homepage,
+                            source_code_uri=excluded.source_code_uri,
                             context7_id=excluded.context7_id,
                             verified=1
-                    """, (name, row.get("version"), row.get("category"), row.get("description"), homepage, context7_id))
+                    """, (name, row.get("version"), row.get("category"), row.get("description"), homepage, source_code_uri, context7_id))
                 
                 items.append(GemInventoryItem(
                     name=name,
@@ -99,6 +103,7 @@ class SQLiteStorage(StorageBase):
                     category=row.get("category"),
                     description=row.get("description"),
                     homepage=homepage,
+                    source_code_uri=source_code_uri,
                     context7_id=context7_id
                 ))
             conn.commit()
@@ -137,7 +142,12 @@ class SQLiteStorage(StorageBase):
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM classified_gems")
+            # Join with inventory to get metadata
+            cursor.execute("""
+                SELECT c.*, i.homepage, i.source_code_uri, i.context7_id 
+                FROM classified_gems c
+                LEFT JOIN inventory i ON c.name = i.name
+            """)
             rows = cursor.fetchall()
             for row in rows:
                 gems.append(GemEntry(
@@ -148,6 +158,9 @@ class SQLiteStorage(StorageBase):
                     risks=GemRisks(**json.loads(row["risks"])),
                     signals=GemSignals(**json.loads(row["signals"])),
                     dependencies=json.loads(row["dependencies"]),
-                    description=row["description"]
+                    description=row["description"],
+                    homepage=row["homepage"],
+                    source_code_uri=row["source_code_uri"],
+                    context7_id=row["context7_id"]
                 ))
         return gems

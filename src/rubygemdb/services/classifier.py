@@ -62,7 +62,7 @@ class GemClassifier:
 
         return GemRisks(invasiveness=inv, coupling=coupling, abstraction_leak=leak)
 
-    def classify(self, name: str, category: str = None) -> GemEntry:
+    def classify(self, name: str, category: str = None, homepage: str = None, source_code_uri: str = None, context7_id: str = None) -> GemEntry:
         info = self.rubygems.fetch_gem_info(name)
         classification, signals, deps = self.heuristic_classify(name, info, category)
 
@@ -85,5 +85,8 @@ class GemClassifier:
             risks=risks,
             signals=signals,
             dependencies=deps,
-            description=info.get("info") if info else ""
+            description=info.get("info") if info else "",
+            homepage=homepage,
+            source_code_uri=source_code_uri,
+            context7_id=context7_id
         )

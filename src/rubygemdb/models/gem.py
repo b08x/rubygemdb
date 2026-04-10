@@ -25,6 +25,9 @@ class GemEntry(BaseModel):
     signals: GemSignals = Field(default_factory=GemSignals)
     dependencies: List[str] = Field(default_factory=list)
     description: Optional[str] = None
+    homepage: Optional[str] = None
+    source_code_uri: Optional[str] = None
+    context7_id: Optional[str] = None
 
 class GemInventoryItem(BaseModel):
     name: str
@@ -32,4 +35,5 @@ class GemInventoryItem(BaseModel):
     category: Optional[str] = None
     description: Optional[str] = None
     homepage: Optional[str] = None
+    source_code_uri: Optional[str] = None
     context7_id: Optional[str] = None

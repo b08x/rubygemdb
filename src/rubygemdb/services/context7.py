@@ -17,10 +17,27 @@ class Context7Service:
             r = requests.get(search_url, headers=headers, timeout=5)
             if r.status_code == 200:
                 data = r.json()
-                if data and isinstance(data, list) and len(data) > 0:
-                    # Return the libraryId of the first match if it looks relevant
-                    # For now, just return the first one's libraryId
-                    return data[0].get("libraryId")
+                results = data if isinstance(data, list) else data.get("results", [])
+                if results and len(results) > 0:
+                    # Return the libraryId or id of the first match
+                    return results[0].get("libraryId") or results[0].get("id")
+        except Exception:
+            pass
+        return None
+
+    def query_context(self, lib_id: str, query: str) -> Optional[str]:
+        if not self.api_key:
+            return None
+        
+        import urllib.parse
+        encoded_query = urllib.parse.quote(query)
+        url = f"https://context7.com/api/v2/context?libraryId={lib_id}&query={encoded_query}"
+        headers = {"x-api-key": self.api_key}
+        
+        try:
+            r = requests.get(url, headers=headers, timeout=30)
+            if r.status_code == 200:
+                return r.text
         except Exception:
             pass
         return None

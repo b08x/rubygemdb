@@ -48,7 +48,13 @@ def run_cli():
 
         for item in inventory:
             progress.update(task, description=f"[cyan]Analyzing [bold]{item.name}[/bold]...")
-            gem_entry = classifier.classify(item.name, item.category)
+            gem_entry = classifier.classify(
+                item.name, 
+                item.category,
+                homepage=item.homepage,
+                source_code_uri=item.source_code_uri,
+                context7_id=item.context7_id
+            )
             results.append(gem_entry)
             categorized[gem_entry.classification.primary].append(gem_entry.model_dump())
             progress.advance(task)
