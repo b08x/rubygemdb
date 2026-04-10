@@ -150,6 +150,10 @@ class ExportTab(Vertical):
             yield RadioButton("CSV", id="fmt-csv")
             yield RadioButton("JSON", id="fmt-json")
             yield RadioButton("Markdown", id="fmt-md")
+
+        yield Label("Export Preview:", classes="section-title")
+        yield Markdown("*Select gems and format to see preview*", id="export-preview")
+
         with Horizontal():
             yield Input(placeholder="/path/to/export", id="export-path-input")
             yield Button("Export", id="do-export-btn", variant="primary")
@@ -157,7 +161,14 @@ class ExportTab(Vertical):
     
     def set_gems(self, gem_names: list):
         self._gem_names = gem_names
-        self.query_one("#export-path-input", Input).value = ""
+
+        # Set a helpful default export path
+        if gem_names:
+            default_path = f"/home/{os.environ.get('USER', 'user')}/selected_gems.gemfile"
+            self.query_one("#export-path-input", Input).value = default_path
+        else:
+            self.query_one("#export-path-input", Input).value = ""
+
         self.query_one("#export-status-label", Label).update("")
 
         # Update summary with gem count and preview
@@ -174,6 +185,72 @@ class ExportTab(Vertical):
             summary_text = f"Ready to export {gem_count} gems: {preview_gems}, ... and {gem_count-3} more"
 
         self.query_one("#export-summary", Label).update(summary_text)
+
+        # Update export preview
+        self.update_export_preview()
+
+    def update_export_preview(self):
+        """Update the export preview based on current format and gems."""
+        try:
+            if not hasattr(self, '_gem_names') or not self._gem_names:
+                self.query_one("#export-preview", Markdown).update("*No gems selected for export*")
+                return
+
+            # Get current format
+            format_radios = self.query_one("#export-format", RadioSet)
+            format_id = format_radios.pressed_button.id if format_radios.pressed_button else "fmt-gemfile"
+
+            # Generate preview content (first 10 lines only)
+            preview_content = self._generate_export_preview(self._gem_names, format_id)
+            self.query_one("#export-preview", Markdown).update(preview_content)
+
+        except Exception:
+            self.query_one("#export-preview", Markdown).update("*Preview unavailable*")
+
+    def _generate_export_preview(self, gem_names: list, format_id: str) -> str:
+        """Generate a preview of export content."""
+        # Limit preview to first 5 gems for brevity
+        preview_gems = gem_names[:5]
+
+        if format_id == "fmt-gemfile":
+            lines = ["```ruby", "source 'https://rubygems.org'", ""]
+            for name in sorted(preview_gems):
+                lines.append(f"gem '{name}'")
+            if len(gem_names) > 5:
+                lines.append(f"# ... and {len(gem_names) - 5} more gems")
+            lines.append("```")
+
+        elif format_id == "fmt-csv":
+            lines = ["```csv", "Name,Category,Source URI,Context7 ID,Description"]
+            for name in preview_gems:
+                lines.append(f"{name},category,source_uri,context7_id,description")
+            if len(gem_names) > 5:
+                lines.append(f"# ... and {len(gem_names) - 5} more gems")
+            lines.append("```")
+
+        elif format_id == "fmt-json":
+            lines = ["```json", "["]
+            for i, name in enumerate(preview_gems):
+                comma = "," if i < len(preview_gems) - 1 else ""
+                lines.append(f'  {{"name": "{name}", "category": "...", "description": "..."}}{comma}')
+            if len(gem_names) > 5:
+                lines.append(f'  // ... and {len(gem_names) - 5} more gems')
+            lines.append("]```")
+
+        elif format_id == "fmt-md":
+            lines = ["| Name | Category | Source | Context7 ID | Description |",
+                    "|------|----------|--------|-------------|-------------|"]
+            for name in preview_gems:
+                lines.append(f"| {name} | category | source | context7_id | description |")
+            if len(gem_names) > 5:
+                lines.append(f"| ... and {len(gem_names) - 5} more gems | | | | |")
+
+        return "\n".join(lines)
+
+    @on(RadioSet.Changed, "#export-format")
+    def on_format_changed(self, event):
+        """Update preview when export format changes."""
+        self.update_export_preview()
 
 class GemApp(App):
     TITLE = "RubyGemDB Explorer"
@@ -300,6 +377,13 @@ class GemApp(App):
     }
     #main-area {
         height: 1fr;
+    }
+    #export-preview {
+        height: 15;
+        margin: 1 0;
+        border: solid $background;
+        padding: 1;
+        background: $surface;
     }
     """
 
@@ -605,10 +689,22 @@ class GemApp(App):
     @on(Button.Pressed, "#do-export-btn")
     def on_export_pressed(self):
         export_tab = self.query_one("#export-tab", ExportTab)
+
+        # Check if any gems are selected
+        gem_names = getattr(export_tab, "_gem_names", None)
+        if not gem_names:
+            self.notify("No gems selected! Go to Explorer tab, select gems with Space key, then return here.", severity="error")
+            export_tab.query_one("#export-status-label", Label).update("❌ No gems selected for export")
+            return
+
         path = export_tab.query_one("#export-path-input", Input).value.strip()
         if not path:
-            self.notify("Please enter an export path", severity="warning")
+            self.notify("Please enter an export file path (e.g., /home/user/my_gems.gemfile)", severity="warning")
+            export_tab.query_one("#export-status-label", Label).update("❌ Please enter export path")
             return
+
+        # Log export attempt for debugging
+        self.log_info(f"Attempting to export {len(gem_names)} gems to {path}")
         
         format_radios = export_tab.query_one("#export-format", RadioSet)
         format_id = format_radios.pressed_button.id if format_radios.pressed_button else "fmt-gemfile"
@@ -631,10 +727,16 @@ class GemApp(App):
             content = export_fn(gem_names)
             with open(path, "w") as f:
                 f.write(content)
-            export_tab.query_one("#export-status-label", Label).update(f"Exported {len(gem_names)} gems to {path}")
-            self.notify(f"Exported {len(gem_names)} gems as {fmt_name}")
+
+            # Show success status
+            export_tab.query_one("#export-status-label", Label).update(f"✅ Successfully exported {len(gem_names)} gems to {path}")
+            self.notify(f"✅ Exported {len(gem_names)} gems as {fmt_name}", timeout=3.0)
+            self.log_info(f"Export successful: {len(gem_names)} gems saved to {path}")
+
         except Exception as e:
-            self.notify(f"Export failed: {e}", severity="error")
+            export_tab.query_one("#export-status-label", Label).update(f"❌ Export failed: {e}")
+            self.notify(f"❌ Export failed: {e}", severity="error")
+            self.log_error(f"Export failed: {e}")
 
     def _export_gemfile(self, gem_names: list) -> str:
         lines = ["source 'https://rubygems.org'", ""]
