@@ -6,7 +6,7 @@ import argparse
 from typing import List, Optional
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, ScrollableContainer
-from textual.widgets import Header, Footer, DataTable, RadioSet, RadioButton, Label, Button, Markdown, ListView, ListItem
+from textual.widgets import Header, Footer, DataTable, RadioSet, RadioButton, Label, Button, Markdown, ListView, ListItem, Input
 from textual.screen import ModalScreen
 from textual import on, work
 
@@ -81,7 +81,7 @@ class GemDetails(Vertical):
         self.query_one("#fetch-cheatsheet-btn", Button).label = f"Fetch Context7: {name}"
 
 class C7SelectionScreen(ModalScreen[str]):
-    """A screen to select a Context7 library ID from a list of results."""
+    """A screen to select or manually enter a Context7 library ID."""
     def __init__(self, results: list):
         super().__init__()
         self.results = results
@@ -101,6 +101,12 @@ class C7SelectionScreen(ModalScreen[str]):
                 list_items.append(item)
             
             yield ListView(*list_items, id="results-list")
+            
+            yield Label("Or manually enter Library ID (e.g. /org/repo):", classes="section-title")
+            with Horizontal(id="manual-entry-area"):
+                yield Input(placeholder="/org/repo", id="manual-id-input")
+                yield Button("Submit Manual", id="submit-manual-btn", variant="primary")
+                
             yield Button("Cancel", id="cancel-btn", variant="error")
 
     @on(ListView.Selected)
@@ -108,6 +114,12 @@ class C7SelectionScreen(ModalScreen[str]):
         lib_id = getattr(event.item, "lib_id", None)
         if lib_id:
             self.dismiss(lib_id)
+
+    @on(Button.Pressed, "#submit-manual-btn")
+    def on_submit_manual(self):
+        manual_id = self.query_one("#manual-id-input", Input).value.strip()
+        if manual_id:
+            self.dismiss(manual_id)
 
     @on(Button.Pressed, "#cancel-btn")
     def on_cancel(self):
@@ -187,6 +199,18 @@ class GemApp(App):
         margin: 1 0;
         border: solid $background;
         height: 1fr;
+    }
+    #manual-entry-area {
+        height: auto;
+        margin-top: 1;
+        margin-bottom: 1;
+    }
+    #manual-id-input {
+        width: 1fr;
+    }
+    #submit-manual-btn {
+        width: 20;
+        margin-left: 1;
     }
     """
 
