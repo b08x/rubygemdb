@@ -15,26 +15,37 @@ RubyGemDB is a Ruby gem analysis and classification tool that categorizes gems i
 - **Confidence Scoring**: Risk assessment based on invasiveness, coupling, and abstraction leak potential
 
 ### Data Flow
-1. CSV input → RubyGems API → Heuristic classification → LLM enhancement → YAML output
-2. Caching layers for both API responses (`gem_cache.json`) and LLM responses (`llm_cache.json`)
-3. Results cached in `classified_gems.json` for TUI persistence
+1. CSV input → RubyGems API → Heuristic classification → LLM enhancement → SQLite/YAML output
+2. Caching layers for both API responses (`data/cache/gem_cache.json`) and LLM responses (`llm_cache.json`)
+3. Results cached in `data/classified_gems.json` and SQLite database for TUI persistence
 
 ### Key Components
-- `gem_classifier.py`: CLI batch processor with progress tracking
-- `gem_classifier_tui.py`: Interactive Textual-based TUI with gem explorer
-- Robust API helpers with exponential backoff and retry logic
-- Context7 integration for generating gem usage cheatsheets
+```
+src/rubygemdb/
+├── cli.py              # Command-line interface entry point
+├── ui/tui.py          # Interactive Textual-based TUI with gem explorer
+├── core/config.py     # Settings and environment variable handling  
+├── models/gem.py      # Pydantic data models for gem data
+├── services/          # Core business logic
+│   ├── classifier.py  # Heuristic and LLM classification logic
+│   ├── rubygems.py    # RubyGems API client with caching
+│   ├── llm.py         # Devstral LLM client for fallback classification
+│   └── context7.py    # Context7 API client for cheatsheet generation
+└── storage/           # Data persistence layer
+    ├── base.py        # Storage interface
+    ├── json_storage.py# JSON file storage implementation
+    └── sqlite_storage.py # SQLite storage implementation (primary)
+```
 
 ## Common Development Tasks
 
-### Running the CLI Classifier
+### Installation and Setup
 ```bash
-python gem_classifier.py <gems.csv> [--out output_directory]
-```
+# Install dependencies with uv (recommended)
+uv sync --dev
 
-### Running the TUI Explorer
-```bash
-python gem_classifier_tui.py <gems.csv>
+# Or with pip
+pip install -e .
 ```
 
 ### Environment Setup
@@ -44,10 +55,46 @@ export DEVSTRAL_API_KEY="your_key"        # For LLM classification
 export CONTEXT7_API_KEY="your_key"        # For cheatsheet generation
 ```
 
-### Input Data Format
-CSV files must contain either:
-- `name` column (primary) or `gem` column  
-- Optional `group` column for development/test context
+### Running the CLI Classifier
+Process a CSV of gem names and generate YAML output reports:
+```bash
+# As installed package
+rubygemdb gems-inventory.csv --out output/
+
+# Direct module execution
+python -m rubygemdb gems-inventory.csv --out output/
+
+# With uv
+uv run rubygemdb gems-inventory.csv --out output/
+```
+
+### Running the TUI Explorer
+Launch interactive terminal UI for browsing and managing classified gems:
+```bash
+# As installed package
+rubygemdb-tui [optional-gems-inventory.csv]
+
+# Direct module execution  
+python -m rubygemdb.ui.tui [optional-gems-inventory.csv]
+
+# With uv
+uv run rubygemdb-tui [optional-gems-inventory.csv]
+```
+
+### Development Workflow
+```bash
+# Lint code
+uv run ruff check src/rubygemdb/
+
+# Type checking
+uv run mypy src/rubygemdb/
+
+# Run formatter
+uv run ruff format src/rubygemdb/
+
+# Test with sample data
+uv run rubygemdb data/gems-inventory.csv --out test-output/
+```
 
 ## Classification Logic
 
@@ -64,6 +111,23 @@ CSV files must contain either:
 - Low confidence (<0.7): Queue for LLM batch processing
 - LLM confidence threshold: 0.6 to override heuristics
 
+## Input Data Format
+
+CSV files must contain either:
+- `name` column (primary) or `gem` column  
+- Optional columns: `group`, `category`, `description`, `homepage`, `source_code_uri`, `context7_id`
+
+## Storage and Caching Strategy
+
+### Primary Storage
+- **SQLite Database**: `data/rubygemdb.sqlite` - Central storage for inventory and classified gems
+- **YAML Output**: Per-category files in output directory for batch processing results
+
+### Caching Layers
+- **API Cache**: `data/cache/gem_cache.json` - Persistent cache for RubyGems API responses
+- **LLM Cache**: `llm_cache.json` - SHA256-hashed prompt caching for LLM responses (temperature 0)
+- **Results Cache**: `data/classified_gems.json` - Persists TUI state between sessions
+
 ## TUI Interface Features
 
 ### Navigation
@@ -77,23 +141,6 @@ CSV files must contain either:
 - Saves to `/home/b08x/Workspace/Tools/cheatsheets/`
 - Requires CONTEXT7_API_KEY environment variable
 
-## Caching Strategy
-
-### API Caching (`gem_cache.json`)
-- Persistent cache for RubyGems API responses
-- Automatic cache saving after successful requests
-- Handles cache loading/saving with absolute paths
-
-### LLM Caching (`llm_cache.json`) 
-- SHA256-hashed prompt caching for LLM responses
-- Prevents redundant API calls for identical classification prompts
-- Temperature 0 ensures deterministic results
-
-### Results Caching (`classified_gems.json`)
-- Persists TUI state between sessions
-- Enables incremental classification updates
-- Supports bulk operations without re-processing
-
 ## Error Handling Patterns
 
 ### Robust API Calls
@@ -105,14 +152,6 @@ CSV files must contain either:
 - `RATE_LIMIT_DELAY = 0.1` seconds between RubyGems requests
 - `LLM_RATE_DELAY = 0.2` seconds between LLM requests  
 - `LLM_BATCH_SIZE = 10` for efficient bulk processing
-
-## Development Dependencies
-
-Python packages (install via pip):
-- `requests` - HTTP client for RubyGems/LLM APIs
-- `rich` - Terminal formatting and progress bars
-- `textual` - TUI framework for gem_classifier_tui.py
-- `pyyaml` - YAML output generation
 
 ## Output Structure
 
@@ -139,7 +178,7 @@ Classification results saved as `{category}.yaml` in output directory:
 ## Debugging Tips
 
 ### API Issues
-- Check `gem_cache.json` for cached responses
+- Check `data/cache/gem_cache.json` for cached responses
 - Verify RubyGems API connectivity: `curl "https://rubygems.org/api/v1/gems/{name}.json"`
 - Monitor rate limiting with request delays
 
