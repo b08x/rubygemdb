@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     gem_cache_file: Path = cache_dir / "gem_cache.json"
     llm_cache_file: Path = cache_dir / "llm_cache.json"
     classified_gems_file: Path = data_dir / "classified_gems.json"
+    sqlite_db_file: Path = data_dir / "rubygemdb.sqlite"
     
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

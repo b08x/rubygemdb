@@ -26,22 +26,27 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
 ### Execution Commands
 
 - **Batch Classifier (CLI)**:
-  Processes a CSV of gem names and outputs YAML files categorized by architectural role.
+  Processes a CSV of gem names and stores results in SQLite + YAML files.
   ```bash
-  python gem_classifier.py gems-inventory.csv --out output/
+  rubygemdb gems-inventory.csv --out output/
+  # Or via uv
+  uv run rubygemdb gems-inventory.csv --out output/
   ```
 - **Gem Explorer (TUI)**:
   Launches an interactive interface to browse and manage gem classifications.
   ```bash
-  python gem_classifier_tui.py gems-inventory.csv
+  rubygemdb-tui [optional-inventory.csv]
+  # Or via uv
+  uv run rubygemdb-tui [optional-inventory.csv]
   ```
+  *Note: The CSV is only required for the first run to populate the SQLite database.*
 
 ## Development Conventions
 
 ### Caching Strategy
+- `rubygemdb.sqlite`: Central SQLite database for inventory and classified gems.
 - `gem_cache.json`: Caches raw responses from the RubyGems API.
 - `llm_cache.json`: Caches prompts and responses from the LLM classifier ( Mistral/Devstral).
-- `classified_gems.json`: Persists the state of classified gems specifically for the TUI.
 
 ### Classification Logic
 - **Heuristics First**: Gems are first matched against known patterns (e.g., `active_support` -> `runtime_substrate`).
@@ -50,4 +55,4 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
 
 ### Key Data Files
 - `data/gems-inventory.csv`: The primary input format (columns: `gem,version,category,description,homepage,context7_id`).
-- `data/classified_gems.json`: Central repository of analyzed gems used by the TUI.
+- `data/rubygemdb.sqlite`: Persistent storage for verified inventory and classification results.

@@ -1,6 +1,7 @@
 import argparse
 import yaml
 import os
+import logging
 from collections import defaultdict
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
@@ -9,10 +10,12 @@ from rich.table import Table
 from rubygemdb.services.rubygems import RubyGemsService
 from rubygemdb.services.llm import LLMService
 from rubygemdb.services.classifier import GemClassifier
-from rubygemdb.storage.json_storage import JSONStorage
+from rubygemdb.services.context7 import Context7Service
+from rubygemdb.storage.sqlite_storage import SQLiteStorage
 from rubygemdb.core.config import settings
 
 console = Console()
+logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 def run_cli():
     parser = argparse.ArgumentParser(description="Ruby Gem Classifier")
@@ -24,8 +27,9 @@ def run_cli():
     
     rg_service = RubyGemsService()
     llm_service = LLMService()
+    c7_service = Context7Service()
     classifier = GemClassifier(rg_service, llm_service)
-    storage = JSONStorage()
+    storage = SQLiteStorage(rubygems_service=rg_service, context7_service=c7_service)
 
     inventory = storage.load_inventory(args.csv)
     results = []
