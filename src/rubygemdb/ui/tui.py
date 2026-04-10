@@ -6,8 +6,8 @@ from typing import Optional
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, ScrollableContainer
 from textual.widgets import (
-    Header, Footer, DataTable, RadioSet, RadioButton, Label, 
-    Button, Markdown, ListView, ListItem, Input, TabbedContent, Tab
+    Header, Footer, DataTable, RadioSet, RadioButton, Label,
+    Button, Markdown, ListView, ListItem, Input, TabbedContent, TabPane, RichLog
 )
 from textual.screen import ModalScreen
 from textual import on, work
@@ -19,6 +19,12 @@ from rubygemdb.services.context7 import Context7Service
 from rubygemdb.storage.sqlite_storage import SQLiteStorage
 from rubygemdb.core.config import settings
 from rubygemdb.models.gem import GemEntry
+
+# Tab constants for maintainable ID management
+class TabConstants:
+    EXPLORER = "explorer"
+    EXPORT = "export"
+    DEBUG = "debug"
 
 class GemDetails(Vertical):
     """A widget to display detailed gem information."""
@@ -137,6 +143,7 @@ class ExportTab(Vertical):
     
     def compose(self) -> ComposeResult:
         yield Label("Export Inventory", classes="section-title")
+        yield Label("", id="export-summary", classes="help-text")
         yield Label("Select format and destination for selected gems", classes="help-text")
         with RadioSet(id="export-format"):
             yield RadioButton("Gemfile", id="fmt-gemfile", value=True)
@@ -153,10 +160,28 @@ class ExportTab(Vertical):
         self.query_one("#export-path-input", Input).value = ""
         self.query_one("#export-status-label", Label).update("")
 
+        # Update summary with gem count and preview
+        gem_count = len(gem_names)
+        if gem_count == 0:
+            summary_text = "No gems selected for export"
+        elif gem_count == 1:
+            summary_text = f"Ready to export 1 gem: {gem_names[0]}"
+        elif gem_count <= 5:
+            gems_list = ", ".join(gem_names)
+            summary_text = f"Ready to export {gem_count} gems: {gems_list}"
+        else:
+            preview_gems = ", ".join(gem_names[:3])
+            summary_text = f"Ready to export {gem_count} gems: {preview_gems}, ... and {gem_count-3} more"
+
+        self.query_one("#export-summary", Label).update(summary_text)
+
 class GemApp(App):
     TITLE = "RubyGemDB Explorer"
     BINDINGS = [
         ("q", "quit", "Quit"),
+        ("ctrl+q", "quit", "Quit"),
+        ("ctrl+c", "quit", "Quit"),
+        ("escape", "quit", "Quit"),
         ("r", "refresh", "Refresh"),
         ("space", "toggle_selection", "Toggle"),
         ("a", "select_all", "Select All"),
@@ -254,12 +279,27 @@ class GemApp(App):
         width: 100%;
         height: 100%;
     }
-    #tab-explorer {
+    #explorer {
         width: 100%;
     }
-    #tab-export {
+    #export {
         width: 100%;
         padding: 1 2;
+    }
+    #debug {
+        width: 100%;
+        padding: 1 2;
+    }
+    DataTable {
+        height: 1fr;
+        width: 100%;
+    }
+    #gems_table {
+        height: 1fr;
+        width: 100%;
+    }
+    #main-area {
+        height: 1fr;
     }
     """
 
@@ -298,11 +338,14 @@ class GemApp(App):
 
             with Vertical(id="main-area"):
                 with TabbedContent(id="main-tabs"):
-                    with Tab("Explorer", id="tab-explorer"):
+                    with TabPane("Explorer", id=TabConstants.EXPLORER):
                         self.table = DataTable(id="gems_table")
                         yield self.table
-                    with Tab("Export", id="tab-export"):
+                    with TabPane("Export", id=TabConstants.EXPORT):
                         yield ExportTab(id="export-tab")
+                    with TabPane("Debug", id=TabConstants.DEBUG):
+                        self.debug_log = RichLog(id="debug-log", auto_scroll=True)
+                        yield self.debug_log
             
             yield GemDetails(id="details-sidebar")
         yield Footer()
@@ -311,42 +354,108 @@ class GemApp(App):
         self.table.cursor_type = "row"
         self.table.zebra_stripes = True
         self.table.add_columns("Name", "Category", "Source URI", "Context7 ID", "Description")
-        
+
+        # Initialize debug logging
+        self.log_info("RubyGemDB TUI initialized")
+        self.log_debug(f"DataTable setup - cursor_type: {self.table.cursor_type}")
+
         self.load_data()
+
+        # Ensure table can receive focus for navigation
+        self.table.can_focus = True
+        self.table.focus()
+        self.log_debug("Table focus set after initialization")
+
+    # Error handling and logging infrastructure
+    def handle_error(self, message: str, exception: Exception = None):
+        """Centralized error handling with debug logging and user notification."""
+        import traceback
+
+        error_msg = f"ERROR: {message}"
+        if exception:
+            error_msg += f"\nException: {exception}"
+            stack_trace = traceback.format_exc()
+            self.log_error(f"{error_msg}\n{stack_trace}")
+        else:
+            self.log_error(error_msg)
+
+        # Show user-friendly notification
+        self.notify(message, severity="error")
+
+    def log_debug(self, message: str):
+        """Log debug message to debug tab."""
+        if hasattr(self, 'debug_log'):
+            self.debug_log.write(f"[dim]DEBUG[/dim]: {message}")
+
+    def log_info(self, message: str):
+        """Log info message to debug tab."""
+        if hasattr(self, 'debug_log'):
+            self.debug_log.write(f"[blue]INFO[/blue]: {message}")
+
+    def log_error(self, message: str):
+        """Log error message to debug tab."""
+        if hasattr(self, 'debug_log'):
+            self.debug_log.write(f"[red]ERROR[/red]: {message}")
+
+    def log_warning(self, message: str):
+        """Log warning message to debug tab."""
+        if hasattr(self, 'debug_log'):
+            self.debug_log.write(f"[yellow]WARNING[/yellow]: {message}")
 
     @work(thread=True)
     def load_data(self) -> None:
-        if self.inventory_path:
-            self.notify(f"Populating inventory from {self.inventory_path}...")
-            self.storage.load_inventory(self.inventory_path)
-            
-        self.all_gems = self.storage.load_classified_gems()
-        self.call_from_thread(self.update_table)
+        try:
+            if self.inventory_path:
+                self.call_from_thread(self.notify, f"Populating inventory from {self.inventory_path}...")
+                self.storage.load_inventory(self.inventory_path)
+
+            self.all_gems = self.storage.load_classified_gems()
+            self.call_from_thread(self.log_info, f"Loaded {len(self.all_gems)} gems from storage")
+            self.call_from_thread(self.update_table)
+        except Exception as e:
+            self.call_from_thread(self.handle_error, f"Failed to load gem data: {e}", e)
 
     def update_table(self):
-        cls_set = self.query_one("#class_filter", RadioSet)
-        active_id = cls_set.pressed_button.id if cls_set.pressed_button else "cls_any"
+        try:
+            cls_set = self.query_one("#class_filter", RadioSet)
+            active_id = cls_set.pressed_button.id if cls_set.pressed_button else "cls_any"
 
-        filtered = []
-        for g in self.all_gems:
-            if active_id != "cls_any":
-                target_cls = active_id.replace("cls_", "")
-                if g.classification.primary != target_cls:
-                    continue
-            filtered.append(g)
+            filtered = []
+            for g in self.all_gems:
+                if active_id != "cls_any":
+                    target_cls = active_id.replace("cls_", "")
+                    if g.classification.primary != target_cls:
+                        continue
+                filtered.append(g)
 
-        self.filtered_gems = filtered
-        self.table.clear()
-        for index, gem in enumerate(filtered):
-            desc = (gem.description[:60] + "...") if gem.description and len(gem.description) > 60 else (gem.description or "-")
-            self.table.add_row(
-                gem.name, 
-                gem.classification.primary,
-                gem.source_code_uri or "-",
-                gem.context7_id or "-",
-                desc,
-                key=str(index)
-            )
+            self.filtered_gems = filtered
+            self.table.clear()
+
+            self.log_debug(f"Updating table with {len(filtered)} gems (filter: {active_id})")
+
+            for index, gem in enumerate(filtered):
+                desc = (gem.description[:60] + "...") if gem.description and len(gem.description) > 60 else (gem.description or "-")
+                self.table.add_row(
+                    gem.name,
+                    gem.classification.primary,
+                    gem.source_code_uri or "-",
+                    gem.context7_id or "-",
+                    desc,
+                    key=str(index)
+                )
+
+            # Ensure table has focus and cursor for navigation
+            self.table.focus()
+            self.log_debug(f"Table updated successfully with {len(filtered)} rows, row count: {self.table.row_count}")
+
+            # Log table state for debugging
+            if self.table.row_count > 0:
+                self.log_debug(f"Table cursor type: {self.table.cursor_type}, has focus: {self.table.has_focus}")
+            else:
+                self.log_error(f"Table has no rows after adding {len(filtered)} gems!")
+
+        except Exception as e:
+            self.handle_error(f"Failed to update table: {e}", e)
 
     @on(RadioSet.Changed)
     def on_filter_changed(self, event):
@@ -355,32 +464,52 @@ class GemApp(App):
     @on(DataTable.RowSelected)
     def on_row_selected(self, event: DataTable.RowSelected):
         try:
-            row_key_value = event.row_key.value
+            row_key_value = event.row_key.value if hasattr(event.row_key, 'value') else str(event.row_key)
             if row_key_value is None:
+                self.log_debug("RowSelected event with None row_key")
                 return
             index = int(row_key_value)
+            if index >= len(self.filtered_gems):
+                self.log_error(f"RowSelected index {index} out of range (max: {len(self.filtered_gems)})")
+                return
             gem = self.filtered_gems[index]
             sidebar = self.query_one("#details-sidebar", GemDetails)
             sidebar.update_gem(gem)
+            self.log_debug(f"Selected gem for details: {gem.name}")
             sidebar.display = True
         except Exception as e:
-            self.notify(f"Error loading details: {e}", severity="error")
+            self.handle_error(f"Error loading gem details: {e}", e)
 
     # Multi-select actions
     def action_toggle_selection(self):
-        if self.table.cursor_row is not None:
-            cursor_row_value = self.table.cursor_row.value
-            if cursor_row_value is None:
+        try:
+            # Use coordinate_to_cell_key to safely get the current row
+            if self.table.cursor_coordinate is None:
+                self.log_debug("No cursor coordinate available for toggle selection")
                 return
-            index = int(cursor_row_value)
+
+            row_key, _ = self.table.coordinate_to_cell_key(self.table.cursor_coordinate)
+            if row_key is None:
+                self.log_debug("No valid row key at cursor position")
+                return
+
+            index = int(row_key.value) if hasattr(row_key, 'value') else int(str(row_key))
+            if index >= len(self.filtered_gems):
+                self.log_error(f"Row index {index} out of range (max: {len(self.filtered_gems)})")
+                return
+
             gem = self.filtered_gems[index]
             with self._selection_lock:
                 if gem.name in self._selected_gems:
                     self._selected_gems.discard(gem.name)
+                    self.log_debug(f"Deselected gem: {gem.name}")
                 else:
                     self._selected_gems.add(gem.name)
+                    self.log_debug(f"Selected gem: {gem.name}")
                 count = len(self._selected_gems)
             self._update_selection_status(count)
+        except Exception as e:
+            self.handle_error(f"Toggle selection failed: {e}", e)
 
     def action_select_all(self):
         with self._selection_lock:
@@ -455,14 +584,23 @@ class GemApp(App):
             selected = list(self._selected_gems)
         
         tabs = self.query_one("#main-tabs", TabbedContent)
-        tabs.active = "tab-export"
+
+        # Defense-in-depth: Log tab switch for debugging future issues
+        self.log_debug(f"Switching to export tab: {TabConstants.EXPORT}")
+        tabs.active = TabConstants.EXPORT
         export_tab = self.query_one("#export-tab", ExportTab)
         export_tab.set_gems(selected)
 
     def action_switch_tab(self):
         tabs = self.query_one("#main-tabs", TabbedContent)
         current = tabs.active
-        tabs.active = "tab-explorer" if current == "tab-export" else "tab-export"
+        # Cycle through explorer → export → debug → explorer...
+        if current == TabConstants.EXPLORER:
+            tabs.active = TabConstants.EXPORT
+        elif current == TabConstants.EXPORT:
+            tabs.active = TabConstants.DEBUG
+        else:
+            tabs.active = TabConstants.EXPLORER
 
     @on(Button.Pressed, "#do-export-btn")
     def on_export_pressed(self):
@@ -677,9 +815,24 @@ class GemApp(App):
         except Exception as e:
             self.call_from_thread(self.notify, f"Failed to generate cheatsheet: {e}", severity="error")
 
+    def action_refresh(self):
+        """Refresh the gem data from storage."""
+        try:
+            self.log_info("Refreshing gem data...")
+            self.load_data()
+        except Exception as e:
+            self.handle_error(f"Failed to refresh data: {e}", e)
+
     def action_quit(self):
-        self._bulk_update_aborted = True
-        super().action_quit()
+        """Gracefully quit the application."""
+        try:
+            self.log_info("User requested quit - shutting down gracefully")
+            self._bulk_update_aborted = True
+            self.exit()
+        except Exception as e:
+            self.log_error(f"Error during quit: {e}")
+            # Force exit if there's an issue
+            self.exit(1)
 
 def run_tui():
     parser = argparse.ArgumentParser(description="RubyGemDB Explorer TUI")

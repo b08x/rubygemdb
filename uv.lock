@@ -457,7 +457,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "requests", specifier = ">=2.33.1" },
     { name = "rich", specifier = ">=14.3.3" },
-    { name = "textual", specifier = ">=8.2.3" },
+    { name = "textual", specifier = "==8.2.3" },
 ]
 
 [package.metadata.requires-dev]
