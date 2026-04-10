@@ -6,9 +6,9 @@ class Context7Service:
     def __init__(self):
         self.api_key = settings.context7_api_key
 
-    def verify_library(self, gem_name: str) -> Optional[str]:
+    def search_libraries(self, gem_name: str) -> list:
         if not self.api_key:
-            return None
+            return []
         
         search_url = f"https://context7.com/api/v2/libs/search?libraryName={gem_name}&query=ruby+gem+{gem_name}+documentation"
         headers = {"x-api-key": self.api_key}
@@ -18,11 +18,16 @@ class Context7Service:
             if r.status_code == 200:
                 data = r.json()
                 results = data if isinstance(data, list) else data.get("results", [])
-                if results and len(results) > 0:
-                    # Return the libraryId or id of the first match
-                    return results[0].get("libraryId") or results[0].get("id")
+                return results
         except Exception:
             pass
+        return []
+
+    def verify_library(self, gem_name: str) -> Optional[str]:
+        results = self.search_libraries(gem_name)
+        if results and len(results) > 0:
+            # Return the libraryId or id of the first match
+            return results[0].get("libraryId") or results[0].get("id")
         return None
 
     def query_context(self, lib_id: str, query: str) -> Optional[str]:

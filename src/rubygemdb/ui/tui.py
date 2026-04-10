@@ -7,6 +7,7 @@ from typing import List, Optional
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, ScrollableContainer
 from textual.widgets import Header, Footer, DataTable, RadioSet, RadioButton, Label, Button, Markdown, ListView, ListItem
+from textual.screen import ModalScreen
 from textual import on, work
 
 from rubygemdb.services.rubygems import RubyGemsService
@@ -24,6 +25,7 @@ class GemDetails(Vertical):
         with ScrollableContainer(id="details-container"):
             yield Label("", id="details-name", classes="details-title")
             yield Label("", id="details-classification")
+            yield Label("", id="details-metadata", classes="section-content")
             yield Label("", id="details-risks", classes="section-content")
             yield Markdown("", id="details-description")
             
@@ -31,7 +33,9 @@ class GemDetails(Vertical):
             yield Label("Select a dependency to fetch its cheatsheet.", classes="help-text")
             yield ListView(id="details-deps-list")
             
-            yield Button("Fetch Context7 Cheatsheet", id="fetch-cheatsheet-btn", variant="primary")
+            with Horizontal(id="action-buttons"):
+                yield Button("Fetch Cheatsheet", id="fetch-cheatsheet-btn", variant="primary")
+                yield Button("Update Context7 ID", id="lookup-c7-btn", variant="warning")
             yield Button("Close", id="close-details-btn", variant="error")
 
     def update_gem(self, gem: GemEntry):
@@ -43,16 +47,15 @@ class GemDetails(Vertical):
             f"Category: {gem.classification.primary} (Conf: {gem.classification.confidence:.2f})"
         )
         
+        metadata_text = f"Source: [blue]{gem.source_code_uri or 'N/A'}[/blue]\n"
+        metadata_text += f"Context7 ID: [green]{gem.context7_id or 'Missing'}[/green]"
+        self.query_one("#details-metadata", Label).update(metadata_text)
+        
         risk_text = (
             f"Invasiveness: {gem.risks.invasiveness}/5\n"
             f"Coupling: {gem.risks.coupling}/4\n"
             f"Leak: {gem.risks.abstraction_leak}"
         )
-        if gem.source_code_uri:
-            risk_text += f"\n[blue]Source: {gem.source_code_uri}[/blue]"
-        elif gem.homepage:
-            risk_text += f"\n[blue]Homepage: {gem.homepage}[/blue]"
-
         self.query_one("#details-risks", Label).update(risk_text)
         
         desc = gem.description or "No description available."
@@ -74,6 +77,36 @@ class GemDetails(Vertical):
     def update_button_label(self, name: str):
         self.target_name = name
         self.query_one("#fetch-cheatsheet-btn", Button).label = f"Fetch Context7: {name}"
+
+from textual.screen import ModalScreen
+
+class C7SelectionScreen(ModalScreen[str]):
+    """A screen to select a Context7 library ID from a list of results."""
+    def __init__(self, results: list):
+        super().__init__()
+        self.results = results
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="selection-dialog"):
+            yield Label("Select the correct Context7 Library ID:", classes="section-title")
+            list_items = []
+            for r in self.results:
+                lib_id = r.get("libraryId") or r.get("id")
+                desc = r.get("description", "No description")
+                name = r.get("name", "Unknown")
+                list_items.append(ListItem(Label(f"[b]{lib_id}[/b] - {name}\n[i]{desc[:100]}...[/i]"), id=lib_id))
+            
+            yield ListView(*list_items, id="results-list")
+            yield Button("Cancel", id="cancel-btn", variant="error")
+
+    @on(ListView.Selected)
+    def on_selected(self, event: ListView.Selected):
+        if event.item and event.item.id:
+            self.dismiss(event.item.id)
+
+    @on(Button.Pressed, "#cancel-btn")
+    def on_cancel(self):
+        self.dismiss(None)
 
 class GemApp(App):
     TITLE = "RubyGemDB Explorer"
@@ -104,7 +137,7 @@ class GemApp(App):
         margin-bottom: 1;
     }
     #details-sidebar {
-        width: 45;
+        width: 50;
         padding: 1 2;
         background: $surface;
         border-left: vkey $background;
@@ -121,17 +154,34 @@ class GemApp(App):
     }
     #details-deps-list {
         height: auto;
-        max-height: 15;
+        max-height: 10;
         margin-bottom: 1;
         border: solid $background;
     }
     #fetch-cheatsheet-btn {
         margin-top: 1;
-        width: 100%;
+        width: 50%;
+    }
+    #lookup-c7-btn {
+        margin-top: 1;
+        width: 50%;
     }
     #close-details-btn {
         margin-top: 1;
         width: 100%;
+    }
+    #selection-dialog {
+        padding: 2;
+        background: $surface;
+        border: thick $accent;
+        width: 80%;
+        height: 80%;
+        align: center middle;
+    }
+    #results-list {
+        margin: 1 0;
+        border: solid $background;
+        height: 1fr;
     }
     """
 
@@ -173,7 +223,7 @@ class GemApp(App):
     def on_mount(self) -> None:
         self.table.cursor_type = "row"
         self.table.zebra_stripes = True
-        self.table.add_columns("Name", "Category", "Confidence", "Risks")
+        self.table.add_columns("Name", "Category", "Confidence", "Risks", "Context7 ID", "Source")
         
         self.load_data()
 
@@ -202,11 +252,15 @@ class GemApp(App):
         self.table.clear()
         for index, gem in enumerate(filtered):
             risk_summary = f"I:{gem.risks.invasiveness} C:{gem.risks.coupling}"
+            c7_id = gem.context7_id or "-"
+            source = gem.source_code_uri or "-"
             self.table.add_row(
                 gem.name, 
                 gem.classification.primary, 
                 f"{gem.classification.confidence:.2f}",
                 risk_summary,
+                c7_id,
+                source,
                 key=str(index)
             )
 
@@ -244,6 +298,37 @@ class GemApp(App):
         sidebar = self.query_one("#details-sidebar", GemDetails)
         target_name = sidebar.target_name
         self.fetch_cheatsheet(target_name)
+
+    @on(Button.Pressed, "#lookup-c7-btn")
+    def trigger_lookup_c7(self) -> None:
+        sidebar = self.query_one("#details-sidebar", GemDetails)
+        gem_name = sidebar.gem.name
+        self.lookup_c7_id(gem_name)
+
+    @work(thread=True)
+    def lookup_c7_id(self, gem_name: str) -> None:
+        self.call_from_thread(self.notify, f"Searching Context7 for {gem_name}...")
+        results = self.c7_service.search_libraries(gem_name)
+        
+        if not results:
+            self.call_from_thread(self.notify, f"No Context7 results for {gem_name}", severity="warning")
+            return
+
+        def handle_selection(selected_id: Optional[str]):
+            if selected_id:
+                self.storage.update_gem_metadata(gem_name, context7_id=selected_id)
+                self.notify(f"Updated {gem_name} with Context7 ID: {selected_id}")
+                # Refresh data and update sidebar
+                self.load_data()
+                # Find the updated gem and refresh sidebar
+                for g in self.all_gems:
+                    if g.name == gem_name:
+                        g.context7_id = selected_id
+                        sidebar = self.query_one("#details-sidebar", GemDetails)
+                        sidebar.update_gem(g)
+                        break
+
+        self.call_from_thread(self.push_screen, C7SelectionScreen(results), handle_selection)
 
     @work(thread=True)
     def fetch_cheatsheet(self, target_name: str) -> None:

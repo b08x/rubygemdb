@@ -137,6 +137,17 @@ class SQLiteStorage(StorageBase):
                 ))
             conn.commit()
 
+    def update_gem_metadata(self, name: str, context7_id: Optional[str] = None, source_code_uri: Optional[str] = None):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            if context7_id is not None and source_code_uri is not None:
+                cursor.execute("UPDATE inventory SET context7_id = ?, source_code_uri = ? WHERE name = ?", (context7_id, source_code_uri, name))
+            elif context7_id is not None:
+                cursor.execute("UPDATE inventory SET context7_id = ? WHERE name = ?", (context7_id, name))
+            elif source_code_uri is not None:
+                cursor.execute("UPDATE inventory SET source_code_uri = ? WHERE name = ?", (source_code_uri, name))
+            conn.commit()
+
     def load_classified_gems(self) -> List[GemEntry]:
         gems = []
         with sqlite3.connect(self.db_path) as conn:
