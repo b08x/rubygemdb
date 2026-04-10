@@ -1,3 +1,5 @@
+.venv/
+
 .codemap/
 **__pycache__**
 
