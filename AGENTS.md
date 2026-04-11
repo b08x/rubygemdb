@@ -9,15 +9,19 @@ Guide for AI agents working with the RubyGemDB codebase.
 RubyGemDB is a Ruby gem analysis and classification tool that categorizes gems into architectural patterns using heuristic analysis and LLM fallback for ambiguous cases.
 
 ### Architectural Categories
-8 standardized architectural buckets:
-1. `runtime_substrate` - Core Ruby utility libraries
-2. `framework_integration` - Rails/Sidekiq ecosystem tools
-3. `boundary_interface` - External service connectors
-4. `application_capability` - Domain-specific business logic
-5. `policy_enforcement` - Auth/authorization tools
-6. `observability` - Monitoring/logging tools
-7. `developer_experience` - Development/testing tooling
-8. `build_delivery` - Build/packaging utilities
+12 standardized architectural categories:
+1. `runtime_spine` — Boot + Wiring (Rails core, frameworks, core Ruby exts)
+2. `cli_terminal_ui` — CLI & Terminal UI Layer
+3. `storage_persistence` — Storage & Persistence (ORMs, DB adapters)
+4. `async_networking_orchestration` — Async, Networking & Orchestration
+5. `ai_nlp` — AI / NLP Layer
+6. `data_processing` — Data Processing (HTML/XML, CSV, PDF, scraping)
+7. `retrieval_similarity_fuzzy` — Retrieval, Similarity & Fuzzy Matching
+8. `algorithms_knowledge_structures` — Algorithms / Knowledge Structures
+9. `validation_types` — Validation & Types
+10. `parsing_encoding` — Parsing / Encoding Boundaries
+11. `debugging_introspection` — Debugging & Introspection
+12. `mcp_tooling` — MCP Tooling
 
 ---
 
@@ -117,12 +121,18 @@ export CONTEXT7_API_KEY="your_context7_key"
 
 ### Heuristic Classification
 First-pass classification based on gem name patterns and dependencies:
-- `runtime_substrate`: `active_support`, `dry-*`, `core_ext`
-- `framework_integration`: Rails/Engine/Sidekiq dependencies
-- `boundary_interface`: HTTP clients, AWS/GCP/Stripe SDKs
-- `policy_enforcement`: Auth/JWT/Pundit tools
-- `observability`: Sentry/Datadog/NewRelic clients
-- `developer_experience`: RSpec/Rubocop/Pry/TTY tools
+- `runtime_spine`: `rails`, `active_support`, `bundler`, `dry-*` (generic)
+- `cli_terminal_ui`: `thor`, `gli`, `tty-*`, `commander`, `clamp`
+- `storage_persistence`: `activerecord`, `sequel`, `mongoid`, `sqlite`
+- `async_networking_orchestration`: `sidekiq`, `async`, `faraday`, `grpc`, `kafka`
+- `ai_nlp`: `openai`, `ruby-openai`, `llm`, `nlp`, `langchain`
+- `data_processing`: `nokogiri`, `roo`, `prawn`, `mechanize`
+- `retrieval_similarity_fuzzy`: `elasticsearch`, `searchkick`, `fuzzy`
+- `algorithms_knowledge_structures`: `algorithm`, `rbtree`, `graph`, `trie`
+- `validation_types`: `dry-validation`, `dry-types`, `activemodel`, `json-schema`
+- `parsing_encoding`: `json`, `yajl`, `oj`, `msgpack`, `xml`
+- `debugging_introspection`: `pry`, `byebug`, `sentry`, `datadog`, `newrelic`
+- `mcp_tooling`: `mcp`, `model-context-protocol`
 
 ### LLM Fallback
 Triggers when heuristic confidence < 0.7: Uses Devstral API to refine classification with 0.6 minimum confidence threshold to override heuristics.
@@ -163,7 +173,7 @@ Per-category YAML files contain structured gem classification data:
 ```yaml
 - name: gem_name
   classification:
-    primary: category_name
+    primary: category_name  # one of the 12 new slugs
     confidence: 0.85
   role:
     description: "Gem metadata description"

@@ -14,7 +14,7 @@ from textual import on, work
 
 from rubygemdb.services.rubygems import RubyGemsService
 from rubygemdb.services.llm import LLMService
-from rubygemdb.services.classifier import GemClassifier
+from rubygemdb.services.classifier import GemClassifier, VALID_CATEGORIES
 from rubygemdb.services.context7 import Context7Service
 from rubygemdb.storage.sqlite_storage import SQLiteStorage
 from rubygemdb.core.config import settings
@@ -416,11 +416,7 @@ class GemApp(App):
         self._bulk_update_aborted = False
         self.table: DataTable = None  # Type annotation for mypy
         
-        self.classifications = [
-            "runtime_substrate", "framework_integration", "boundary_interface",
-            "application_capability", "policy_enforcement", "observability",
-            "developer_experience", "build_delivery"
-        ]
+        self.classifications = list(VALID_CATEGORIES)
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)

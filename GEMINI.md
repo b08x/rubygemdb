@@ -4,7 +4,7 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
 
 ## Project Overview
 
-- **Architectural Categories**: `runtime_substrate`, `framework_integration`, `boundary_interface`, `application_capability`, `policy_enforcement`, `observability`, `developer_experience`, `build_delivery`.
+- **Architectural Categories**: `runtime_spine`, `cli_terminal_ui`, `storage_persistence`, `async_networking_orchestration`, `ai_nlp`, `data_processing`, `retrieval_similarity_fuzzy`, `algorithms_knowledge_structures`, `validation_types`, `parsing_encoding`, `debugging_introspection`, `mcp_tooling`.
 - **Modular Engine**: Structured under `src/rubygemdb/` for scalability:
   - `core/config.py`: Centralized settings using `pydantic-settings` and `.env` support.
   - `models/gem.py`: Robust data models for gem entries, classifications, and risks.
@@ -53,7 +53,7 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
 - `classified_gems.json`: A unified JSON export of all classified gems for TUI consumption.
 
 ### Classification Logic
-- **Heuristics First**: Gems are first matched against known patterns (e.g., `active_support` -> `runtime_substrate`).
+- **Heuristics First**: Gems are first matched against known patterns (e.g., `active_support` -> `runtime_spine`).
 - **LLM Fallback**: If the heuristic confidence is below 0.7, the tool calls the LLM (Mistral/Devstral) for a more nuanced analysis.
 - **Confidence Threshold**: LLM results require a confidence > 0.6 to override initial heuristics.
 - **Metadata Update**: Users can manually refine Context7 IDs and Source URIs directly from the TUI, which updates the SQLite storage.

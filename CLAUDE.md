@@ -9,7 +9,7 @@ RubyGemDB is a Ruby gem analysis and classification tool that categorizes gems i
 ## Architecture
 
 ### Core Classification System
-- **8 Architectural Categories**: runtime_substrate, framework_integration, boundary_interface, application_capability, policy_enforcement, observability, developer_experience, build_delivery
+- **12 Architectural Categories**: runtime_spine, cli_terminal_ui, storage_persistence, async_networking_orchestration, ai_nlp, data_processing, retrieval_similarity_fuzzy, algorithms_knowledge_structures, validation_types, parsing_encoding, debugging_introspection, mcp_tooling
 - **Heuristic Analysis**: Pattern-based classification using gem names, dependencies, and metadata
 - **LLM Fallback**: Devstral LLM integration for ambiguous cases (confidence < 0.7)
 - **Confidence Scoring**: Risk assessment based on invasiveness, coupling, and abstraction leak potential
@@ -99,12 +99,18 @@ uv run rubygemdb data/gems-inventory.csv --out test-output/
 ## Classification Logic
 
 ### Heuristic Patterns
-- **Runtime Substrate**: Core libraries (active_support, dry-*, core_ext)
-- **Framework Integration**: Rails ecosystem (railties, sidekiq, engines)
-- **Boundary Interface**: External service connectors (http, faraday, aws, stripe)
-- **Policy Enforcement**: Authentication/authorization (pundit, jwt, auth)
-- **Observability**: Monitoring/logging (sentry, datadog, newrelic)
-- **Developer Experience**: Development tools (rspec, rubocop, pry, tty-)
+- **Runtime Spine**: Boot + wiring (rails, active_support, bundler, dry-*)
+- **CLI/Terminal UI**: CLI frameworks (thor, gli, tty-*, commander, clamp)
+- **Storage/Persistence**: ORMs, DB adapters (activerecord, sequel, mongoid, sqlite)
+- **Async/Networking**: HTTP, messaging, jobs (sidekiq, async, faraday, grpc, kafka)
+- **AI/NLP**: AI/ML, LLMs (openai, ruby-openai, llm, nlp, langchain)
+- **Data Processing**: Parsing, scraping (nokogiri, roo, prawn, mechanize)
+- **Retrieval/Similarity**: Search, fuzzy (elasticsearch, searchkick, fuzzy)
+- **Algorithms/Knowledge**: Data structures (algorithm, rbtree, graph, trie)
+- **Validation/Types**: Validation, type systems (dry-validation, dry-types, activemodel)
+- **Parsing/Encoding**: Serializers (json, yajl, oj, msgpack, xml)
+- **Debugging/Introspection**: Debuggers, loggers, profilers (pry, byebug, sentry, datadog)
+- **MCP Tooling**: Model Context Protocol tools (mcp)
 
 ### Confidence Thresholds
 - High confidence (>0.7): Use heuristic classification

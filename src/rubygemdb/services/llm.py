@@ -22,16 +22,24 @@ class LLMService:
 
     def build_prompt(self, name: str, info: dict, deps: list) -> str:
         description = info.get('info', '') if info else ''
+        categories = [
+            "runtime_spine",
+            "cli_terminal_ui",
+            "storage_persistence",
+            "async_networking_orchestration",
+            "ai_nlp",
+            "data_processing",
+            "retrieval_similarity_fuzzy",
+            "algorithms_knowledge_structures",
+            "validation_types",
+            "parsing_encoding",
+            "debugging_introspection",
+            "mcp_tooling",
+        ]
+        cat_list = "\n".join(f"- {c}" for c in categories)
         return f"""
 Classify this Ruby gem into ONE category:
-- runtime_substrate
-- framework_integration
-- boundary_interface
-- application_capability
-- policy_enforcement
-- observability
-- developer_experience
-- build_delivery
+{cat_list}
 
 Gem:
 {name}
