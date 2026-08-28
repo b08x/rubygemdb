@@ -148,6 +148,43 @@ class SQLiteStorage(StorageBase):
                 cursor.execute("UPDATE inventory SET source_code_uri = ? WHERE name = ?", (source_code_uri, name))
             conn.commit()
 
+    def delete_gem(self, name: str):
+        """Remove a gem from both inventory and classified_gems tables."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM classified_gems WHERE name = ?", (name,))
+            cursor.execute("DELETE FROM inventory WHERE name = ?", (name,))
+            conn.commit()
+            logger.info(f"Deleted gem {name} from storage")
+
+    def update_gem_classification(self, name: str, primary_category: str):
+        """Manually update the primary classification of a gem."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            # Fetch existing classification to preserve other fields
+            cursor.execute("SELECT classification FROM classified_gems WHERE name = ?", (name,))
+            row = cursor.fetchone()
+            if row:
+                cls_data = json.loads(row[0])
+                cls_data["primary"] = primary_category
+                # Reset confidence to 1.0 for manual override
+                cls_data["confidence"] = 1.0
+                cursor.execute("UPDATE classified_gems SET classification = ? WHERE name = ?", (json.dumps(cls_data), name))
+                conn.commit()
+                logger.info(f"Updated classification for {name} to {primary_category}")
+
+    def add_gem_to_inventory(self, name: str):
+        """Add a gem name to inventory for subsequent classification."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            # If it already exists in inventory but not classified, we don't need to do much.
+            # If it doesn't exist, insert it.
+            cursor.execute("INSERT OR IGNORE INTO inventory (name, verified) VALUES (?, 0)", (name,))
+            # Force verified=0 if we want it to be re-checked or processed if it was somehow stuck
+            cursor.execute("UPDATE inventory SET verified = 0 WHERE name = ? AND name NOT IN (SELECT name FROM classified_gems)", (name,))
+            conn.commit()
+            logger.info(f"Added gem {name} to inventory")
+
     def load_classified_gems(self) -> List[GemEntry]:
         gems = []
         with sqlite3.connect(self.db_path) as conn:

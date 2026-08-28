@@ -45,6 +45,11 @@ class GemDetails(Vertical):
                 yield Button("Fetch Cheatsheet", id="fetch-cheatsheet-btn", variant="primary")
                 yield Button("Update Context7 ID", id="lookup-c7-btn", variant="warning")
             
+            yield Label("Gem Management", classes="section-title")
+            with Horizontal(id="management-buttons"):
+                yield Button("Edit Category", id="edit-gem-btn", variant="primary")
+                yield Button("Remove Gem", id="remove-gem-btn", variant="error")
+            
             yield Label("Bulk Actions", classes="section-title")
             yield Button("Fetch Combined Cheatsheet", id="fetch-combined-btn", variant="primary")
             yield Button("Close", id="close-details-btn", variant="error")
@@ -137,6 +142,88 @@ class C7SelectionScreen(ModalScreen[str]):
     @on(Button.Pressed, "#cancel-btn")
     def on_cancel(self):
         self.dismiss(None)
+
+class AddGemScreen(ModalScreen[str]):
+    """A screen to manually add a gem by name."""
+    def compose(self) -> ComposeResult:
+        with Vertical(id="add-gem-dialog", classes="modal-dialog"):
+            yield Label("Add New Gem", classes="section-title")
+            yield Label("Enter the name of the Ruby gem to add:", classes="help-text")
+            yield Input(placeholder="gem-name", id="gem-name-input")
+            with Horizontal(id="dialog-buttons"):
+                yield Button("Add Gem", id="add-btn", variant="primary")
+                yield Button("Cancel", id="cancel-btn", variant="error")
+
+    @on(Button.Pressed, "#add-btn")
+    def on_add(self):
+        name = self.query_one("#gem-name-input", Input).value.strip()
+        if name:
+            self.dismiss(name)
+
+    @on(Button.Pressed, "#cancel-btn")
+    def on_cancel(self):
+        self.dismiss(None)
+
+class EditGemScreen(ModalScreen[tuple]):
+    """A screen to manually edit a gem's metadata."""
+    def __init__(self, gem: GemEntry):
+        super().__init__()
+        self.gem = gem
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="edit-gem-dialog", classes="modal-dialog"):
+            yield Label(f"Edit Gem: [b]{self.gem.name}[/b]", classes="section-title")
+            
+            yield Label("Primary Category", classes="section-title")
+            with RadioSet(id="category-selection"):
+                for cat in VALID_CATEGORIES:
+                    yield RadioButton(cat.replace("_", " ").title(), id=f"edit_cls_{cat}", value=(cat == self.gem.classification.primary))
+            
+            yield Label("Source Code URI", classes="section-title")
+            yield Input(value=self.gem.source_code_uri or "", placeholder="https://github.com/...", id="source-uri-input")
+
+            yield Label("Context7 ID", classes="section-title")
+            yield Input(value=self.gem.context7_id or "", placeholder="/org/repo", id="c7-id-input")
+            
+            with Horizontal(id="dialog-buttons"):
+                yield Button("Save Changes", id="save-btn", variant="primary")
+                yield Button("Cancel", id="cancel-btn", variant="error")
+
+    @on(Button.Pressed, "#save-btn")
+    def on_save(self):
+        rs = self.query_one("#category-selection", RadioSet)
+        selected_cat = rs.pressed_button.id.replace("edit_cls_", "") if rs.pressed_button else self.gem.classification.primary
+        source_uri = self.query_one("#source-uri-input", Input).value.strip() or None
+        c7_id = self.query_one("#c7-id-input", Input).value.strip() or None
+        self.dismiss((selected_cat, source_uri, c7_id))
+
+    @on(Button.Pressed, "#cancel-btn")
+    def on_cancel(self):
+        self.dismiss(None)
+
+class ConfirmDeleteScreen(ModalScreen[bool]):
+    """A screen to confirm gem deletion."""
+    def __init__(self, gem_name: str):
+        super().__init__()
+        self.gem_name = gem_name
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-delete-dialog", classes="modal-dialog"):
+            yield Label("Confirm Deletion", classes="section-title")
+            yield Label(f"Are you sure you want to remove [b]{self.gem_name}[/b] from the database?", classes="help-text")
+            yield Label("This will remove both inventory metadata and classification results.", classes="help-text")
+            
+            with Horizontal(id="dialog-buttons"):
+                yield Button("Delete Forever", id="delete-btn", variant="error")
+                yield Button("Keep Gem", id="cancel-btn", variant="primary")
+
+    @on(Button.Pressed, "#delete-btn")
+    def on_delete(self):
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#cancel-btn")
+    def on_cancel(self):
+        self.dismiss(False)
 
 class ExportTab(ScrollableContainer):
     """Export tab with format selection and path input."""
@@ -264,7 +351,10 @@ class GemApp(App):
         ("a", "select_all", "Select All"),
         ("n", "clear_selection", "Clear"),
         ("u", "bulk_update_context7", "Update C7"),
-        ("e", "export_selected", "Export"),
+        ("x", "export_selected", "Export"),
+        ("e", "edit_gem", "Edit"),
+        ("d", "delete_gem", "Delete"),
+        ("plus", "add_gem", "Add"),
         ("t", "switch_tab", "Switch Tab"),
     ]
 
@@ -323,9 +413,28 @@ class GemApp(App):
         margin-top: 1;
         width: 100%;
     }
+    #management-buttons {
+        height: auto;
+        margin-top: 1;
+        margin-bottom: 1;
+    }
+    #edit-gem-btn {
+        width: 50%;
+    }
+    #remove-gem-btn {
+        width: 50%;
+    }
     #fetch-combined-btn {
         margin-top: 1;
         width: 100%;
+    }
+    .modal-dialog {
+        padding: 2;
+        background: $surface;
+        border: thick $accent;
+        width: 60;
+        height: auto;
+        align: center middle;
     }
     #selection-dialog {
         padding: 2;
@@ -334,6 +443,13 @@ class GemApp(App):
         width: 80%;
         height: 80%;
         align: center middle;
+    }
+    #dialog-buttons {
+        height: auto;
+        margin-top: 1;
+    }
+    #dialog-buttons Button {
+        width: 50%;
     }
     #results-list {
         margin: 1 0;
@@ -351,6 +467,12 @@ class GemApp(App):
     #submit-manual-btn {
         width: 20;
         margin-left: 1;
+    }
+    #category-selection {
+        height: auto;
+        max-height: 15;
+        border: solid $background;
+        margin: 1 0;
     }
     #TabbedContent {
         width: 100%;
@@ -414,6 +536,7 @@ class GemApp(App):
         self._selection_lock = threading.Lock()
         self._bulk_update_queue = []
         self._bulk_update_aborted = False
+        self._inventory_loaded = False
         self.table: DataTable = None  # Type annotation for mypy
         
         self.classifications = list(VALID_CATEGORIES)
@@ -427,6 +550,10 @@ class GemApp(App):
                     yield RadioButton("All Categories", id="cls_any", value=True)
                     for cls in self.classifications:
                         yield RadioButton(cls.replace("_", " ").title(), id=f"cls_{cls}")
+                
+                yield Label("System Stats", classes="section-title")
+                yield Label("Total Gems: 0", id="gem-count-label")
+                yield Label("Last Update: Never", id="last-update-label")
 
             with Vertical(id="main-area"):
                 with TabbedContent(id="main-tabs"):
@@ -494,18 +621,70 @@ class GemApp(App):
         if hasattr(self, 'debug_log'):
             self.debug_log.write(f"[yellow]WARNING[/yellow]: {message}")
 
-    @work(thread=True)
+    @work(thread=True, exclusive=True)
     def load_data(self) -> None:
+        """Load gem data from storage and classify any new gems."""
         try:
-            if self.inventory_path:
-                self.call_from_thread(self.notify, f"Populating inventory from {self.inventory_path}...")
-                self.storage.load_inventory(self.inventory_path)
-
+            # Phase 1: Immediate Load from DB
+            self.call_from_thread(self.log_debug, "Phase 1: Loading existing gems from DB...")
             self.all_gems = self.storage.load_classified_gems()
-            self.call_from_thread(self.log_info, f"Loaded {len(self.all_gems)} gems from storage")
+            self.call_from_thread(self.log_info, f"Initially loaded {len(self.all_gems)} gems from DB")
             self.call_from_thread(self.update_table)
+
+            # Phase 2: Inventory Sync (only if path provided and not loaded yet)
+            if self.inventory_path and not self._inventory_loaded:
+                self.call_from_thread(self.log_info, f"Phase 2: Syncing inventory from {self.inventory_path}...")
+                self.call_from_thread(self.notify, f"Populating inventory from {self.inventory_path}...")
+                # Note: this can be slow. If user adds a gem while this is running, 
+                # load_data will restart because it's exclusive. 
+                # This is why we have add_gem_worker for manual additions.
+                self.storage.load_inventory(self.inventory_path)
+                self._inventory_loaded = True
+                
+                # Refresh all_gems after sync
+                self.all_gems = self.storage.load_classified_gems()
+                self.call_from_thread(self.update_table)
+
+            # Phase 3: Classification of unclassified gems
+            import sqlite3
+            with sqlite3.connect(self.storage.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT name, category, homepage, source_code_uri, context7_id FROM inventory WHERE name NOT IN (SELECT name FROM classified_gems)")
+                unclassified = cursor.fetchall()
+
+            if unclassified:
+                total = len(unclassified)
+                self.call_from_thread(self.log_info, f"Phase 3: Found {total} unclassified gems in inventory")
+                self.call_from_thread(self.notify, f"Classifying {total} gems in background...")
+                
+                results = []
+                for idx, (name, cat, hp, sc, c7) in enumerate(unclassified):
+                    # Periodically update table for visibility
+                    if idx > 0 and idx % 10 == 0:
+                        self.call_from_thread(self.log_debug, f"Classification progress: {idx}/{total}")
+                    
+                    try:
+                        gem_entry = self.classifier.classify(name, cat, homepage=hp, source_code_uri=sc, context7_id=c7)
+                        results.append(gem_entry)
+                        
+                        # Batch save and update UI
+                        if len(results) >= 5:
+                            self.storage.save_classified_gems(results)
+                            results = []
+                            self.all_gems = self.storage.load_classified_gems()
+                            self.call_from_thread(self.update_table)
+                    except Exception as ce:
+                        self.call_from_thread(self.log_error, f"Failed to classify {name}: {ce}")
+                
+                if results:
+                    self.storage.save_classified_gems(results)
+                
+                self.all_gems = self.storage.load_classified_gems()
+                self.call_from_thread(self.update_table)
+                self.call_from_thread(self.log_info, f"Background classification complete. Total gems: {len(self.all_gems)}")
+
         except Exception as e:
-            self.call_from_thread(self.handle_error, f"Failed to load gem data: {e}", e)
+            self.call_from_thread(self.handle_error, f"Failed background load_data: {e}", e)
 
     def update_table(self):
         try:
@@ -520,10 +699,18 @@ class GemApp(App):
                         continue
                 filtered.append(g)
 
+            # Sort alphabetically by name
+            filtered.sort(key=lambda x: x.name.lower())
+
             self.filtered_gems = filtered
             self.table.clear()
 
-            self.log_debug(f"Updating table with {len(filtered)} gems (filter: {active_id})")
+            # Update stats labels
+            from datetime import datetime
+            self.query_one("#gem-count-label", Label).update(f"Total Gems: {len(self.all_gems)}")
+            self.query_one("#last-update-label", Label).update(f"Last Update: {datetime.now().strftime('%H:%M:%S')}")
+
+            self.log_debug(f"Updating table with {len(filtered)} filtered gems out of {len(self.all_gems)} total")
 
             for index, gem in enumerate(filtered):
                 desc = (gem.description[:60] + "...") if gem.description and len(gem.description) > 60 else (gem.description or "-")
@@ -533,18 +720,11 @@ class GemApp(App):
                     gem.source_code_uri or "-",
                     gem.context7_id or "-",
                     desc,
-                    key=str(index)
+                    key=gem.name
                 )
 
-            # Ensure table has focus and cursor for navigation
-            self.table.focus()
-            self.log_debug(f"Table updated successfully with {len(filtered)} rows, row count: {self.table.row_count}")
-
-            # Log table state for debugging
-            if self.table.row_count > 0:
-                self.log_debug(f"Table cursor type: {self.table.cursor_type}, has focus: {self.table.has_focus}")
-            else:
-                self.log_error(f"Table has no rows after adding {len(filtered)} gems!")
+            if len(filtered) == 0 and len(self.all_gems) > 0:
+                self.log_warning(f"Filter '{active_id}' resulted in 0 gems, but {len(self.all_gems)} total gems are loaded.")
 
         except Exception as e:
             self.handle_error(f"Failed to update table: {e}", e)
@@ -566,15 +746,16 @@ class GemApp(App):
     @on(DataTable.RowSelected)
     def on_row_selected(self, event: DataTable.RowSelected):
         try:
-            row_key_value = event.row_key.value if hasattr(event.row_key, 'value') else str(event.row_key)
-            if row_key_value is None:
+            gem_name = event.row_key.value if hasattr(event.row_key, 'value') else str(event.row_key)
+            if gem_name is None:
                 self.log_debug("RowSelected event with None row_key")
                 return
-            index = int(row_key_value)
-            if index >= len(self.filtered_gems):
-                self.log_error(f"RowSelected index {index} out of range (max: {len(self.filtered_gems)})")
+            
+            gem = next((g for g in self.filtered_gems if g.name == gem_name), None)
+            if not gem:
+                self.log_error(f"RowSelected: gem '{gem_name}' not found in filtered list")
                 return
-            gem = self.filtered_gems[index]
+            
             sidebar = self.query_one("#details-sidebar", GemDetails)
             sidebar.update_gem(gem)
             self.log_debug(f"Selected gem for details: {gem.name}")
@@ -595,19 +776,14 @@ class GemApp(App):
                 self.log_debug("No valid row key at cursor position")
                 return
 
-            index = int(row_key.value) if hasattr(row_key, 'value') else int(str(row_key))
-            if index >= len(self.filtered_gems):
-                self.log_error(f"Row index {index} out of range (max: {len(self.filtered_gems)})")
-                return
-
-            gem = self.filtered_gems[index]
+            gem_name = row_key.value if hasattr(row_key, 'value') else str(row_key)
             with self._selection_lock:
-                if gem.name in self._selected_gems:
-                    self._selected_gems.discard(gem.name)
-                    self.log_debug(f"Deselected gem: {gem.name}")
+                if gem_name in self._selected_gems:
+                    self._selected_gems.discard(gem_name)
+                    self.log_debug(f"Deselected gem: {gem_name}")
                 else:
-                    self._selected_gems.add(gem.name)
-                    self.log_debug(f"Selected gem: {gem.name}")
+                    self._selected_gems.add(gem_name)
+                    self.log_debug(f"Selected gem: {gem_name}")
                 count = len(self._selected_gems)
             self._update_selection_status(count)
         except Exception as e:
@@ -822,6 +998,125 @@ class GemApp(App):
         gem_name = sidebar.gem.name
         self.lookup_c7_id(gem_name)
 
+    @on(Button.Pressed, "#edit-gem-btn")
+    def trigger_edit_gem(self) -> None:
+        self.action_edit_gem()
+
+    @on(Button.Pressed, "#remove-gem-btn")
+    def trigger_remove_gem(self) -> None:
+        self.action_delete_gem()
+
+    def action_add_gem(self):
+        def handle_add(name: Optional[str]):
+            if name:
+                self.log_info(f"User manually adding gem: {name}")
+                self.notify(f"Adding {name}...")
+                self.add_gem_worker(name)
+        
+        self.push_screen(AddGemScreen(), handle_add)
+
+    @work(thread=True)
+    def add_gem_worker(self, name: str):
+        """Worker to add and classify a single gem immediately."""
+        try:
+            self.call_from_thread(self.log_debug, f"Adding {name} to inventory storage...")
+            self.storage.add_gem_to_inventory(name)
+            
+            self.call_from_thread(self.log_debug, f"Performing immediate classification for {name}...")
+            # We don't have cat/hp/sc/c7 for manual addition yet, classify will fetch from RubyGems
+            gem_entry = self.classifier.classify(name)
+            
+            self.call_from_thread(self.log_debug, f"Saving classification for {name} to DB...")
+            self.storage.save_classified_gems([gem_entry])
+            
+            self.call_from_thread(self.log_info, f"Successfully added and classified manual gem: {name}")
+            self.call_from_thread(self.notify, f"Successfully added and classified {name}")
+            
+            # Update local state directly for immediate UI feedback
+            found = False
+            for i, existing in enumerate(self.all_gems):
+                if existing.name == name:
+                    self.all_gems[i] = gem_entry
+                    found = True
+                    break
+            if not found:
+                self.all_gems.append(gem_entry)
+            
+            # Refresh display immediately
+            self.call_from_thread(self.update_table)
+            
+        except Exception as e:
+            self.call_from_thread(self.handle_error, f"Failed to add manual gem {name}: {e}", e)
+
+    def action_edit_gem(self):
+        sidebar = self.query_one("#details-sidebar", GemDetails)
+        if not sidebar.display or not hasattr(sidebar, 'gem'):
+            # Try to get from table selection if sidebar is closed
+            try:
+                row_key, _ = self.table.coordinate_to_cell_key(self.table.cursor_coordinate)
+                gem_name = row_key.value if hasattr(row_key, 'value') else str(row_key)
+                gem = next((g for g in self.filtered_gems if g.name == gem_name), None)
+                if not gem:
+                    raise ValueError(f"Gem '{gem_name}' not found")
+            except Exception:
+                self.notify("Select a gem to edit", severity="warning")
+                return
+        else:
+            gem = sidebar.gem
+
+        def handle_edit(result: Optional[tuple]):
+            if result:
+                new_category, new_source_uri, new_c7_id = result
+                self.log_info(f"Updating gem {gem.name}: category={new_category}, source_uri={new_source_uri}, c7_id={new_c7_id}")
+                
+                # Persistence
+                self.storage.update_gem_classification(gem.name, new_category)
+                self.storage.update_gem_metadata(gem.name, source_code_uri=new_source_uri, context7_id=new_c7_id)
+                
+                self.notify(f"Updated {gem.name}")
+                
+                # Update local state
+                for g in self.all_gems:
+                    if g.name == gem.name:
+                        g.classification.primary = new_category
+                        g.classification.confidence = 1.0
+                        g.source_code_uri = new_source_uri
+                        g.context7_id = new_c7_id
+                        # Update sidebar if it's showing the same gem
+                        if sidebar.display and sidebar.gem.name == gem.name:
+                            sidebar.update_gem(g)
+                        break
+                
+                self.update_table()
+        
+        self.push_screen(EditGemScreen(gem), handle_edit)
+
+    def action_delete_gem(self):
+        sidebar = self.query_one("#details-sidebar", GemDetails)
+        if not sidebar.display or not hasattr(sidebar, 'gem'):
+             # Try to get from table selection
+            try:
+                row_key, _ = self.table.coordinate_to_cell_key(self.table.cursor_coordinate)
+                gem_name = row_key.value if hasattr(row_key, 'value') else str(row_key)
+                gem = next((g for g in self.filtered_gems if g.name == gem_name), None)
+                if not gem:
+                    raise ValueError(f"Gem '{gem_name}' not found")
+            except Exception:
+                self.notify("Select a gem to delete", severity="warning")
+                return
+        else:
+            gem = sidebar.gem
+
+        def handle_delete(confirmed: bool):
+            if confirmed:
+                self.storage.delete_gem(gem.name)
+                self.notify(f"Removed {gem.name} from database")
+                if sidebar.display and sidebar.gem.name == gem.name:
+                    sidebar.display = False
+                self.action_refresh()
+        
+        self.push_screen(ConfirmDeleteScreen(gem.name), handle_delete)
+
     # Threaded workers
     @work(thread=True)
     def lookup_c7_id(self, gem_name: str) -> None:
@@ -836,13 +1131,17 @@ class GemApp(App):
             if selected_id:
                 self.storage.update_gem_metadata(gem_name, context7_id=selected_id)
                 self.notify(f"Updated {gem_name} with Context7 ID: {selected_id}")
-                self.load_data()
+                
+                # Update local state
                 for g in self.all_gems:
                     if g.name == gem_name:
                         g.context7_id = selected_id
                         sidebar = self.query_one("#details-sidebar", GemDetails)
-                        sidebar.update_gem(g)
+                        if sidebar.display and sidebar.gem.name == gem_name:
+                            sidebar.update_gem(g)
                         break
+                
+                self.update_table()
 
         self.call_from_thread(self.push_screen, C7SelectionScreen(results), handle_selection)
 
@@ -859,13 +1158,24 @@ class GemApp(App):
         self.call_from_thread(self.notify, f"Fetching Context7 info for {target_name}...")
         
         try:
-            lib_id = self.c7_service.verify_library(target_name)
+            # First, check if we already have a Context7 ID for this gem in our local state
+            lib_id = None
+            for g in self.all_gems:
+                if g.name == target_name and g.context7_id:
+                    lib_id = g.context7_id
+                    self.call_from_thread(self.log_debug, f"Using stored Context7 ID for {target_name}: {lib_id}")
+                    break
+            
+            # If not found in local state, try to verify via API
+            if not lib_id:
+                self.call_from_thread(self.log_debug, f"No stored ID for {target_name}, re-verifying...")
+                lib_id = self.c7_service.verify_library(target_name)
             
             if not lib_id:
                 self.call_from_thread(self.notify, f"No Context7 results found for {target_name}.", severity="warning")
                 return
 
-            self.call_from_thread(self.notify, f"Querying use cases for {target_name}...")
+            self.call_from_thread(self.notify, f"Querying Context7 ({lib_id}) for {target_name}...")
             context_query = (
                 "Provide a few examples of how this gem might be used in the context of "
                 "a genai application, nlp text processing, or as a systems tool."
