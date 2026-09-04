@@ -1,5 +1,7 @@
 # RubyGemDB
 
+https://github.com/estiens/open_router_enhanced
+https://github.com/shubhamtaywade82/ollama-client
 Ruby Gem classification and analysis system implementing a 12-category architectural taxonomy with CLI and TUI interfaces.
 
 ## System Overview
