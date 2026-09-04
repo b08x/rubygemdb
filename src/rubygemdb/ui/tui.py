@@ -24,6 +24,7 @@ from rubygemdb.agent import TxtaiAgent
 # Tab constants for maintainable ID management
 class TabConstants:
     EXPLORER = "explorer"
+    CHAT = "chat"
     EXPORT = "export"
     DEBUG = "debug"
 
@@ -341,47 +342,68 @@ class ExportTab(ScrollableContainer):
         self.update_export_preview()
 
 
-class AgentChatScreen(ModalScreen):
-    """A chat screen for interacting with the TxtaiAgent."""
-    
+class AgentChatTab(ScrollableContainer):
+    """A chat tab for interacting with the TxtaiAgent."""
+
     def __init__(self, agent_loader_callback):
         super().__init__()
         self.agent_loader_callback = agent_loader_callback
         self.agent = None
+        self._chat_messages: list[dict] = []
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="chat-dialog", classes="dialog"):
+        with Vertical(id="chat-container"):
             yield Label("RubyGemDB Agent (Txtai/Ollama)", id="chat-title")
             yield RichLog(id="chat-log", markup=True, wrap=True)
             yield Input(placeholder="Ask the agent a question...", id="chat-input")
-            yield Label("Press ESC to close.", id="chat-hint")
+            with Horizontal(id="chat-actions"):
+                yield Button("Export to Markdown", id="export-chat-btn", variant="primary")
+                yield Button("Clear Chat", id="clear-chat-btn", variant="error")
+            
+
+    def _add_message(self, role: str, content: str) -> None:
+        """Track a message for later export and display it in the RichLog."""
+        from datetime import datetime
+        self._chat_messages.append({
+            "role": role,
+            "content": content,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        color_map = {
+            "agent": "green",
+            "user": "blue",
+            "system": "yellow",
+            "error": "red",
+        }
+        color = color_map.get(role, "white")
+        self.log_widget.write(f"\n[bold {color}]{role.title()}:[/bold {color}] {content}")
 
     def on_mount(self) -> None:
         self.log_widget = self.query_one("#chat-log", RichLog)
-        self.log_widget.write("[bold green]Agent:[/bold green] System ready. Loading embeddings index...")
+        self._add_message("agent", "System ready. Loading embeddings index...")
         self.load_agent()
-        
+
     @work(thread=True)
     def load_agent(self):
         try:
             self.agent = self.agent_loader_callback()
-            self.app.call_from_thread(self.log_widget.write, "[bold green]Agent:[/bold green] Ready! How can I help you today?")
+            self.app.call_from_thread(self._add_message, "agent", "Ready! How can I help you today?")
         except Exception as e:
-            self.app.call_from_thread(self.log_widget.write, f"[bold red]System Error:[/bold red] Failed to load agent: {e}")
+            self.app.call_from_thread(self._add_message, "error", f"Failed to load agent: {e}")
 
     @on(Input.Submitted, "#chat-input")
     def submit_query(self, event: Input.Submitted) -> None:
         query = event.value.strip()
         if not query:
             return
-            
+
         event.input.value = ""
-        self.log_widget.write(f"\n[bold blue]You:[/bold blue] {query}")
-        
+        self._add_message("user", query)
+
         if not self.agent:
-            self.log_widget.write("[bold red]Agent:[/bold red] Still loading... please wait.")
+            self._add_message("error", "Still loading... please wait.")
             return
-            
+
         self.process_query(query)
 
     @work(thread=True)
@@ -389,13 +411,78 @@ class AgentChatScreen(ModalScreen):
         self.app.call_from_thread(self.log_widget.write, "[dim]Agent is thinking...[/dim]")
         try:
             response = self.agent.run(query)
-            self.app.call_from_thread(self.log_widget.write, f"\n[bold green]Agent:[/bold green] {response}")
+            self.app.call_from_thread(self._add_message, "agent", str(response))
         except Exception as e:
-            self.app.call_from_thread(self.log_widget.write, f"\n[bold red]Agent Error:[/bold red] {e}")
+            self.app.call_from_thread(self._add_message, "error", str(e))
 
-    def on_key(self, event) -> None:
-        if event.key == "escape":
-            self.app.pop_screen()
+    def _export_chat_to_markdown(self) -> None:
+        """Export the chat conversation to a markdown file."""
+        if not self._chat_messages:
+            self.notify("No messages to export", severity="warning")
+            return
+
+        from datetime import datetime
+        out_dir = settings.project_root / "output" / "chat_exports"
+        os.makedirs(out_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filepath = out_dir / f"chat_{timestamp}.md"
+
+        lines = [
+            "# RubyGemDB Agent Chat Export",
+            "",
+            f"**Exported**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"**Messages**: {len(self._chat_messages)}",
+            "",
+            "---",
+            "",
+        ]
+
+        for msg in self._chat_messages:
+            role = msg["role"]
+            content = msg["content"]
+            ts = msg["timestamp"]
+
+            if role == "user":
+                lines.append("## User")
+                lines.append(f"*{ts}*")
+                lines.append("")
+                lines.append(content)
+            elif role == "agent":
+                lines.append("## Agent")
+                lines.append(f"*{ts}*")
+                lines.append("")
+                lines.append(content)
+            else:
+                heading = "Error" if role == "error" else "System"
+                lines.append(f"### {heading}")
+                lines.append(f"*{ts}*")
+                lines.append("")
+                lines.append(f"> {content}")
+
+            lines.append("")
+            lines.append("---")
+            lines.append("")
+
+        with open(filepath, "w") as f:
+            f.write("\n".join(lines))
+
+        self.notify(f"Chat exported to {filepath}")
+        self.log_widget.write(f"\n[dim]Chat exported to {filepath}[/dim]")
+
+    @on(Button.Pressed, "#export-chat-btn")
+    def on_export_chat(self) -> None:
+        self._export_chat_to_markdown()
+
+
+    @on(Button.Pressed, "#clear-chat-btn")
+    def on_clear_chat(self) -> None:
+        self._chat_messages.clear()
+        self.log_widget.clear()
+        self._add_message("agent", "System ready. Loading embeddings index...")
+        self.load_agent()
+
+
+
 
 class GemApp(App):
     TITLE = "RubyGemDB Explorer"
@@ -578,6 +665,29 @@ class GemApp(App):
         width: 15;
         margin-left: 1;
     }
+    #chat-container {
+        padding: 1 2;
+        height: 100%;
+    }
+    #chat-log {
+        height: 1fr;
+        border: solid $background;
+        margin-bottom: 1;
+    }
+    #chat-input {
+        margin-bottom: 1;
+    }
+    #chat-actions {
+        height: auto;
+        margin-bottom: 1;
+    }
+    #chat-actions Button {
+        width: 50%;
+    }
+    #chat-hint {
+        color: $text-muted;
+        text-style: italic;
+    }
     """
 
     def __init__(self, inventory_path=None):
@@ -619,6 +729,8 @@ class GemApp(App):
                     with TabPane("Explorer", id=TabConstants.EXPLORER):
                         self.table = DataTable(id="gems_table")
                         yield self.table
+                    with TabPane("Chat", id=TabConstants.CHAT):
+                        yield AgentChatTab(self.get_txtai_agent)
                     with TabPane("Export", id=TabConstants.EXPORT):
                         yield ExportTab(id="export-tab")
                     with TabPane("Debug", id=TabConstants.DEBUG):
@@ -933,6 +1045,8 @@ class GemApp(App):
         current = tabs.active
         # Cycle through explorer → export → debug → explorer...
         if current == TabConstants.EXPLORER:
+            tabs.active = TabConstants.CHAT
+        elif current == TabConstants.CHAT:
             tabs.active = TabConstants.EXPORT
         elif current == TabConstants.EXPORT:
             tabs.active = TabConstants.DEBUG
@@ -1310,8 +1424,11 @@ class GemApp(App):
             self._txtai_agent = TxtaiAgent()
         return self._txtai_agent
 
+
     def action_open_chat(self):
-        self.push_screen(AgentChatScreen(self.get_txtai_agent))
+        tabs = self.query_one("#main-tabs", TabbedContent)
+        tabs.active = TabConstants.CHAT
+
 
     def action_refresh(self):
         """Refresh the gem data from storage."""
