@@ -14,7 +14,9 @@ dependencies = [
     "pyyaml>=6.0.3",
     "requests>=2.33.1",
     "rich>=14.3.3",
+    "sqlite-vec>=0.1.9",
     "textual==8.2.3",
+    "txtai[agent,pipeline,similarity]>=9.13.0",
 ]
 
 [project.scripts]

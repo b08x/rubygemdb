@@ -19,6 +19,7 @@ from rubygemdb.services.context7 import Context7Service
 from rubygemdb.storage.sqlite_storage import SQLiteStorage
 from rubygemdb.core.config import settings
 from rubygemdb.models.gem import GemEntry
+from rubygemdb.agent import TxtaiAgent
 
 # Tab constants for maintainable ID management
 class TabConstants:
@@ -339,6 +340,63 @@ class ExportTab(ScrollableContainer):
         """Update preview when export format changes."""
         self.update_export_preview()
 
+
+class AgentChatScreen(ModalScreen):
+    """A chat screen for interacting with the TxtaiAgent."""
+    
+    def __init__(self, agent_loader_callback):
+        super().__init__()
+        self.agent_loader_callback = agent_loader_callback
+        self.agent = None
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="chat-dialog", classes="dialog"):
+            yield Label("RubyGemDB Agent (Txtai/Ollama)", id="chat-title")
+            yield RichLog(id="chat-log", markup=True, wrap=True)
+            yield Input(placeholder="Ask the agent a question...", id="chat-input")
+            yield Label("Press ESC to close.", id="chat-hint")
+
+    def on_mount(self) -> None:
+        self.log_widget = self.query_one("#chat-log", RichLog)
+        self.log_widget.write("[bold green]Agent:[/bold green] System ready. Loading embeddings index...")
+        self.load_agent()
+        
+    @work(thread=True)
+    def load_agent(self):
+        try:
+            self.agent = self.agent_loader_callback()
+            self.app.call_from_thread(self.log_widget.write, "[bold green]Agent:[/bold green] Ready! How can I help you today?")
+        except Exception as e:
+            self.app.call_from_thread(self.log_widget.write, f"[bold red]System Error:[/bold red] Failed to load agent: {e}")
+
+    @on(Input.Submitted, "#chat-input")
+    def submit_query(self, event: Input.Submitted) -> None:
+        query = event.value.strip()
+        if not query:
+            return
+            
+        event.input.value = ""
+        self.log_widget.write(f"\n[bold blue]You:[/bold blue] {query}")
+        
+        if not self.agent:
+            self.log_widget.write("[bold red]Agent:[/bold red] Still loading... please wait.")
+            return
+            
+        self.process_query(query)
+
+    @work(thread=True)
+    def process_query(self, query: str) -> None:
+        self.app.call_from_thread(self.log_widget.write, "[dim]Agent is thinking...[/dim]")
+        try:
+            response = self.agent.run(query)
+            self.app.call_from_thread(self.log_widget.write, f"\n[bold green]Agent:[/bold green] {response}")
+        except Exception as e:
+            self.app.call_from_thread(self.log_widget.write, f"\n[bold red]Agent Error:[/bold red] {e}")
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            self.app.pop_screen()
+
 class GemApp(App):
     TITLE = "RubyGemDB Explorer"
     BINDINGS = [
@@ -347,6 +405,7 @@ class GemApp(App):
         ("ctrl+c", "quit", "Quit"),
         ("escape", "quit", "Quit"),
         ("r", "refresh", "Refresh"),
+        ("c", "open_chat", "Agent Chat"),
         ("space", "toggle_selection", "Toggle"),
         ("a", "select_all", "Select All"),
         ("n", "clear_selection", "Clear"),
@@ -1244,6 +1303,15 @@ class GemApp(App):
         
         except Exception as e:
             self.call_from_thread(self.notify, f"Failed to generate cheatsheet: {e}", severity="error")
+
+    
+    def get_txtai_agent(self):
+        if not hasattr(self, '_txtai_agent') or self._txtai_agent is None:
+            self._txtai_agent = TxtaiAgent()
+        return self._txtai_agent
+
+    def action_open_chat(self):
+        self.push_screen(AgentChatScreen(self.get_txtai_agent))
 
     def action_refresh(self):
         """Refresh the gem data from storage."""

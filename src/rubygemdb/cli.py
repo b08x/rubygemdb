@@ -246,6 +246,17 @@ def run_process(args):
     console.print(table)
     console.print(f"[green]All processes complete! Saved reports to {args.out}/[/green]")
 
+    if getattr(args, "embed", False):
+        console.print("\n[bold cyan]--- PHASE 3: Vector Embeddings Generation ---[/bold cyan]")
+        try:
+            from rubygemdb.agent import TxtaiAgent
+            agent = TxtaiAgent()
+            agent.build_index()
+            console.print("[green]Embeddings vectorization complete![/green]")
+        except Exception as e:
+            console.print(f"[red]Error during embeddings generation: {e}[/red]")
+
+
 def run_cli():
     parser = argparse.ArgumentParser(description="Ruby Gem Classifier")
     subparsers = parser.add_subparsers(dest="command", required=True, help="Command to run")
@@ -255,6 +266,7 @@ def run_cli():
     process_parser.add_argument("csv", nargs="?", help="Optional path to initial gems inventory CSV")
     process_parser.add_argument("--out", default="output", help="Output directory for YAML files")
     process_parser.add_argument("--skip-verify", action="store_true", help="Skip Phase 1 metadata verification and go straight to Phase 2")
+    process_parser.add_argument("--embed", action="store_true", help="Run the txtai embedding process to vectorize the database")
     
     args = parser.parse_args()
 

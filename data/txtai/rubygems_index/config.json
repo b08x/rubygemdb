@@ -1,0 +1,25 @@
+{
+  "path": "ollama/embeddinggemma",
+  "backend": "sqlite",
+  "content": true,
+  "hybrid": true,
+  "scoring": {
+    "method": "bm25",
+    "normalize": false
+  },
+  "fusion": "rrf",
+  "dimensions": 768,
+  "offset": 493,
+  "build": {
+    "create": "2026-09-04T21:02:53Z",
+    "python": "3.14.7",
+    "settings": {
+      "sqlite": "3.53.4",
+      "sqlite-vec": "v0.1.9"
+    },
+    "system": "Linux (x86_64)",
+    "txtai": "9.13.0"
+  },
+  "update": "2026-09-04T21:02:53Z",
+  "format": "json"
+}
