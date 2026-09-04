@@ -1,3 +1,4 @@
+import re
 import os
 import json
 import sqlite3
@@ -11,6 +12,43 @@ from rubygemdb.core.config import settings
 
 # Initialize RubyGems Service
 rubygems_service = RubyGemsService()
+
+def create_child_chunks(text: str, max_chars: int = 512) -> list[str]:
+    """Splits a parent text into child chunks based on paragraphs and sentences."""
+    if not text:
+        return []
+    
+    # Split by paragraphs (double newlines)
+    paragraphs = re.split(r'\n\s*\n', text)
+    chunks = []
+    
+    for p in paragraphs:
+        p = p.strip()
+        if not p:
+            continue
+            
+        if len(p) <= max_chars:
+            chunks.append(p)
+            continue
+            
+        # If paragraph is too long, split by sentence boundaries (.!?)
+        sentences = re.split(r'(?<=[.!?])\s+', p)
+        current_chunk = ""
+        
+        for sentence in sentences:
+            if len(current_chunk) + len(sentence) + 1 <= max_chars:
+                current_chunk += (sentence + " ") if current_chunk else sentence
+            else:
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                current_chunk = sentence
+                
+        if current_chunk:
+            chunks.append(current_chunk.strip())
+            
+    return chunks
+
+
 
 def fetch_rubygems_info(gem_name: str) -> str:
     """
@@ -42,19 +80,49 @@ _embeddings_ref: "Embeddings | None" = None
 
 def search_gems(query: str, limit: int = 5) -> str:
     """
-    Searches the local RubyGemDB vector index for gems matching a query.
+    Searches the local RubyGemDB vector index for gems using Parent/Child chunking.
+    Retrieves small child chunks but returns the full parent context to the LLM.
 
     Args:
         query: Natural language search query describing the gem or use-case.
         limit: Maximum number of results to return (default 5).
 
     Returns:
-        JSON string of matching gems with name, description, context7_id, and score.
+        JSON string of matching gems with full parent text context.
     """
     if _embeddings_ref is None:
         return "Embeddings index not yet loaded."
-    results = _embeddings_ref.search(query, limit)
-    return json.dumps(results, indent=2)
+        
+    # Escape quotes for SQL query
+    safe_query = query.replace("'", "''")
+    
+    # We fetch 3x the limit because multiple child chunks might belong to the same parent
+    sql = f"SELECT id, text, name, source_code_uri, context7_id, parent_text, score FROM txtai WHERE similar('{safe_query}') LIMIT {limit * 3}"
+    raw_results = _embeddings_ref.search(sql)
+    
+    unique_parents = set()
+    formatted_results = []
+    
+    for res in raw_results:
+        gem_name = res.get("name")
+        
+        if gem_name not in unique_parents:
+            unique_parents.add(gem_name)
+            
+            # Return the PARENT chunk (full text) as the context instead of just the child chunk
+            formatted_results.append({
+                "name": gem_name,
+                "description": res.get("parent_text"), # The parent context!
+                "context7_id": res.get("context7_id"),
+                "source_code_uri": res.get("source_code_uri"),
+                "match_score": round(res.get("score", 0), 4),
+                "matched_child_chunk": res.get("text") # Include for debug/transparency
+            })
+            
+            if len(formatted_results) >= limit:
+                break
+                
+    return json.dumps(formatted_results, indent=2)
 
 class TxtaiAgent:
     def __init__(self, db_path: str = "data/rubygemdb.sqlite", txtai_dir: str = "data/txtai"):
@@ -112,16 +180,24 @@ class TxtaiAgent:
             def stream_data():
                 for i, row in enumerate(rows):
                     gem_name = row["name"]
-                    # Dictionary document mapping to txtai content: True format
-                    # text must be the primary indexed field for Embeddings
-                    document = {
-                        "id": str(i),
-                        "text": row["description"] or f"Ruby gem {gem_name}",
-                        "name": gem_name,
-                        "source_code_uri": row["source_code_uri"],
-                        "context7_id": row["context7_id"]
-                    }
-                    yield document
+                    # Parent chunk is the full description
+                    parent_text = row["description"] or f"Ruby gem {gem_name}"
+                    
+                    # Split into child chunks for fine-grained retrieval
+                    child_chunks = create_child_chunks(parent_text, max_chars=512)
+                    if not child_chunks:
+                        child_chunks = [parent_text]
+                        
+                    for chunk_idx, child_text in enumerate(child_chunks):
+                        document = {
+                            "id": f"{gem_name}_{chunk_idx}",
+                            "text": child_text, # Child chunk used for vector retrieval
+                            "name": gem_name,
+                            "source_code_uri": row["source_code_uri"],
+                            "context7_id": row["context7_id"],
+                            "parent_text": parent_text # Parent chunk stored for context recall
+                        }
+                        yield document
             
             self.embeddings.index(stream_data())
             self.embeddings.save(self.index_path)
