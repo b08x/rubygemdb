@@ -222,18 +222,23 @@ class GemClassifier:
         return GemRisks(invasiveness=inv, coupling=coupling, abstraction_leak=leak)
 
     def classify(self, name: str, category: Optional[str] = None, homepage: Optional[str] = None, source_code_uri: Optional[str] = None, context7_id: Optional[str] = None) -> GemEntry:
-        info = self.rubygems.fetch_gem_info(name)
+        info = self.rubygems.fetch_gem_info(name) or {}
         classification, signals, deps, sub_cats = self.heuristic_classify(name, info, category)
         
         # Add sub_categories to classification
         classification.sub_categories = sub_cats
 
-        if classification.confidence < 0.7:
-            prompt = self.llm.build_prompt(name, info, deps)
-            llm_result = self.llm.call_llm(prompt)
-            if llm_result and llm_result.get("confidence", 0) > 0.6:
+        # Unconditionally call the LLM to generate an agent-optimized description
+        prompt = self.llm.build_prompt(name, info, deps)
+        llm_result = self.llm.call_llm(prompt)
+        agent_desc = ""
+
+        if llm_result:
+            # Only override heuristic classification if LLM is confident and heuristics weren't
+            if classification.confidence < 0.7 and llm_result.get("confidence", 0) > 0.6:
                 classification.primary = llm_result["primary"]
                 classification.confidence = llm_result["confidence"]
+            agent_desc = llm_result.get("agent_description", "")
 
         risks = self.score_gem(classification.primary, deps)
 
@@ -242,6 +247,7 @@ class GemClassifier:
             classification=classification,
             role={
                 "description": str(info.get("info", "")) if info else "",
+                "agent_description": agent_desc,
                 "attaches_to": classification.primary.split("_")[0]
             },
             risks=risks,

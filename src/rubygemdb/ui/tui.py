@@ -586,7 +586,7 @@ class GemApp(App):
         self.log_debug("Table focus set after initialization")
 
     # Error handling and logging infrastructure
-    def handle_error(self, message: str, exception: Exception = None):
+    def handle_error(self, message: str, exception=None):
         """Centralized error handling with debug logging and user notification."""
         import traceback
 

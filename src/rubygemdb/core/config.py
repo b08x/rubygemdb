@@ -4,12 +4,12 @@ from typing import Optional
 
 class Settings(BaseSettings):
     # API Keys
-    devstral_api_key: Optional[str] = None
+    mistral_api_key: Optional[str] = None
     context7_api_key: Optional[str] = None
     
     # Endpoints
     llm_endpoint: str = "https://api.mistral.ai/v1/chat/completions"
-    llm_model: str = "devstral-small"
+    rubygemdb_model: str = "devstral-small"
     rubygems_api_url: str = "https://rubygems.org/api/v1/gems/{name}.json"
     
     # Delays & Batches

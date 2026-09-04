@@ -212,3 +212,27 @@ class SQLiteStorage(StorageBase):
                     context7_id=row["context7_id"]
                 ))
         return gems
+
+    def get_all_inventory_gems(self) -> List[dict]:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT name, homepage, source_code_uri, description, context7_id FROM inventory")
+            return [dict(row) for row in cursor.fetchall()]
+
+    def update_gem_verification(self, name: str, homepage: str, source_code_uri: str, description: str, context7_id: str):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE inventory 
+                SET homepage = ?, source_code_uri = ?, description = ?, context7_id = ?, verified = 1 
+                WHERE name = ?
+            """, (homepage, source_code_uri, description, context7_id, name))
+            
+            cursor.execute("""
+                UPDATE classified_gems
+                SET description = ?
+                WHERE name = ?
+            """, (description, name))
+            
+            conn.commit()

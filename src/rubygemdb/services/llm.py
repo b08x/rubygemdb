@@ -1,5 +1,6 @@
 import json
 import requests
+from typing import Optional, Any
 from hashlib import sha256
 from rubygemdb.core.config import settings
 
@@ -38,7 +39,9 @@ class LLMService:
         ]
         cat_list = "\n".join(f"- {c}" for c in categories)
         return f"""
-Classify this Ruby gem into ONE category:
+Classify this Ruby gem into ONE category, and write an agent-optimized description.
+
+Categories:
 {cat_list}
 
 Gem:
@@ -48,21 +51,23 @@ Description:
 Dependencies:
 {', '.join(deps)}
 
+The 'agent_description' must be a concise, RAG-optimized summary for another AI coding agent. Explain exactly what this gem does, when to use it, and how it might combine with other tools.
+
 Return JSON only:
-{{"primary":"...","confidence":0.0}}
+{{"primary":"...","confidence":0.0, "agent_description": "..."}}
 """
 
-    def call_llm(self, prompt: str) -> dict:
-        if not settings.devstral_api_key:
+    def call_llm(self, prompt: str) -> Optional[dict]:
+        if not settings.mistral_api_key:
             return None
             
         key = self._prompt_hash(prompt)
         if key in self.cache:
             return self.cache[key]
 
-        headers = {"Authorization": f"Bearer {settings.devstral_api_key}"}
-        payload = {
-            "model": settings.llm_model,
+        headers = {"Authorization": f"Bearer {settings.mistral_api_key}"}
+        payload: dict[str, Any] = {
+            "model": settings.rubygemdb_model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0
         }
