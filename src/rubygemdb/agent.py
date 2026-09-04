@@ -4,7 +4,8 @@ import json
 import sqlite3
 from typing import List, Dict, Optional, Any
 
-from txtai import Embeddings, Agent, LLM
+from txtai import Embeddings
+from smolagents import LiteLLMModel, ToolCallingAgent, tool
 from smolagents import MCPClient
 from mcp import StdioServerParameters
 from rubygemdb.services.rubygems import RubyGemsService
@@ -50,6 +51,7 @@ def create_child_chunks(text: str, max_chars: int = 512) -> list[str]:
 
 
 
+@tool
 def fetch_rubygems_info(gem_name: str) -> str:
     """
     Fetches detailed metadata about a Ruby gem from rubygems.org API.
@@ -78,51 +80,7 @@ def fetch_rubygems_info(gem_name: str) -> str:
 # parameters must carry type hints.
 _embeddings_ref: "Embeddings | None" = None
 
-def search_gems(query: str, limit: int = 5) -> str:
-    """
-    Searches the local RubyGemDB vector index for gems using Parent/Child chunking.
-    Retrieves small child chunks but returns the full parent context to the LLM.
 
-    Args:
-        query: Natural language search query describing the gem or use-case.
-        limit: Maximum number of results to return (default 5).
-
-    Returns:
-        JSON string of matching gems with full parent text context.
-    """
-    if _embeddings_ref is None:
-        return "Embeddings index not yet loaded."
-        
-    # Escape quotes for SQL query
-    safe_query = query.replace("'", "''")
-    
-    # We fetch 3x the limit because multiple child chunks might belong to the same parent
-    sql = f"SELECT id, text, name, source_code_uri, context7_id, parent_text, score FROM txtai WHERE similar('{safe_query}') LIMIT {limit * 3}"
-    raw_results = _embeddings_ref.search(sql)
-    
-    unique_parents = set()
-    formatted_results = []
-    
-    for res in raw_results:
-        gem_name = res.get("name")
-        
-        if gem_name not in unique_parents:
-            unique_parents.add(gem_name)
-            
-            # Return the PARENT chunk (full text) as the context instead of just the child chunk
-            formatted_results.append({
-                "name": gem_name,
-                "description": res.get("parent_text"), # The parent context!
-                "context7_id": res.get("context7_id"),
-                "source_code_uri": res.get("source_code_uri"),
-                "match_score": round(res.get("score", 0), 4),
-                "matched_child_chunk": res.get("text") # Include for debug/transparency
-            })
-            
-            if len(formatted_results) >= limit:
-                break
-                
-    return json.dumps(formatted_results, indent=2)
 
 class TxtaiAgent:
     def __init__(self, db_path: str = "data/rubygemdb.sqlite", txtai_dir: str = "data/txtai"):
@@ -159,6 +117,7 @@ class TxtaiAgent:
         # Agent is lazily initialized on first run() call to avoid loading
         # the LLM during --embed (index-only) operations.
         self._agent = None
+        self.model: LiteLLMModel | None = None
         
     def _initialize_index(self, force_rebuild: bool = False):
         """Loads data from the original sqlite table and indexes into txtai."""
@@ -189,13 +148,17 @@ class TxtaiAgent:
                         child_chunks = [parent_text]
                         
                     for chunk_idx, child_text in enumerate(child_chunks):
+                        # Prepend the gem name to the chunk so the embedding captures both
+                        searchable_text = f"Gem Name: {gem_name}\nDescription: {child_text}"
+                        
                         document = {
                             "id": f"{gem_name}_{chunk_idx}",
-                            "text": child_text, # Child chunk used for vector retrieval
+                            "text": searchable_text, # Used for vector retrieval
                             "name": gem_name,
                             "source_code_uri": row["source_code_uri"],
                             "context7_id": row["context7_id"],
-                            "parent_text": parent_text # Parent chunk stored for context recall
+                            "parent_text": parent_text, # Parent chunk stored for context recall
+                            "type": "gem"
                         }
                         yield document
             
@@ -209,55 +172,173 @@ class TxtaiAgent:
             conn.close()
 
     
+    def index_memory(self, text: str, doc_type: str, metadata: dict | None = None):
+        """Chunks and dynamically indexes new text into the embedding database."""
+        if not text or not self.embeddings:
+            return
+            
+        import time
+        import uuid
+        
+        child_chunks = create_child_chunks(text, max_chars=512)
+        if not child_chunks:
+            child_chunks = [text]
+            
+        docs = []
+        base_id = str(uuid.uuid4())
+        
+        for idx, child_text in enumerate(child_chunks):
+            doc = {
+                "id": f"{doc_type}_{base_id}_{idx}",
+                "text": child_text,
+                "parent_text": text,
+                "type": doc_type,
+                "timestamp": time.time()
+            }
+            if metadata:
+                doc.update(metadata)
+            docs.append(doc)
+            
+        self.embeddings.upsert(docs)
+        self.embeddings.save(self.index_path)
+
     def build_index(self):
         """Forces a rebuild of the txtai index."""
         self._initialize_index(force_rebuild=True)
 
     @property
-    def agent(self) -> Agent:
+    def agent(self) -> ToolCallingAgent:
         """Lazy-initialize the Agent LLM on first use."""
         if self._agent is None:
-            model = settings.rubygemdb_agent_model
-            # LiteLLM requires a provider prefix (e.g. "mistral/model",
-            # "openai/model"). Without it, litellm.completion raises
-            # BadRequestError: "LLM Provider NOT provided".
-            if "/" not in model:
-                raise ValueError(
-                    f"rubygemdb_agent_model='{model}' is missing a LiteLLM "
-                    f"provider prefix. Use 'mistral/{model}' or another "
-                    f"provider. See: https://docs.litellm.ai/docs/providers"
-                )
+            model_id = settings.rubygemdb_agent_model
+            
+            # Instantiate native LiteLLMModel for proper tool-calling support
+            self.model = LiteLLMModel(model_id=model_id)
 
-            # Explicitly construct a LiteLLM-routed LLM pipeline.
-            # Passing a bare string to Agent() lets smolagents try to load it
-            # as a HuggingFace model. Using LLM(..., method="litellm") forces
-            # the correct routing for mistral/, ollama/, etc. prefixes.
-            llm = LLM(model, method="litellm")
-
-            # Context7 MCP via stdio — MCPClient accepts StdioServerParameters,
-            # NOT a plain dict. The dict form only works with http/sse transports.
             c7_mcp = MCPClient(
                 StdioServerParameters(command="npx", args=["-y", "@upstash/context7-mcp"]),
                 structured_output=False,
             )
+            
+            # Wrap Context7 tools to intercept and index their results
+            c7_tools = c7_mcp.get_tools()
+            for tool_obj in c7_tools:
+                original_forward = tool_obj.forward
+                def wrap_forward(orig=original_forward, tool_name=tool_obj.name):
+                    def forward_interceptor(*args, **kwargs):
+                        result = orig(*args, **kwargs)
+                        if isinstance(result, str) and result.strip():
+                            self.index_memory(result, doc_type="context7", metadata={"source_tool": tool_name})
+                        return result
+                    return forward_interceptor
+                tool_obj.forward = wrap_forward()
 
-            self._agent = Agent(
-                llm=llm,
+            # Define the memory tool dynamically so it can access self.model
+            @tool
+            def search_memory_tool(query: str, limit: int = 5) -> str:
+                """
+                Primary semantic search engine. Use this tool FIRST when asked to explore, 
+                design, or find Ruby gems for a specific use-case or functionality (e.g., 'NLP pipeline').
+                It searches a vector database of Ruby gems, past chat history, and Context7 docs.
+
+                Args:
+                    query: Natural language search query (e.g., 'fast web framework' or 'NLP text processing').
+                    limit: Maximum number of results to return (default 5).
+                """
+                return self._execute_search_with_expansion(query, limit)
+
+            self._agent = ToolCallingAgent(
+                model=self.model,
                 tools=[
-                    # 1. Local embeddings wired via typed wrapper (smolagents requires type hints)
-                    search_gems,
-                    # 2. RubyGems FunctionTool via docstring introspection
+                    search_memory_tool,
                     fetch_rubygems_info,
-                    # 3. Context7 tools loaded from the stdio MCP server
-                    *c7_mcp.get_tools(),
+                    *c7_tools,
                 ],
-                max_iterations=10
+                max_steps=10
             )
         return self._agent
+        
+    def _execute_search_with_expansion(self, query: str, limit: int) -> str:
+        if _embeddings_ref is None:
+            return "Embeddings index not yet loaded."
+            
+        # 1. Multi-Query Expansion
+        messages = [{"role": "user", "content": f"Generate 2 alternative search queries based on this query to find relevant documents in a semantic vector database. Output ONLY the queries separated by newlines, no markdown or intro.\nQuery: {query}"}]
+        
+        try:
+            expansion_response = self.model(messages).content # type: ignore
+            queries = [query] + [q.strip() for q in expansion_response.split('\n') if q.strip()]
+        except Exception as e:
+            print(f"Query expansion failed: {e}")
+            queries = [query] # Fallback to original query on failure
+            
+        unique_parents = set()
+        formatted_results = []
+        
+        # 2. Search for all variations
+        for q in queries:
+            safe_query = q.replace("'", "''")
+            sql = f"SELECT id, text, name, source_code_uri, context7_id, parent_text, type, score FROM txtai WHERE similar('{safe_query}') LIMIT {limit * 3}"
+            
+            raw_results = _embeddings_ref.search(sql)
+            
+            for res in raw_results:
+                doc_type = res.get("type", "unknown")
+                parent_text = res.get("parent_text", "")
+                dedup_key = res.get("name") if doc_type == "gem" and res.get("name") else parent_text
+                
+                if dedup_key not in unique_parents:
+                    unique_parents.add(dedup_key)
+                    
+                    item = {
+                        "type": doc_type,
+                        "content": parent_text,
+                        "match_score": round(res.get("score", 0), 4),
+                        "matched_query": q
+                    }
+                    if doc_type == "gem":
+                        item.update({
+                            "name": res.get("name"),
+                            "context7_id": res.get("context7_id"),
+                            "source_code_uri": res.get("source_code_uri")
+                        })
+                        
+                    formatted_results.append(item)
+                    if len(formatted_results) >= limit:
+                        break
+            if len(formatted_results) >= limit:
+                break
+                
+        return json.dumps(formatted_results, indent=2)
 
     def run(self, query: str) -> str:
-        """Run the txtai Agent to answer a query."""
-        return self.agent(query)
+        """Run the txtai Agent to answer a query and manage memory window."""
+        # Index the user's query
+        self.index_memory(query, doc_type="chat_user")
+        
+        response = self.agent(query)
+        
+        # Index the agent's final response
+        self.index_memory(response, doc_type="chat_agent")
+        
+        # Prevent Context Bloat via Sliding Window
+        # Keep only the system prompt + the last 6 steps (3 user/agent turns)
+        if hasattr(self.agent, "memory") and hasattr(self.agent.memory, "steps"):
+            if len(self.agent.memory.steps) > 6:
+                # Assuming first step might be system prompt, but we simply keep last 6 for safety.
+                # Usually we'd preserve step 0 if it's a SystemPromptStep.
+                system_steps = [s for s in self.agent.memory.steps if getattr(s, "role", "") == "system"]
+                recent_steps = self.agent.memory.steps[-6:]
+                
+                new_steps = []
+                for s in system_steps:
+                    if s not in recent_steps:
+                        new_steps.append(s)
+                new_steps.extend(recent_steps)
+                
+                self.agent.memory.steps = new_steps
+                
+        return response
 
 if __name__ == "__main__":
     agent = TxtaiAgent()

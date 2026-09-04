@@ -1428,6 +1428,28 @@ class GemApp(App):
     def action_open_chat(self):
         tabs = self.query_one("#main-tabs", TabbedContent)
         tabs.active = TabConstants.CHAT
+        
+        with self._selection_lock:
+            if self._selected_gems:
+                try:
+                    chat_tab = self.query_one(AgentChatTab)
+                    input_widget = chat_tab.query_one("#chat-input", Input)
+                    
+                    gem_list = ", ".join(sorted(list(self._selected_gems)))
+                    context_prefix = f"Regarding the gems {gem_list}: "
+                    
+                    if input_widget.value and not input_widget.value.startswith("Regarding"):
+                        input_widget.value = context_prefix + input_widget.value
+                    elif not input_widget.value:
+                        input_widget.value = context_prefix
+                        
+                    input_widget.focus()
+                    
+                    self._selected_gems.clear()
+                    self._update_selection_status(0)
+                    self.notify(f"Injected {len(gem_list.split(','))} gem(s) into chat context.")
+                except Exception as e:
+                    self.log_error(f"Failed to inject context into chat: {e}")
 
 
     def action_refresh(self):

@@ -1,3 +1,6 @@
+data/txtai/rubygems_index/documents
+data/txtai/rubygems_index/embeddings
+data/rubygemdb.sqlite
 .env
 .venv/
 
