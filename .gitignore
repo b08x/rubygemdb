@@ -1,3 +1,4 @@
+.env
 .venv/
 
 .codemap/
@@ -6,3 +7,4 @@
 output/
 
 graphify-out/
+data/cache
