@@ -3,8 +3,8 @@ import os
 import json
 import sqlite3
 
-from txtai import Embeddings
-from smolagents import LiteLLMModel, ToolCallingAgent, tool
+from txtai import Embeddings  # type: ignore
+from smolagents import LiteLLMModel, ToolCallingAgent, tool  # type: ignore
 from smolagents import MCPClient
 from mcp import StdioServerParameters
 from rubygemdb.services.rubygems import RubyGemsService
@@ -298,7 +298,7 @@ Format your response exactly using these sections:
             )
         return self._agent
         
-    def get_trackboi_distiller_agent(self, provider: str = None, model_id: str = None) -> ToolCallingAgent:
+    def get_trackboi_distiller_agent(self, provider: str | None = None, model_id: str | None = None) -> ToolCallingAgent:
         """
         Creates a specialized Multi-Agent Collaboration agent purely for distilling implementation backlogs into Trackboi.
         Allows specifying an alternative provider/model.

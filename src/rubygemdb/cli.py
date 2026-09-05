@@ -1,5 +1,5 @@
 import argparse
-import yaml
+import yaml  # type: ignore
 import os
 import logging
 import requests

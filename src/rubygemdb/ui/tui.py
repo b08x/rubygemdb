@@ -619,7 +619,7 @@ class AgentChatTab(ScrollableContainer):
                         else:
                             response = formatted
             except Exception as e:
-                self.app.call_from_thread(self.log_debug, f"Failed to parse agent dictionary output: {e}")
+                self.app.call_from_thread(self.app.log_debug, f"Failed to parse agent dictionary output: {e}")  # type: ignore
                 # Fallback: if it failed to parse, at least replace literal \n with real newlines
                 # and strip the managed agent prefix
                 prefix = "Here is the final answer from your managed agent 'None': "
