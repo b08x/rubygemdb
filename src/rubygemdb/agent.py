@@ -241,12 +241,6 @@ class TxtaiAgent:
                 print(f"Failed to load codebase-memory-mcp: {e}")
                 cbm_tools = []
 
-            # TODO: Trackboi MCP Integration
-            # Eventually, add a feature that can use the trackboi MCP tool 
-            # to create/edit/remove tracks and cards if a path is specified.
-            # trackboi_mcp = MCPClient(...)
-            # trackboi_tools = [...]
-            
 
             # Wrap Context7 tools to intercept and index their results
             c7_tools = c7_mcp.get_tools()
@@ -304,6 +298,50 @@ Format your response exactly using these sections:
             )
         return self._agent
         
+    def get_trackboi_distiller_agent(self, provider: str = None, model_id: str = None) -> ToolCallingAgent:
+        """
+        Creates a specialized Multi-Agent Collaboration agent purely for distilling implementation backlogs into Trackboi.
+        Allows specifying an alternative provider/model.
+        """
+        # Default to the primary config model if none provided
+        if not model_id:
+            model_id = settings.trackboi_distiller_model
+        if provider and not model_id.startswith(f"{provider}/"):
+            model_id = f"{provider}/{model_id.split('/')[-1]}"
+            
+        model = LiteLLMModel(model_id=model_id)
+        
+        try:
+            trackboi_mcp = MCPClient(
+                StdioServerParameters(command="trackboi", args=["mcp"]),
+                structured_output=False,
+            )
+            # Give the agent access to all Trackboi tools (managing boards, columns, cards, tracks, files, etc)
+            trackboi_tools = trackboi_mcp.get_tools()
+        except Exception as e:
+            print(f"Failed to load trackboi-mcp: {e}")
+            trackboi_tools = []
+            
+        instructions = """You are the Trackboi Distillation Agent.
+Your ONLY job is to take an Implementation Backlog (User Stories and technical tasks) and distill it into Trackboi.
+You have access to the full suite of Trackboi MCP tools for managing boards, columns, tracks, cards, and files.
+
+When you receive a backlog and a target project folder:
+1. Call `switch_project(projectPath="<folder>")`.
+2. Ensure the board exists by calling `list_boards` (create one if necessary with `create_board`).
+3. Ensure required columns exist, or use default columns.
+4. For each User Story, create a Track. Save the returned track ID.
+5. For each technical task under that story, create a Card linked to the track ID.
+
+Execute these tools directly. Do not explain your reasoning beyond the necessary thought steps. Return a summary of the tracks and cards created."""
+
+        return ToolCallingAgent(
+            model=model,
+            instructions=instructions,
+            tools=trackboi_tools,
+            add_base_tools=False
+        )
+
     def _execute_search_with_expansion(self, query: str, limit: int) -> str:
         if _embeddings_ref is None:
             return "Embeddings index not yet loaded."
