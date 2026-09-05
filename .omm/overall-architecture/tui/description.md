@@ -1,0 +1,1 @@
+The TUI explorer (ui/tui.py) is a Textual-based interactive terminal application for browsing, managing, and querying classified gems. It provides a data table view, detail sidebar, export functionality, and an AI chat interface with the TxtaiAgent.

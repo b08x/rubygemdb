@@ -1,0 +1,4 @@
+- SQLite provides ACID transactions for concurrent access
+- JSON caches use write-through caching (save after each mutation)
+- txtai index can be force-rebuilt via --embed flag
+- Data directories created automatically on startup

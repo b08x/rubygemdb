@@ -1,0 +1,1 @@
+The data flow describes how gem inventory data moves through the system: CSV input → metadata verification via RubyGems API → heuristic/LLM classification → persistence to SQLite → YAML report generation → vector embedding indexing for semantic search.

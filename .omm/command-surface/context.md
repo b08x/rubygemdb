@@ -1,0 +1,1 @@
+The CLI is designed for headless batch processing of gem inventories, while the TUI provides interactive exploration with real-time classification, AI chat, and export capabilities. Both share the same underlying services and storage layers.

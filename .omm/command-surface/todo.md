@@ -1,0 +1,3 @@
+- Add `--dry-run` flag to CLI for preview without persistence
+- Add `--verbose` flag for detailed logging
+- Add `version` subcommand

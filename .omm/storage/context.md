@@ -1,0 +1,1 @@
+The storage layer is split between the StorageBase abstraction (JSON and SQLite implementations) and direct file-based caches used by individual services. The txtai index is built from SQLite inventory data and augmented with chat history and Context7 documentation.

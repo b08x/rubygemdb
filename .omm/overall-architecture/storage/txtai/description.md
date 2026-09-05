@@ -1,0 +1,1 @@
+txtai vector index (agent.py) using sqlite-vec backend with hybrid search (dense + sparse). Indexes gem descriptions, chat history, and Context7 documentation for semantic retrieval with recency boosting.

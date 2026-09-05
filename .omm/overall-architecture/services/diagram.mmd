@@ -1,0 +1,11 @@
+graph LR
+    classifier["GemClassifier\nservices/classifier.py"]
+    rubygems["RubyGems Service\nservices/rubygems.py"]
+    llm["LLM Service\nservices/llm.py"]
+    context7["Context7 Service\nservices/context7.py"]
+
+    classifier -->|"fetches gem metadata"| rubygems
+    classifier -->|"generates agent descriptions"| llm
+    classifier -->|"heuristic + LLM classification"| classifier
+    rubygems -->|"caches API responses"| rubygems
+    llm -->|"caches LLM responses"| llm

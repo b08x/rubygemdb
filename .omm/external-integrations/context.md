@@ -1,0 +1,1 @@
+External integrations serve two purposes: data enrichment (RubyGems, Context7) for the classification pipeline, and AI-powered search/analysis (Mistral, Ollama, MCP servers) for the agent chat interface. Each integration has independent authentication and rate limiting.

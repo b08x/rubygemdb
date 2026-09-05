@@ -1,0 +1,9 @@
+created: 2026-09-05T03:30:48.906Z
+updated: 2026-09-05T03:30:48.907Z
+update_count: 1
+last_field: description
+kind: nested-class
+title: sqlite
+children: []
+parentPath:
+  - storage

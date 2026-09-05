@@ -1,0 +1,4 @@
+- Python 3.14+ required
+- External API rate limits: RubyGems (0.1s), Context7 (0.2s), Mistral LLM (0.5s)
+- txtai embeddings require Ollama running locally (embeddinggemma model)
+- SQLite used as primary persistence layer

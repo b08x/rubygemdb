@@ -1,0 +1,3 @@
+- API keys required: MISTRAL_API_KEY, CONTEXT7_API_KEY (optional but needed for full functionality)
+- Ollama must be running locally with embeddinggemma model for agent embeddings
+- MCP servers must be installed and accessible via stdio transport

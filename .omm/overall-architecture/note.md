@@ -1,0 +1,1 @@
+The 12-category classification system: runtime_spine, cli_terminal_ui, storage_persistence, async_networking_orchestration, ai_nlp, data_processing, retrieval_similarity_fuzzy, algorithms_knowledge_structures, validation_types, parsing_encoding, debugging_introspection, mcp_tooling.

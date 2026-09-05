@@ -1,0 +1,15 @@
+graph TD
+    rubygemdb["rubygemdb CLI\ncli.py:run_cli"]
+    process["process\ncli.py:run_process"]
+    rubygemdb-tui["rubygemdb-tui\nui/tui.py:run_tui"]
+
+    rubygemdb -->|"subcommand"| process
+    rubygemdb -->|"entry point"| rubygemdb-tui
+
+    process -->|"--csv"| csv["CSV Input"]
+    process -->|"--out"| yaml["YAML Output"]
+    process -->|"--skip-verify"| phase2["Skip Phase 1"]
+    process -->|"--embed"| phase3["Generate Embeddings"]
+
+    classDef entry fill:#89b4fa,stroke:#89b4fa,color:#1e1e2e
+    class rubygemdb,process,rubygemdb-tui entry

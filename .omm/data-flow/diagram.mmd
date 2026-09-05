@@ -1,0 +1,24 @@
+graph TD
+    csv["CSV Input\ndata/gems-inventory.csv"]
+    rubygems-api["RubyGems API\nrubygems.org"]
+    context7-api["Context7 API\ncontext7.com"]
+    llm-api["Mistral LLM API\napi.mistral.ai"]
+    classifier["Gem Classifier\nservices/classifier.py"]
+    sqlite-db["SQLite DB\ndata/rubygemdb.sqlite"]
+    yaml-output["YAML Reports\noutput/*.yaml"]
+    txtai-index["txtai Index\ndata/txtai/"]
+
+    csv -->|"gem names"| classifier
+    rubygems-api -->|"gem metadata"| classifier
+    classifier -->|"classification results"| sqlite-db
+    classifier -->|"categorized gems"| yaml-output
+    sqlite-db -->|"inventory data"| txtai-index
+    context7-api -->|"library IDs"| sqlite-db
+    llm-api -->|"agent descriptions"| classifier
+
+    classDef entry fill:#89b4fa,stroke:#89b4fa,color:#1e1e2e
+    classDef store fill:#a6e3a1,stroke:#a6e3a1,color:#1e1e2e
+    classDef external fill:#585b70,stroke:#585b70,color:#cdd6f4
+    class csv,yaml-output entry
+    class sqlite-db,txtai-index store
+    class rubygems-api,context7-api,llm-api external

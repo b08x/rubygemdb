@@ -1,0 +1,3 @@
+- CLI uses argparse for command parsing
+- TUI requires terminal with Textual support (256 colors recommended)
+- Both entry points can be run via `uv run` for development

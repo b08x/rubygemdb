@@ -1,0 +1,1 @@
+LLM service (services/llm.py) for Mistral API integration with SHA256-hashed prompt caching. Builds classification prompts and parses JSON responses for gem categorization and agent-optimized descriptions.

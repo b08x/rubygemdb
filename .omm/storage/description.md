@@ -1,0 +1,1 @@
+RubyGemDB uses 6 storage artifacts: SQLite database (primary persistence), two JSON caches (gem API and LLM responses), a classified gems JSON file (TUI cache), txtai vector index (embeddings), and YAML output reports (classification results).

@@ -1,0 +1,3 @@
+- CLI provides interactive prompts for Context7 ID selection during verification
+- TUI uses Rich for progress bars and formatted output
+- Both share the same SQLiteStorage implementation

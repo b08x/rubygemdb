@@ -1,0 +1,12 @@
+graph LR
+    base["Storage Base\nstorage/base.py"]
+    json["JSON Storage\nstorage/json_storage.py"]
+    sqlite["SQLite Storage\nstorage/sqlite_storage.py"]
+    txtai["txtai Index\nagent.py"]
+
+    json -->|"implements"| base
+    sqlite -->|"implements"| base
+    txtai -->|"reads from"| sqlite
+
+    classDef store fill:#a6e3a1,stroke:#a6e3a1,color:#1e1e2e
+    class json,sqlite,txtai store

@@ -1,0 +1,4 @@
+- SQLite used as primary storage with inventory and classified_gems tables
+- JSON caches are flat files with in-memory caching during runtime
+- txtai index persisted to disk and loaded on startup
+- All storage paths configurable via core/config.py Settings

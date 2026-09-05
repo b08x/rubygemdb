@@ -1,0 +1,1 @@
+The system processes gem inventories from CSV files, fetches metadata from RubyGems API, classifies gems using heuristics and optionally an LLM (Mistral), enriches with Context7 documentation links, and persists results to SQLite. The TUI provides interactive browsing, editing, and an AI chat interface powered by txtai vector embeddings and MCP tools.
