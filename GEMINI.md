@@ -11,6 +11,9 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
   - `services/`: Specialized services for RubyGems API, LLM classification, and Context7 integration.
   - `storage/`: Multi-backend storage (SQLite + JSON) for inventory and results.
 - **Interactive Explorer (TUI)**: A feature-rich Textual-based UI for browsing, filtering, and managing gem classifications.
+
+- **Codebase Memory MCP**: Native integration with the codebase-memory-mcp server to ground LLM-generated integration plans in the actual architectural structure of target projects.
+- **Other Steve Prompt Architect**: A highly aggressive system persona that intercepts raw user queries, strips out conversational slop, and generates concrete, SFL-compliant queries for the txtai vector database.
 - **Context7 Integration**: Deep integration with Context7 for library search, manual ID entry, and batch cheatsheet generation for gems and their dependencies.
 
 ## Building and Running

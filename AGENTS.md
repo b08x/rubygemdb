@@ -119,6 +119,14 @@ export CONTEXT7_API_KEY="your_context7_key"
 
 ## Classification Logic
 
+
+### Dynamic RAG Workflow
+1. User enters a query (optionally selecting a target codebase project from the TUI dropdown).
+2. The query is processed by the "Other Steve" Prompt Architect to generate strict, SFL-compliant semantic variations.
+3. The variations are searched against the `txtai` database, applying a 30% recency boost for updated gems.
+4. If a target project is selected, the agent calls `get_architecture` and `search_graph` via Codebase Memory MCP to inspect the target structure.
+5. The agent synthesizes the Context7 cheatsheets, semantic gem matches, and actual codebase structure to output a strict Pragmatic Implementation Backlog.
+
 ### Heuristic Classification
 First-pass classification based on gem name patterns and dependencies:
 - `runtime_spine`: `rails`, `active_support`, `bundler`, `dry-*` (generic)

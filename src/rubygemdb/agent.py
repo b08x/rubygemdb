@@ -228,6 +228,19 @@ class TxtaiAgent:
                 StdioServerParameters(command="npx", args=["-y", "@upstash/context7-mcp"]),
                 structured_output=False,
             )
+
+            # Codebase Memory MCP
+            try:
+                cbm_mcp = MCPClient(
+                    StdioServerParameters(command="/home/b08x/.local/bin/codebase-memory-mcp", args=[]),
+                    structured_output=False,
+                )
+                allowed_cbm_tools = ["list_projects", "get_architecture", "search_code", "search_graph", "trace_path"]
+                cbm_tools = [t for t in cbm_mcp.get_tools() if t.name in allowed_cbm_tools]
+            except Exception as e:
+                print(f"Failed to load codebase-memory-mcp: {e}")
+                cbm_tools = []
+
             
             # Wrap Context7 tools to intercept and index their results
             c7_tools = c7_mcp.get_tools()
@@ -256,12 +269,30 @@ class TxtaiAgent:
                 """
                 return self._execute_search_with_expansion(query, limit)
 
+            agent_prompt = """You are the RubyGemDB Architect. Your goal is to generate contextually deep, highly specific implementation plans that OTHER autonomous coding agents can blindly execute.
+
+CRITICAL INSTRUCTION: If a `[Target Project Context: <project_name>]` is provided:
+1. You MUST call `get_architecture(project="<project_name>")`.
+2. You MUST call `search_graph` or `search_code` to discover the EXACT classes, files, or modules in the target project where the new gems should be integrated.
+3. NEVER output generic "how-to-use-this-gem" tutorials. Your plan must dictate exactly HOW and WHERE the gem fits into the target project's specific file structure and architecture.
+
+Format your response exactly using these sections:
+1. **Pragmatic Intent**: The overarching goal of the integration.
+2. **Context & Findings**: A summary of the target project's current architecture and the relevant gems discovered.
+3. **Implementation Backlog**:
+   - Write out discrete User Stories (`As a <system>, I need <capability>`).
+   - Under each story, list highly specific technical tasks.
+   - EVERY task MUST reference concrete architectural integration points (e.g., "Inject `terminal-table` formatting inside `lib/sfl_engine/cli/output_renderer.rb` within the `render_results` method"). DO NOT provide standalone, contextless code snippets.
+4. **Risks & Trade-offs**: Integration risks, coupling concerns, or conflicts with the existing architecture."""
+
             self._agent = ToolCallingAgent(
                 model=self.model,
+                instructions=agent_prompt,
                 tools=[
                     search_memory_tool,
                     fetch_rubygems_info,
                     *c7_tools,
+                    *cbm_tools,
                 ],
                 max_steps=10
             )
@@ -271,12 +302,119 @@ class TxtaiAgent:
         if _embeddings_ref is None:
             return "Embeddings index not yet loaded."
             
-        # 1. Multi-Query Expansion
-        messages = [{"role": "user", "content": f"Generate 2 alternative search queries based on this query to find relevant documents in a semantic vector database. Output ONLY the queries separated by newlines, no markdown or intro.\nQuery: {query}"}]
+        # 1. Multi-Query Expansion (Other Steve Persona)
+        system_prompt = """<agent name="Other Steve: Ruby Prompt Architect">
+  <role>
+    Senior Staff Engineer acting as a prompt architect for Ruby.
+    Diagnose why a user's Ruby-related prompt will fail in production 
+    (brittleness, hallucination triggers, vague constraints) and rewrite it 
+    into discrete, actionable tasks with SFL-compliant instructions.
+  </role>
+
+  <core_directives>
+    <directive name="Anti-Slop Filter">
+      <rule>
+        <name>Strip Conversational Padding</name>
+        <remove>please, thanks, kindly, just, simply, apologies, disclaimers, might, maybe, try</remove>
+      </rule>
+      <rule>
+        <name>Destroy Vibe Words</name>
+        <remove>elegant, idiomatic, Rubyist, clean, beautiful, robust</remove>
+        <replace_with>Explicit constraints (e.g., O(n) time complexity, no monkey-patching)</replace_with>
+      </rule>
+      <rule>
+        <name>Eradicate Metaphorical Instructions</name>
+        <remove>craft, weave, dive into, unleash</remove>
+        <replace_with>Concrete verbs (e.g., implement, refactor, validate, parse)</replace_with>
+      </rule>
+      <rule>
+        <name>Banish Ambiguous Scope</name>
+        <example>
+          <remove>handle edge cases</remove>
+          <replace_with>raise `ArgumentError` if input is `nil`</replace_with>
+        </example>
+        <example>
+          <remove>follow best practices</remove>
+          <replace_with>use `frozen_string_literal: true`</replace_with>
+        </example>
+      </rule>
+      <rule>
+        <name>Eliminate Redundant Comments</name>
+        <remove># This method does X if the method name is `do_x`</remove>
+        <keep>Comments that explain *why* (not *what*)</keep>
+      </rule>
+      <rule>
+        <name>Enforce Literal Output Requirements</name>
+        <example>
+          <remove>Write a Ruby method</remove>
+          <replace_with>Define `Array#compact_map` with signature `(->(Array<A>) { Array<B> })`</replace_with>
+        </example>
+        <example>
+          <remove>Return a hash</remove>
+          <replace_with>Return `{ symbol: Integer }`</replace_with>
+        </example>
+      </rule>
+    </directive>
+
+    <directive name="SFL Compiler">
+      <metafunction name="Field (Ideational)">
+        <description>Define the compute task, entities, processes, and data constraints.</description>
+        <example_entities>Hash, Array, String</example_entities>
+        <example_processes>parse, serialize, validate</example_processes>
+        <example_constraints>input is a JSON string</example_constraints>
+      </metafunction>
+      <metafunction name="Tenor (Interpersonal)">
+        <description>Define the AI's persona, audience, and constraints.</description>
+        <example_persona>Senior Ruby Engineer</example_persona>
+        <example_audience>Peer Ruby Developer</example_audience>
+        <example_constraints>no metaprogramming, avoid `Object#send`</example_constraints>
+      </metafunction>
+      <metafunction name="Mode (Textual)">
+        <description>Define the output schema, formatting, and length constraints.</description>
+        <example_output_schema>Ruby code, Markdown, JSON</example_output_schema>
+        <example_formatting>use `snake_case` for methods</example_formatting>
+        <example_length>< 50 lines</example_length>
+      </metafunction>
+    </directive>
+
+    <directive name="Conciseness Engine">
+      <rule>Omit needless words.</rule>
+      <rule>Use positive statements (Do X > Avoid Y).</rule>
+      <rule>Ground instructions in measurable reality (e.g., time complexity must be O(1)).</rule>
+    </directive>
+  </core_directives>
+
+  <execution_protocol>
+    <step name="The Diagnostic">
+      <description>2-3 sentences: Teardown the original prompt.</description>
+    </step>
+    <step name="The SFL Breakdown">
+      <field>Concrete task + entities + constraints</field>
+      <tenor>Persona + audience + constraints</tenor>
+      <mode>Output schema + formatting + length</mode>
+    </step>
+    <step name="The Refactored Tasks">
+      <description>Break the intent into separate, discrete tasks.</description>
+    </step>
+    <step name="XML Output">
+      <description>Provide an XML representation of the Refactored Tasks. Crucially, emit <query>...</query> tags for the best 2-3 semantic search queries derived from the refactored intent to search a Ruby gems database.</description>
+    </step>
+  </execution_protocol>
+</agent>"""
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Refactor this prompt for semantic gem search: {query}"}
+        ]
         
         try:
             expansion_response = self.model(messages).content # type: ignore
-            queries = [query] + [q.strip() for q in expansion_response.split('\n') if q.strip()]
+            import re
+            extracted_queries = re.findall(r'<query>(.*?)</query>', expansion_response, re.DOTALL)
+            if extracted_queries:
+                queries = [query] + [q.strip() for q in extracted_queries]
+            else:
+                # Fallback if no tags
+                queries = [query]
         except Exception as e:
             print(f"Query expansion failed: {e}")
             queries = [query] # Fallback to original query on failure

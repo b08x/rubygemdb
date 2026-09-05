@@ -355,6 +355,9 @@ class AgentChatTab(ScrollableContainer):
         with Vertical(id="chat-container"):
             yield Label("RubyGemDB Agent (Txtai/Ollama)", id="chat-title")
             yield RichLog(id="chat-log", markup=True, wrap=True)
+            from textual.widgets import Select
+            yield Select([], prompt="Optional: Select a codebase memory project for context", id="project-input")
+            yield Label("", id="progress-status")
             yield Input(placeholder="Ask the agent a question...", id="chat-input")
             with Horizontal(id="chat-actions"):
                 yield Button("Export to Markdown", id="export-chat-btn", variant="primary")
@@ -382,6 +385,32 @@ class AgentChatTab(ScrollableContainer):
         self.log_widget = self.query_one("#chat-log", RichLog)
         self._add_message("agent", "System ready. Loading embeddings index...")
         self.load_agent()
+        self.load_projects()
+
+    @work(thread=True)
+    def load_projects(self):
+        import subprocess
+        import json
+        import re
+        from textual.widgets import Select
+        try:
+            result = subprocess.run(["/home/b08x/.local/bin/codebase-memory-mcp", "cli", "--json", "list_projects"], capture_output=True, text=True)
+            if result.returncode == 0:
+                output = result.stdout
+                match = re.search(r'\{.*\}', output, re.DOTALL)
+                if match:
+                    data = json.loads(match.group(0))
+                    text_content = data.get("content", [{}])[0].get("text", "{}")
+                    projects = json.loads(text_content).get("projects", [])
+                    options = [(f"{p['name']} ({p['root_path']})", p['name']) for p in projects]
+                    
+                    def update_ui():
+                        select = self.query_one("#project-input", Select)
+                        select.set_options(options)
+                    
+                    self.app.call_from_thread(update_ui)
+        except Exception as e:
+            self.app.call_from_thread(self.log_widget.write, f"[dim]Failed to load projects: {e}[/dim]")
 
     @work(thread=True)
     def load_agent(self):
@@ -392,28 +421,92 @@ class AgentChatTab(ScrollableContainer):
             self.app.call_from_thread(self._add_message, "error", f"Failed to load agent: {e}")
 
     @on(Input.Submitted, "#chat-input")
+    @on(Input.Submitted, "#chat-input")
     def submit_query(self, event: Input.Submitted) -> None:
         query = event.value.strip()
         if not query:
             return
 
         event.input.value = ""
+        try:
+            from textual.widgets import Select
+            val = self.query_one("#project-input", Select).value
+            if val == Select.BLANK:
+                project_context = ""
+            else:
+                project_context = str(val).strip()
+        except Exception:
+            project_context = ""
+            
         self._add_message("user", query)
+        
+        if project_context:
+            self.log_widget.write(f"[dim]Detected Target Project: {project_context}[/dim]")
+            query = f"[Target Project Context: {project_context}]\nUser Query: {query}"
 
         if not self.agent:
             self._add_message("error", "Still loading... please wait.")
             return
 
         self.process_query(query)
-
     @work(thread=True)
     def process_query(self, query: str) -> None:
-        self.app.call_from_thread(self.log_widget.write, "[dim]Agent is thinking...[/dim]")
+        self.app.call_from_thread(self._start_thinking)
+        
+        import threading
+        import time
+        self._thinking = True
+        
+        def status_updater():
+            statuses = [
+                "Tokenizing semantic input...",
+                "Activating 'Other Steve' query expansion...",
+                "Injecting Codebase Memory context...",
+                "Traversing knowledge graph...",
+                "Evaluating heuristic confidence bounds...",
+                "Synthesizing pragmatic backlog...",
+                "Formatting User Stories..."
+            ]
+            idx = 0
+            while self._thinking:
+                try:
+                    # Textual markup for a dim pulsing effect
+                    self.app.call_from_thread(self._update_progress, f"[b cyan]✨ {statuses[idx % len(statuses)]} ✨[/b cyan]")
+                except Exception:
+                    pass
+                idx += 1
+                time.sleep(2)
+        
+        threading.Thread(target=status_updater, daemon=True).start()
+
         try:
             response = self.agent.run(query)
+            self._thinking = False
             self.app.call_from_thread(self._add_message, "agent", str(response))
         except Exception as e:
+            self._thinking = False
             self.app.call_from_thread(self._add_message, "error", str(e))
+        finally:
+            self._thinking = False
+            self.app.call_from_thread(self._stop_thinking)
+
+    def _start_thinking(self):
+        self.log_widget.loading = True
+        
+    def _update_progress(self, text):
+        try:
+            from textual.widgets import Label
+            self.query_one("#progress-status", Label).update(text)
+        except Exception:
+            pass
+            
+    def _stop_thinking(self):
+        self.log_widget.loading = False
+        try:
+            from textual.widgets import Label
+            self.query_one("#progress-status", Label).update("")
+        except Exception:
+            pass
 
     def _export_chat_to_markdown(self) -> None:
         """Export the chat conversation to a markdown file."""

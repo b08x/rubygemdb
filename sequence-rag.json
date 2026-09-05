@@ -1,0 +1,292 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "TxtaiAgent Processing Sequence",
+    "subtitle": "Request lifecycle with query expansion, vector search, and Codebase Memory traversal",
+    "output": "sequence-agent-rendered.html",
+    "viewBox": [
+      1000,
+      1060
+    ],
+    "animation": "trace",
+    "quality_profile": "showcase"
+  },
+  "participants": [
+    {
+      "id": "user",
+      "type": "external",
+      "label": "User",
+      "sublabel": "dev session"
+    },
+    {
+      "id": "ui",
+      "type": "frontend",
+      "label": "TUI Chat",
+      "sublabel": "Context Select"
+    },
+    {
+      "id": "agent",
+      "type": "backend",
+      "label": "TxtaiAgent",
+      "sublabel": "smolagents"
+    },
+    {
+      "id": "cbm",
+      "type": "backend",
+      "label": "Codebase MCP",
+      "sublabel": "Neo4j Graph"
+    },
+    {
+      "id": "db",
+      "type": "database",
+      "label": "txtai",
+      "sublabel": "sqlite-vec"
+    },
+    {
+      "id": "llm",
+      "type": "cloud",
+      "label": "Mistral LLM",
+      "sublabel": "LiteLLM"
+    }
+  ],
+  "segments": [
+    {
+      "from": 160,
+      "to": 320,
+      "label": "Intake & Memory"
+    },
+    {
+      "from": 340,
+      "to": 500,
+      "label": "Multi-Query RAG"
+    },
+    {
+      "from": 520,
+      "to": 680,
+      "label": "Codebase Graph Traversal"
+    },
+    {
+      "from": 680,
+      "to": 920,
+      "label": "Generation & Cleanup"
+    }
+  ],
+  "messages": [
+    {
+      "id": "m1",
+      "from": "user",
+      "to": "ui",
+      "y": 180,
+      "label": "asks question + selects project",
+      "variant": "default"
+    },
+    {
+      "id": "m2",
+      "from": "ui",
+      "to": "agent",
+      "y": 220,
+      "label": "run(query, context)",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m3",
+      "from": "agent",
+      "to": "db",
+      "y": 260,
+      "label": "index_memory(query)",
+      "variant": "dashed"
+    },
+    {
+      "id": "m4",
+      "from": "db",
+      "to": "agent",
+      "y": 300,
+      "label": "upserted",
+      "variant": "return"
+    },
+    {
+      "id": "m5",
+      "from": "agent",
+      "to": "llm",
+      "y": 360,
+      "label": "'Other Steve' expansion",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m6",
+      "from": "llm",
+      "to": "agent",
+      "y": 400,
+      "label": "<query> variations",
+      "variant": "return"
+    },
+    {
+      "id": "m7",
+      "from": "agent",
+      "to": "db",
+      "y": 440,
+      "label": "vector search (3x)",
+      "variant": "default"
+    },
+    {
+      "id": "m8",
+      "from": "db",
+      "to": "agent",
+      "y": 480,
+      "label": "raw matches",
+      "variant": "return"
+    },
+    {
+      "id": "c1",
+      "from": "agent",
+      "to": "cbm",
+      "y": 540,
+      "label": "get_architecture(project)",
+      "variant": "emphasis"
+    },
+    {
+      "id": "c2",
+      "from": "cbm",
+      "to": "agent",
+      "y": 580,
+      "label": "schema & tech stack",
+      "variant": "return"
+    },
+    {
+      "id": "c3",
+      "from": "agent",
+      "to": "cbm",
+      "y": 620,
+      "label": "search_graph(target_class)",
+      "variant": "default"
+    },
+    {
+      "id": "c4",
+      "from": "cbm",
+      "to": "agent",
+      "y": 660,
+      "label": "file path (/lib/cli/...)",
+      "variant": "return"
+    },
+    {
+      "id": "m9",
+      "from": "agent",
+      "to": "llm",
+      "y": 720,
+      "label": "prompt w/ graph context & gems",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m10",
+      "from": "llm",
+      "to": "agent",
+      "y": 760,
+      "label": "User Stories + File Paths",
+      "variant": "return"
+    },
+    {
+      "id": "m11",
+      "from": "agent",
+      "to": "db",
+      "y": 800,
+      "label": "index_memory(response)",
+      "variant": "dashed"
+    },
+    {
+      "id": "m12",
+      "from": "agent",
+      "to": "ui",
+      "y": 840,
+      "label": "pragmatic backlog",
+      "variant": "return"
+    },
+    {
+      "id": "m13",
+      "from": "ui",
+      "to": "user",
+      "y": 880,
+      "label": "render",
+      "variant": "return"
+    }
+  ],
+  "activations": [
+    {
+      "participant": "ui",
+      "from": 210,
+      "to": 885,
+      "type": "frontend"
+    },
+    {
+      "participant": "agent",
+      "from": 220,
+      "to": 845,
+      "type": "backend"
+    },
+    {
+      "participant": "db",
+      "from": 255,
+      "to": 305,
+      "type": "database"
+    },
+    {
+      "participant": "llm",
+      "from": 355,
+      "to": 405,
+      "type": "cloud"
+    },
+    {
+      "participant": "db",
+      "from": 435,
+      "to": 485,
+      "type": "database"
+    },
+    {
+      "participant": "cbm",
+      "from": 535,
+      "to": 665,
+      "type": "backend"
+    },
+    {
+      "participant": "llm",
+      "from": 715,
+      "to": 765,
+      "type": "cloud"
+    },
+    {
+      "participant": "db",
+      "from": 795,
+      "to": 825,
+      "type": "database"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "Query dismantling",
+      "items": [
+        "The 'Other Steve' persona intercepts the raw query and strips conversational padding.",
+        "It outputs explicit `<query>` tags representing concrete Ruby tasks.",
+        "These are fed into the Hybrid Vector DB for precise matching."
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Architectural Grounding",
+      "items": [
+        "Before generating the final answer, the Agent pauses to inspect the target project.",
+        "It queries the Codebase Memory MCP for the target's architecture and graph relationships.",
+        "This prevents it from hallucinating file paths or generic README tutorials."
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Pragmatic Backlog Output",
+      "items": [
+        "The LLM synthesizes the semantic gem matches and the exact codebase graph schema.",
+        "It generates executable User Stories anchored to specific files and methods.",
+        "The response can be blindly executed by other downstream coding agents."
+      ]
+    }
+  ]
+}
