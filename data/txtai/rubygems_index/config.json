@@ -9,7 +9,7 @@
   },
   "fusion": "rrf",
   "dimensions": 768,
-  "offset": 767,
+  "offset": 1308,
   "build": {
     "create": "2026-09-04T23:49:51Z",
     "python": "3.14.7",
@@ -20,7 +20,7 @@
     "system": "Linux (x86_64)",
     "txtai": "9.13.0"
   },
-  "update": "2026-09-04T23:55:17Z",
+  "update": "2026-09-05T02:42:45Z",
   "format": "json",
   "autoid": 644
 }

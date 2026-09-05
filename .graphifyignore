@@ -15,3 +15,7 @@ README.md
 .ruff_cache
 pyproject.toml
 .venv/
+*.html
+*.json
+.trackboi/
+scratch/
