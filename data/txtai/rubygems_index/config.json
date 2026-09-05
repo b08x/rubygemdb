@@ -9,9 +9,9 @@
   },
   "fusion": "rrf",
   "dimensions": 768,
-  "offset": 644,
+  "offset": 767,
   "build": {
-    "create": "2026-09-04T22:06:54Z",
+    "create": "2026-09-04T23:49:51Z",
     "python": "3.14.7",
     "settings": {
       "sqlite": "3.53.4",
@@ -20,6 +20,7 @@
     "system": "Linux (x86_64)",
     "txtai": "9.13.0"
   },
-  "update": "2026-09-04T22:06:54Z",
-  "format": "json"
+  "update": "2026-09-04T23:55:17Z",
+  "format": "json",
+  "autoid": 644
 }

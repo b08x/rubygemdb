@@ -2,7 +2,6 @@ import re
 import os
 import json
 import sqlite3
-from typing import List, Dict, Optional, Any
 
 from txtai import Embeddings
 from smolagents import LiteLLMModel, ToolCallingAgent, tool
@@ -136,9 +135,18 @@ class TxtaiAgent:
             cursor.execute("SELECT name, homepage, source_code_uri, context7_id, description FROM inventory")
             rows = cursor.fetchall()
             
+            # Load gem_cache.json for last updated date
+            import json
+            gem_cache = {}
+            if os.path.exists("data/cache/gem_cache.json"):
+                with open("data/cache/gem_cache.json", "r") as f:
+                    gem_cache = json.load(f)
+            
             def stream_data():
                 for i, row in enumerate(rows):
                     gem_name = row["name"]
+                    gem_info = gem_cache.get(gem_name, {})
+                    updated_at = gem_info.get("version_created_at", "2000-01-01T00:00:00.000Z")
                     # Parent chunk is the full description
                     parent_text = row["description"] or f"Ruby gem {gem_name}"
                     
@@ -158,7 +166,8 @@ class TxtaiAgent:
                             "source_code_uri": row["source_code_uri"],
                             "context7_id": row["context7_id"],
                             "parent_text": parent_text, # Parent chunk stored for context recall
-                            "type": "gem"
+                            "type": "gem",
+                            "updated_at": updated_at
                         }
                         yield document
             
@@ -273,12 +282,15 @@ class TxtaiAgent:
             queries = [query] # Fallback to original query on failure
             
         unique_parents = set()
-        formatted_results = []
+        candidates = []
         
-        # 2. Search for all variations
+        from datetime import datetime
+        current_year = datetime.now().year
+        
+        # 2. Search for all variations and gather candidates
         for q in queries:
             safe_query = q.replace("'", "''")
-            sql = f"SELECT id, text, name, source_code_uri, context7_id, parent_text, type, score FROM txtai WHERE similar('{safe_query}') LIMIT {limit * 3}"
+            sql = f"SELECT id, text, name, source_code_uri, context7_id, parent_text, type, updated_at, score FROM txtai WHERE similar('{safe_query}') LIMIT {limit * 4}"
             
             raw_results = _embeddings_ref.search(sql)
             
@@ -290,24 +302,47 @@ class TxtaiAgent:
                 if dedup_key not in unique_parents:
                     unique_parents.add(dedup_key)
                     
+                    match_score = res.get("score", 0.0)
+                    updated_at_str = res.get("updated_at", "2000-01-01T00:00:00.000Z")
+                    
+                    # Calculate recency boost
+                    recency_score = 0.0
+                    try:
+                        dt = datetime.fromisoformat(updated_at_str.replace("Z", "+00:00"))
+                        # Boost starts decaying from the current year
+                        years_old = current_year - dt.year
+                        if years_old <= 0:
+                            recency_score = 1.0
+                        elif years_old < 10:
+                            recency_score = 1.0 - (years_old * 0.1) # 0.9 for 1 yr old, 0.1 for 9 yrs old
+                    except Exception:
+                        pass
+                        
+                    # Hybrid weighting: 70% semantic, 30% recency
+                    hybrid_score = (match_score * 0.7) + (recency_score * 0.3)
+                    
                     item = {
                         "type": doc_type,
                         "content": parent_text,
-                        "match_score": round(res.get("score", 0), 4),
+                        "match_score": round(match_score, 4),
+                        "recency_score": round(recency_score, 4),
+                        "hybrid_score": round(hybrid_score, 4),
                         "matched_query": q
                     }
+                    
                     if doc_type == "gem":
                         item.update({
                             "name": res.get("name"),
+                            "last_updated": updated_at_str,
                             "context7_id": res.get("context7_id"),
                             "source_code_uri": res.get("source_code_uri")
                         })
                         
-                    formatted_results.append(item)
-                    if len(formatted_results) >= limit:
-                        break
-            if len(formatted_results) >= limit:
-                break
+                    candidates.append(item)
+
+        # 3. Sort by hybrid score and limit
+        candidates.sort(key=lambda x: x["hybrid_score"], reverse=True)
+        formatted_results = candidates[:limit]
                 
         return json.dumps(formatted_results, indent=2)
 
