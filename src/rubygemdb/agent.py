@@ -241,7 +241,13 @@ class TxtaiAgent:
                 print(f"Failed to load codebase-memory-mcp: {e}")
                 cbm_tools = []
 
+            # TODO: Trackboi MCP Integration
+            # Eventually, add a feature that can use the trackboi MCP tool 
+            # to create/edit/remove tracks and cards if a path is specified.
+            # trackboi_mcp = MCPClient(...)
+            # trackboi_tools = [...]
             
+
             # Wrap Context7 tools to intercept and index their results
             c7_tools = c7_mcp.get_tools()
             for tool_obj in c7_tools:

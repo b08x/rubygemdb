@@ -227,6 +227,40 @@ class ConfirmDeleteScreen(ModalScreen[bool]):
     def on_cancel(self):
         self.dismiss(False)
 
+
+class DistillSelectionScreen(ModalScreen[str]):
+    """A screen to select an implementation option/story to distill to Trackboi."""
+    def __init__(self, options: list[str]):
+        super().__init__()
+        self.options = options
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="distill-dialog", classes="modal-dialog"):
+            yield Label("Distill to Trackboi", classes="section-title")
+            yield Label("Select an implementation option to create tracks/cards:", classes="help-text")
+            
+            list_items = []
+            for opt in self.options:
+                item = ListItem(Label(opt))
+                setattr(item, "option_text", opt)
+                list_items.append(item)
+                
+            yield ListView(*list_items, id="options-list")
+            
+            with Horizontal(id="dialog-buttons"):
+                yield Button("Cancel", id="cancel-btn", variant="error")
+
+    @on(ListView.Selected)
+    def on_selected(self, event: ListView.Selected):
+        opt = getattr(event.item, "option_text", None)
+        if opt:
+            self.dismiss(opt)
+
+    @on(Button.Pressed, "#cancel-btn")
+    def on_cancel(self):
+        self.dismiss(None)
+
+
 class ExportTab(ScrollableContainer):
     """Export tab with format selection and path input."""
     
@@ -352,16 +386,20 @@ class AgentChatTab(ScrollableContainer):
         self._chat_messages: list[dict] = []
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="chat-container"):
-            yield Label("RubyGemDB Agent (Txtai/Ollama)", id="chat-title")
-            yield RichLog(id="chat-log", markup=True, wrap=True)
-            from textual.widgets import Select
-            yield Select([], prompt="Optional: Select a codebase memory project for context", id="project-input")
-            yield Label("", id="progress-status")
-            yield Input(placeholder="Ask the agent a question...", id="chat-input")
-            with Horizontal(id="chat-actions"):
-                yield Button("Export to Markdown", id="export-chat-btn", variant="primary")
-                yield Button("Clear Chat", id="clear-chat-btn", variant="error")
+        with Horizontal(id="chat-split"):
+            with Vertical(id="chat-main"):
+                yield Label("RubyGemDB Agent (Txtai/Ollama)", id="chat-title")
+                yield RichLog(id="chat-log", markup=True, wrap=True)
+                from textual.widgets import Select
+                yield Select([], prompt="Optional: Select a codebase memory project for context", id="project-input")
+                yield Input(placeholder="Ask the agent a question...", id="chat-input")
+                with Horizontal(id="chat-actions"):
+                    yield Button("Export to Markdown", id="export-chat-btn", variant="primary")
+                    yield Button("Clear Chat", id="clear-chat-btn", variant="error")
+                    yield Button("Distill to Trackboi", id="distill-chat-btn", variant="success")
+            with Vertical(id="chat-trace"):
+                yield Label("Agent Execution Trace", id="trace-title", classes="section-title")
+                yield RichLog(id="trace-log", markup=True, wrap=True)
             
 
     def _add_message(self, role: str, content: str) -> None:
@@ -379,7 +417,13 @@ class AgentChatTab(ScrollableContainer):
             "error": "red",
         }
         color = color_map.get(role, "white")
-        self.log_widget.write(f"\n[bold {color}]{role.title()}:[/bold {color}] {content}")
+        self.log_widget.write(f"\n[bold {color}]{role.title()}:[/bold {color}]")
+        
+        if role == "agent":
+            from rich.markdown import Markdown
+            self.log_widget.write(Markdown(content))
+        else:
+            self.log_widget.write(content)
 
     def on_mount(self) -> None:
         self.log_widget = self.query_one("#chat-log", RichLog)
@@ -467,22 +511,48 @@ class AgentChatTab(ScrollableContainer):
                 "Synthesizing pragmatic backlog...",
                 "Formatting User Stories..."
             ]
-            idx = 0
-            while self._thinking:
+            for status in statuses:
+                if not self._thinking:
+                    break
                 try:
-                    # Textual markup for a dim pulsing effect
-                    self.app.call_from_thread(self._update_progress, f"[b cyan]✨ {statuses[idx % len(statuses)]} ✨[/b cyan]")
+                    self.app.call_from_thread(self._add_trace, f"[cyan]➜[/cyan] {status}")
                 except Exception:
                     pass
-                idx += 1
                 time.sleep(2)
         
         threading.Thread(target=status_updater, daemon=True).start()
 
         try:
-            response = self.agent.run(query)
+            response = str(self.agent.run(query))
             self._thinking = False
-            self.app.call_from_thread(self._add_message, "agent", str(response))
+            
+            # Smolagents managed agents sometimes return stringified dictionaries for final answers.
+            # E.g. "Here is the final answer...: {'1. Task...': '...'}"
+            import ast
+            try:
+                # Find the first '{' if it looks like a dict representation
+                start_idx = response.find("{")
+                if start_idx != -1 and response.rstrip().endswith("}"):
+                    dict_str = response[start_idx:]
+                    parsed = ast.literal_eval(dict_str)
+                    if isinstance(parsed, dict):
+                        # Reconstruct the response as markdown blocks
+                        prefix = response[:start_idx].strip()
+                        formatted = "\n\n".join(str(v) for v in parsed.values())
+                        if prefix:
+                            response = f"{prefix}\n\n{formatted}"
+                        else:
+                            response = formatted
+            except Exception as e:
+                self.app.call_from_thread(self.log_debug, f"Failed to parse agent dictionary output: {e}")
+                # Fallback: if it failed to parse, at least replace literal \n with real newlines
+                # and strip the managed agent prefix
+                prefix = "Here is the final answer from your managed agent 'None': "
+                if response.startswith(prefix):
+                    response = response[len(prefix):]
+                response = response.replace("\\n", "\n")
+                
+            self.app.call_from_thread(self._add_message, "agent", response)
         except Exception as e:
             self._thinking = False
             self.app.call_from_thread(self._add_message, "error", str(e))
@@ -492,21 +562,17 @@ class AgentChatTab(ScrollableContainer):
 
     def _start_thinking(self):
         self.log_widget.loading = True
+        self._add_trace("[b yellow]Starting task execution...[/b yellow]")
         
-    def _update_progress(self, text):
+    def _add_trace(self, text: str):
         try:
-            from textual.widgets import Label
-            self.query_one("#progress-status", Label).update(text)
+            self.query_one("#trace-log", RichLog).write(text)
         except Exception:
             pass
             
     def _stop_thinking(self):
         self.log_widget.loading = False
-        try:
-            from textual.widgets import Label
-            self.query_one("#progress-status", Label).update("")
-        except Exception:
-            pass
+        self._add_trace("[b green]Execution completed.[/b green]")
 
     def _export_chat_to_markdown(self) -> None:
         """Export the chat conversation to a markdown file."""
@@ -575,6 +641,51 @@ class AgentChatTab(ScrollableContainer):
         self.load_agent()
 
 
+    @on(Button.Pressed, "#distill-chat-btn")
+    def on_distill_chat(self) -> None:
+        last_agent_msg = None
+        for msg in reversed(self._chat_messages):
+            if msg["role"] == "agent":
+                last_agent_msg = msg["content"]
+                break
+        
+        if not last_agent_msg:
+            self.app.notify("No agent message found to distill.", severity="warning")
+            return
+            
+        import re
+        options = []
+        
+        # If the JSON was partially parsed or literal \n were replaced:
+        cleaned_msg = last_agent_msg.replace("\\n", "\n")
+        
+        # Try to find explicit User Stories or Options
+        matches = re.findall(r'#+\s*(?:User Story|Option|Task).*?:?\s*(.*)', cleaned_msg, re.IGNORECASE)
+        for m in matches:
+            opt = m.strip().strip('*_')
+            if opt and opt not in options:
+                options.append(opt)
+                
+        if not options:
+            # Fallback 1: Look for ANY markdown header (## something)
+            matches = re.findall(r'#+\s+([^#\n]+)', cleaned_msg)
+            for m in matches:
+                opt = m.strip().strip('*_')
+                if opt and opt not in options:
+                    options.append(opt)
+                    
+        if not options:
+            self.app.notify("Could not find structured options or headers in the last message.", severity="warning")
+            return
+            
+        def handle_selection(selected_option):
+            if selected_option:
+                self._add_message("system", f"Selected option: {selected_option}")
+                prompt = f"I have selected the following option/decision: '{selected_option}'. Please generate a concrete implementation backlog for this specific choice, formatted as User Stories and technical tasks so it can be distilled into Trackboi."
+                # Run the query to generate the final backlog for the selection
+                self.process_query(prompt)
+
+        self.app.push_screen(DistillSelectionScreen(options), handle_selection)
 
 
 class GemApp(App):
@@ -758,9 +869,25 @@ class GemApp(App):
         width: 15;
         margin-left: 1;
     }
-    #chat-container {
+    #chat-split {
+        height: 100%;
+        width: 100%;
+    }
+    #chat-main {
+        width: 70%;
         padding: 1 2;
         height: 100%;
+    }
+    #chat-trace {
+        width: 30%;
+        padding: 1 2;
+        height: 100%;
+        border-left: vkey $background;
+    }
+    #trace-log {
+        height: 1fr;
+        border: solid $background;
+        background: $surface;
     }
     #chat-log {
         height: 1fr;
@@ -775,7 +902,7 @@ class GemApp(App):
         margin-bottom: 1;
     }
     #chat-actions Button {
-        width: 50%;
+        width: 1fr;
     }
     #chat-hint {
         color: $text-muted;
@@ -999,7 +1126,13 @@ class GemApp(App):
 
     @on(TabbedContent.TabActivated)
     def on_tab_activated(self, event: TabbedContent.TabActivated):
-        """Sync selected gems when switching to export tab manually."""
+        """Sync selected gems and manage sidebar visibility."""
+        sidebar = self.query_one("#sidebar")
+        if event.pane.id == TabConstants.EXPLORER:
+            sidebar.display = True
+        else:
+            sidebar.display = False
+            
         if event.pane.id == TabConstants.EXPORT:
             export_tab = self.query_one("#export-tab", ExportTab)
             with self._selection_lock:
