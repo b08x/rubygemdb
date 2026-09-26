@@ -1,1 +1,0 @@
-RubyGemDB integrates with 7 external services/APIs: RubyGems for gem metadata, Context7 for documentation, Mistral for LLM classification, Ollama for local embeddings, and 3 MCP servers (Context7, Codebase Memory, Trackboi) for the AI agent's tool-calling capabilities.

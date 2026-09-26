@@ -1,1 +1,0 @@
-Pydantic data models (models/gem.py) defining the gem data structures: GemEntry (full gem data), GemClassification (primary/secondary categories with confidence), GemSignals (rails/external_io/native_ext flags), GemRisks (invasiveness/coupling/abstraction_leak scores), and GemInventoryItem (CSV input format).

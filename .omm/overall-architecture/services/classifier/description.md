@@ -1,1 +1,0 @@
-Gem classifier (services/classifier.py) implementing heuristic classification based on gem name patterns and dependencies, with optional LLM fallback for low-confidence results. Generates risk scores and sub-category detection from dependency analysis.

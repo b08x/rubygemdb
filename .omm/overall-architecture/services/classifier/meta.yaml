@@ -1,9 +1,0 @@
-created: 2026-09-05T03:30:21.827Z
-updated: 2026-09-05T03:30:21.828Z
-update_count: 1
-last_field: description
-kind: nested-class
-title: classifier
-children: []
-parentPath:
-  - services

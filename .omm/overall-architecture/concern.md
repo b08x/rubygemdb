@@ -1,3 +1,0 @@
-- Agent module has lazy initialization to avoid loading LLM during --embed operations
-- TUI runs background classification in threads with batch updates to avoid UI freezing
-- LLM fallback only triggers when heuristic confidence < 0.7

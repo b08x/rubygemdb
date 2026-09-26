@@ -1,1 +1,0 @@
-RubyGemDB is a Ruby gem analysis and classification tool that categorizes gems into 12 architectural patterns using heuristic analysis and LLM fallback for ambiguous cases. The system has two entry points (CLI batch processor and interactive TUI), a shared services layer, and persistent storage via SQLite with vector embeddings via txtai.

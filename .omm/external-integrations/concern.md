@@ -1,3 +1,0 @@
-- MCP client initialization is wrapped in try/except to handle missing servers gracefully
-- Agent lazy-initializes to avoid loading LLM during index-only operations
-- Rate limit delays configurable via settings (RubyGems: 0.1s, Context7: 0.2s, LLM: 0.5s)

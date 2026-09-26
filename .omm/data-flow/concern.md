@@ -1,3 +1,0 @@
-- Background classification in TUI updates UI in batches of 5 gems
-- Agent lazy-initializes LLM model to avoid overhead during --embed operations
-- Cache files persist across runs to avoid redundant API calls

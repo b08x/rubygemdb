@@ -1,3 +1,0 @@
-- Add database migration support for schema changes
-- Implement cache expiration policies
-- Add backup/restore functionality for SQLite

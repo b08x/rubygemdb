@@ -1,3 +1,0 @@
-- Add OpenAI/Anthropic as alternative LLM providers
-- Implement circuit breaker pattern for external API failures
-- Add health checks for MCP server connectivity

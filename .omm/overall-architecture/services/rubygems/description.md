@@ -1,1 +1,0 @@
-RubyGems API client (services/rubygems.py) with local JSON cache. Fetches gem metadata including description, dependencies, and URLs. Implements rate limiting (0.1s delay) and retry logic with exponential backoff.

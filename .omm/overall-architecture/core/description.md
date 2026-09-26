@@ -1,1 +1,0 @@
-Core configuration module (core/config.py) using pydantic-settings. Defines API keys, endpoints, rate limits, batch sizes, and file paths for all caches and databases. Loads from .env file and ensures data directories exist.

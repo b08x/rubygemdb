@@ -1,1 +1,0 @@
-The system operates in phases: Phase 1 verifies metadata and enriches with Context7 IDs, Phase 2 classifies gems using heuristics with LLM fallback, Phase 3 generates vector embeddings for semantic search. Each phase can be run independently via CLI flags.

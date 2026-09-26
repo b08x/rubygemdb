@@ -1,4 +1,0 @@
-- External API calls are rate-limited with configurable delays
-- LLM responses are cached using SHA256 prompt hashes
-- RubyGems API responses are cached in gem_cache.json
-- SQLite provides transactional consistency for concurrent TUI/CLI access

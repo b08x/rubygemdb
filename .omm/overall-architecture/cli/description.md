@@ -1,1 +1,0 @@
-The CLI processor (cli.py) is the batch processing entry point. It orchestrates a two-phase pipeline: Phase 1 verifies gem metadata against RubyGems API and Context7, Phase 2 classifies gems using heuristics and optional LLM fallback. Optionally triggers Phase 3 for vector embedding generation.

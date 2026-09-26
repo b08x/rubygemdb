@@ -1,3 +1,0 @@
-- Add retry backoff for failed API calls
-- Implement incremental indexing for txtai
-- Add data validation for CSV input

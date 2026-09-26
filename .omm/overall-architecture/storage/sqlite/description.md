@@ -1,1 +1,0 @@
-SQLite storage (storage/sqlite_storage.py) implementing the StorageBase interface with full CRUD operations. Manages inventory table (with verification status) and classified_gems table with JSON-serialized complex fields. Used by both CLI and TUI.

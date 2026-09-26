@@ -1,1 +1,0 @@
-The AI agent (agent.py) provides semantic search capabilities via txtai vector embeddings. It implements multi-query expansion using the "Other Steve" prompt architect persona, hybrid search with recency boosting, and integrates with Context7 and Codebase Memory MCP tools for context-aware responses.

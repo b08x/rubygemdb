@@ -1,1 +1,0 @@
-RubyGemDB exposes two CLI entry points defined in pyproject.toml: `rubygemdb` (batch processor) and `rubygemdb-tui` (interactive explorer). The batch processor has a `process` subcommand with options for CSV input, output directory, verification skip, and embedding generation.
