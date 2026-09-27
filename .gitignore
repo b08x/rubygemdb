@@ -11,3 +11,16 @@ output/
 
 graphify-out/
 data/cache
+
+.omm
+scratch/
+data/
+
+*.html
+*.json
+.trackboi/
+
+patch_*
+RESEARCH-QUERIES.md
+
+.gemini/
