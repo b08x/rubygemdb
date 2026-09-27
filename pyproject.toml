@@ -17,6 +17,9 @@ dependencies = [
     "sqlite-vec>=0.1.9",
     "textual==8.2.3",
     "txtai[agent,pipeline,similarity]>=9.13.0",
+    "torch",
+    "torchvision",
+    "torchaudio",
 ]
 
 [project.scripts]
@@ -35,6 +38,15 @@ dev = [
     "pytest-mock>=3.15.1",
     "ruff>=0.15.10",
 ]
-
 [tool.hatch.build.targets.wheel]
 packages = ["src/rubygemdb"]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+torchaudio = { index = "pytorch-cpu" }
