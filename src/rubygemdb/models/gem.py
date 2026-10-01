@@ -29,6 +29,7 @@ class GemEntry(BaseModel):
     homepage: Optional[str] = None
     source_code_uri: Optional[str] = None
     context7_id: Optional[str] = None
+    preferred: bool = False
 
 class GemInventoryItem(BaseModel):
     name: str

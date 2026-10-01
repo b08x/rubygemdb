@@ -65,8 +65,9 @@ class GemDetails(Vertical):
         self.query_one("#details-name", Label).update(f"[b]{gem.name}[/b]")
         
         sub_cats = ", ".join(gem.classification.sub_categories) if gem.classification.sub_categories else "None"
+        pref = " | ★ preferred" if gem.preferred else ""
         self.query_one("#details-classification", Label).update(
-            f"Category: {gem.classification.primary} (Conf: {gem.classification.confidence:.2f})\nSub-cats: {sub_cats}"
+            f"Category: {gem.classification.primary} (Conf: {gem.classification.confidence:.2f}){pref}\nSub-cats: {sub_cats}"
         )
         
         metadata_text = f"Source: [blue]{gem.source_code_uri or 'N/A'}[/blue]\n"
@@ -595,6 +596,7 @@ class GemApp(App):
         ("x", "export_selected", "Export"),
         ("e", "edit_gem", "Edit"),
         ("d", "delete_gem", "Delete"),
+        ("p", "toggle_preferred", "Prefer"),
         ("plus", "add_gem", "Add"),
         ("t", "switch_tab", "Switch Tab"),
     ]
@@ -996,8 +998,9 @@ class GemApp(App):
 
             for index, gem in enumerate(filtered):
                 desc = (gem.description[:60] + "...") if gem.description and len(gem.description) > 60 else (gem.description or "-")
+                display_name = f"★ {gem.name}" if gem.preferred else gem.name
                 self.table.add_row(
-                    gem.name,
+                    display_name,
                     gem.classification.primary,
                     gem.source_code_uri or "-",
                     gem.context7_id or "-",
@@ -1406,6 +1409,41 @@ class GemApp(App):
                 self.action_refresh()
         
         self.push_screen(ConfirmDeleteScreen(gem.name), handle_delete)
+
+    def _current_gem(self) -> Optional[GemEntry]:
+        """The gem the user is acting on: details sidebar, else table cursor."""
+        sidebar = self.query_one("#details-sidebar", GemDetails)
+        if sidebar.display and hasattr(sidebar, "gem"):
+            return sidebar.gem
+        try:
+            row_key, _ = self.table.coordinate_to_cell_key(self.table.cursor_coordinate)
+            gem_name = row_key.value if hasattr(row_key, "value") else str(row_key)
+            return next((g for g in self.filtered_gems if g.name == gem_name), None)
+        except Exception:
+            return None
+
+    def action_toggle_preferred(self) -> None:
+        """Toggle the preferred flag on the current gem (bound to 'p')."""
+        gem = self._current_gem()
+        if gem is None:
+            self.notify("Select a gem first", severity="warning")
+            return
+
+        gem.preferred = not gem.preferred
+        try:
+            self.storage.set_preferred([gem.name], gem.preferred)
+        except Exception as e:
+            gem.preferred = not gem.preferred
+            self.handle_error(f"Failed to toggle preferred for {gem.name}: {e}", e)
+            return
+
+        state = "preferred" if gem.preferred else "no longer preferred"
+        self.notify(f"{gem.name} {state}")
+        self.update_table()
+
+        sidebar = self.query_one("#details-sidebar", GemDetails)
+        if sidebar.display and getattr(sidebar, "gem", None) and sidebar.gem.name == gem.name:
+            sidebar.update_gem(gem)
 
     # Threaded workers
     @work(thread=True)

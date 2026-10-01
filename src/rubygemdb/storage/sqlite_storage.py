@@ -50,6 +50,12 @@ class SQLiteStorage(StorageBase):
                     FOREIGN KEY(name) REFERENCES inventory(name)
                 )
             """)
+
+            # Preferred flag lives on inventory; migrate older databases.
+            columns = {row[1] for row in cursor.execute("PRAGMA table_info(inventory)")}
+            if "preferred" not in columns:
+                cursor.execute("ALTER TABLE inventory ADD COLUMN preferred INTEGER DEFAULT 0")
+
             conn.commit()
 
     def load_inventory(self, path: str) -> List[GemInventoryItem]:
@@ -157,6 +163,48 @@ class SQLiteStorage(StorageBase):
             conn.commit()
             logger.info(f"Deleted gem {name} from storage")
 
+    def set_preferred(self, names: List[str], preferred: bool):
+        """Mark (or unmark) gems as preferred picks."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            for name in names:
+                cursor.execute("UPDATE inventory SET preferred = ? WHERE name = ?", (1 if preferred else 0, name))
+            conn.commit()
+
+    def get_preferred(self) -> List[dict]:
+        """All preferred gems: name, description, category, layer."""
+        from rubygemdb.models.categories import CATEGORY_BY_SLUG
+        from rubygemdb.services.stack import guess_category
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT i.name, i.description, c.classification
+                FROM inventory i
+                LEFT JOIN classified_gems c ON i.name = c.name
+                WHERE i.preferred = 1
+                ORDER BY i.name
+                """
+            ).fetchall()
+        gems = []
+        for row in rows:
+            category = None
+            if row["classification"]:
+                try:
+                    category = (json.loads(row["classification"]) or {}).get("primary")
+                except (ValueError, TypeError):
+                    category = None
+            if category not in CATEGORY_BY_SLUG:
+                category = guess_category(row["name"])
+            gems.append({
+                "name": row["name"],
+                "description": row["description"] or "",
+                "category": category,
+                "layer": CATEGORY_BY_SLUG[category].layer,
+            })
+        return gems
+
     def wipe_classified_gems(self):
         """Delete every classified row (fresh start for reclassification).
 
@@ -203,7 +251,7 @@ class SQLiteStorage(StorageBase):
             cursor = conn.cursor()
             # Join with inventory to get metadata
             cursor.execute("""
-                SELECT c.*, i.homepage, i.source_code_uri, i.context7_id 
+                SELECT c.*, i.homepage, i.source_code_uri, i.context7_id, i.preferred
                 FROM classified_gems c
                 LEFT JOIN inventory i ON c.name = i.name
             """)
@@ -220,7 +268,8 @@ class SQLiteStorage(StorageBase):
                     description=row["description"],
                     homepage=row["homepage"],
                     source_code_uri=row["source_code_uri"],
-                    context7_id=row["context7_id"]
+                    context7_id=row["context7_id"],
+                    preferred=bool(row["preferred"])
                 ))
         return gems
 

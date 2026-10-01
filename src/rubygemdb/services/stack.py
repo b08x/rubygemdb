@@ -135,6 +135,20 @@ class StackService:
                 "role": "curated base pick for back-end tooling",
                 "source": "seed",
             })
+        # User-preferred gems ride along right after the curated seeds.
+        if self.storage is not None:
+            for pref in self.storage.get_preferred():
+                if pref["name"] in seen:
+                    continue
+                seen.add(pref["name"])
+                entries.append({
+                    "gem": pref["name"],
+                    "category": pref["category"],
+                    "layer": pref["layer"],
+                    "role": "user preferred pick",
+                    "source": "preferred",
+                })
+
         for m in matches:
             if m["gem"] in seen:
                 continue
