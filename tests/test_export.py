@@ -5,7 +5,7 @@ from rubygemdb.models.gem import GemEntry, GemClassification, GemRisks, GemSigna
 def create_test_gem(name, source="https://example.com", desc="Test gem", c7_id=None):
     return GemEntry(
         name=name,
-        classification=GemClassification(primary="framework_integration"),
+        classification=GemClassification(primary="cli_libraries"),
         description=desc,
         source_code_uri=source,
         context7_id=c7_id,
@@ -53,8 +53,8 @@ def test_export_csv_format():
     # Verify CSV format
     lines = result.split("\n")
     assert lines[0] == "Name,Category,Source URI,Context7 ID,Description"
-    assert '"rails","framework_integration","https://github.com/rails/rails","","Web framework"' in result
-    assert '"pg","framework_integration","https://github.com/ged/ruby-pg","","PostgreSQL ""libpq"" client"' in result
+    assert '"rails","cli_libraries","https://github.com/rails/rails","","Web framework"' in result
+    assert '"pg","cli_libraries","https://github.com/ged/ruby-pg","","PostgreSQL ""libpq"" client"' in result
 
 
 def test_export_json_format():
@@ -73,7 +73,7 @@ def test_export_json_format():
     assert len(data) == 1
     assert data[0]["name"] == "rails"
     assert data[0]["context7_id"] == "/rails/rails"
-    assert data[0]["classification"]["primary"] == "framework_integration"
+    assert data[0]["classification"]["primary"] == "cli_libraries"
 
 
 def test_export_markdown_format():
@@ -91,5 +91,5 @@ def test_export_markdown_format():
     lines = result.split("\n")
     assert lines[0].startswith("| Name |")
     assert lines[1].startswith("|---")
-    assert "| rails | framework_integration | https://github.com/rails/rails" in result
-    assert "| pg | framework_integration | https://github.com/ged/ruby-pg" in result
+    assert "| rails | cli_libraries | https://github.com/rails/rails" in result
+    assert "| pg | cli_libraries | https://github.com/ged/ruby-pg" in result

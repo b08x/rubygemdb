@@ -14,7 +14,7 @@
 
 ## Features
 
-- **12-Category Taxonomy** — Classifies gems into architectural patterns (runtime_spine, storage_persistence, ai_nlp, etc.) with confidence scoring and sub-category detection from dependency analysis
+- **21-Category Taxonomy** — Classifies gems into functional categories (web_frameworks, cli_libraries, ai_llm, etc.), each tagged with a stack layer (substrate, plumbing, composition, quality), with confidence scoring and sub-category detection from dependency analysis
 - **Heuristic + LLM Hybrid** — Fast pattern matching for obvious cases, with Mistral-powered LLM fallback when heuristic confidence drops below 0.7
 - **Semantic Vector Search** — txtai-powered embeddings with multi-query expansion and recency boosting for finding gems by natural language description
 - **AI Agent with MCP Tools** — Context7 documentation retrieval, Codebase Memory integration, and Trackboi backlog distillation via Model Context Protocol
@@ -88,20 +88,29 @@ graph LR
 
 ### Primary Categories
 
-| Category | Description | Risk Level |
-|----------|-------------|------------|
-| `runtime_spine` | Rails core, frameworks, Ruby extensions | Invasiveness: 5/5 |
-| `cli_terminal_ui` | CLI frameworks, terminal UI tools | Invasiveness: 1/5 |
-| `storage_persistence` | ORMs, DB adapters, file storage | Invasiveness: 4/5 |
-| `async_networking_orchestration` | HTTP clients, messaging, job queues | Invasiveness: 4/5 |
-| `ai_nlp` | AI/ML, NLP, LLM, embeddings | Invasiveness: 3/5 |
-| `data_processing` | HTML/XML parsing, CSV, PDF, scraping | Invasiveness: 3/5 |
-| `retrieval_similarity_fuzzy` | Search, fuzzy matching, indexing | Invasiveness: 3/5 |
-| `algorithms_knowledge_structures` | Data structures, graphs, trees | Invasiveness: 2/5 |
-| `validation_types` | Validation, type systems, schemas | Invasiveness: 2/5 |
-| `parsing_encoding` | JSON, YAML, XML, MessagePack | Invasiveness: 2/5 |
-| `debugging_introspection` | Debuggers, profilers, monitoring | Invasiveness: 1/5 |
-| `mcp_tooling` | Model Context Protocol tools | Invasiveness: 1/5 |
+| Category | Layer | Description | Risk Level |
+|----------|-------|-------------|------------|
+| `core_extensions` | substrate | Core language extensions, stdlib-style utilities | Invasiveness: 3/5 |
+| `native_bindings` | substrate | FFI, C extension toolchains, binary formats | Invasiveness: 3/5 |
+| `servers_concurrency` | substrate | App servers, async runtimes, thread/process pools | Invasiveness: 3/5 |
+| `http_networking` | plumbing | HTTP clients, API SDKs, websockets, networking | Invasiveness: 2/5 |
+| `persistence` | plumbing | ORMs, database drivers, caches, attachments | Invasiveness: 4/5 |
+| `background_jobs` | plumbing | Job queues and workflow runners | Invasiveness: 3/5 |
+| `document_parsing` | plumbing | HTML/XML/Markdown/CSV/PDF parsing, serialization | Invasiveness: 2/5 |
+| `document_generation` | plumbing | PDF/API doc generation, syntax highlighting | Invasiveness: 2/5 |
+| `text_search` | plumbing | Classical NLP, fuzzy matching, search engines | Invasiveness: 3/5 |
+| `media_processing` | plumbing | Image, audio, and video processing | Invasiveness: 2/5 |
+| `web_frameworks` | composition | Web frameworks, routing, Rack middleware, templating | Invasiveness: 5/5 |
+| `cli_libraries` | composition | CLI frameworks, terminal UI/styling/output | Invasiveness: 1/5 |
+| `gui_desktop` | composition | Desktop GUI frameworks, game dev libraries | Invasiveness: 3/5 |
+| `static_site_generation` | composition | Static site generators, themes, plugins | Invasiveness: 3/5 |
+| `ai_llm` | composition | LLM clients, agent frameworks, embeddings, prompts | Invasiveness: 3/5 |
+| `mcp_tooling` | composition | Model Context Protocol clients and servers | Invasiveness: 2/5 |
+| `runtime_validation` | composition | Runtime validation, schemas, typed structs | Invasiveness: 2/5 |
+| `security_auth` | composition | Authentication, authorization, cryptography | Invasiveness: 4/5 |
+| `testing_qa` | quality | Test frameworks, factories, mocks, browser drivers | Invasiveness: 1/5 |
+| `code_quality_typing` | quality | Linters, static analyzers, type systems, LSPs | Invasiveness: 2/5 |
+| `developer_tools` | quality | Debuggers, profilers, REPLs, logging, gem tooling | Invasiveness: 1/5 |
 
 ### Sub-Category Detection
 
@@ -145,6 +154,25 @@ Each backlog item includes:
 - User Story (`As a <system>, I need <capability>`)
 - Technical tasks with concrete file references
 - Architectural integration points
+
+---
+
+## Installation & Accelerator Support
+
+```bash
+# Standard installation (CPU)
+uv sync --extra cpu
+
+# Optional CUDA installation (NVIDIA GPU acceleration)
+uv sync --extra cuda
+```
+
+To force a specific accelerator at runtime, use `--cuda` or `--cpu`:
+```bash
+uv run rubygemdb --cuda stack "CLI data pipeline tool"
+uv run rubygemdb --cpu process gems.csv --embed
+```
+Alternatively, set `CUDA_ENABLED=true` / `CUDA_ENABLED=false` or `DEVICE=cuda` in `.env`.
 
 ---
 

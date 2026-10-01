@@ -4,7 +4,8 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
 
 ## Project Overview
 
-- **Architectural Categories**: `runtime_spine`, `cli_terminal_ui`, `storage_persistence`, `async_networking_orchestration`, `ai_nlp`, `data_processing`, `retrieval_similarity_fuzzy`, `algorithms_knowledge_structures`, `validation_types`, `parsing_encoding`, `debugging_introspection`, `mcp_tooling`.
+- **Functional Categories** (21, defined in `src/rubygemdb/models/categories.py`): `web_frameworks`, `http_networking`, `servers_concurrency`, `background_jobs`, `persistence`, `document_parsing`, `document_generation`, `static_site_generation`, `cli_libraries`, `testing_qa`, `code_quality_typing`, `runtime_validation`, `developer_tools`, `ai_llm`, `mcp_tooling`, `text_search`, `security_auth`, `media_processing`, `gui_desktop`, `native_bindings`, `core_extensions`.
+- **Stack Layers**: each category carries a layer (substrate, plumbing, composition, quality) plus curated base-gem seeds (dotenv, drydock, pry, rubocop, journald-logger), enabling layered gem-stack recommendations for back-end tooling design.
 - **Modular Engine**: Structured under `src/rubygemdb/` for scalability:
   - `core/config.py`: Centralized settings using `pydantic-settings` and `.env` support.
   - `models/gem.py`: Robust data models for gem entries, classifications, and risks.
@@ -22,9 +23,11 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
 
 1.  **Python Dependencies** (Python >= 3.14):
     ```bash
-    uv pip install -e .
-    # Or for development
-    uv sync
+    # Standard installation (CPU)
+    uv sync --extra cpu
+
+    # Optional CUDA support (NVIDIA GPU acceleration)
+    uv sync --extra cuda
     ```
 2.  **API Keys (Required for full functionality)**:
     Create a `.env` file or export the following variables:
@@ -46,6 +49,16 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
   uv run rubygemdb-tui [optional-inventory.csv]
   ```
   *Note: The CSV is only required for the first run to populate the SQLite database.*
+- **Reclassification (fresh start)**:
+  Builds an approval-gated prune report (`data/prune-report.md`), then wipes and rebuilds all classified data under the 21-category taxonomy. A dated SQLite backup is written first.
+  ```bash
+  uv run rubygemdb reclassify --apply-prune --embed --out output/
+  ```
+- **Gem-Stack Composition**:
+  Turns a context query into a layered stack manifest (substrate -> quality) plus a Gemfile snippet, starting from curated base picks (dotenv, drydock, pry, rubocop, journald-logger).
+  ```bash
+  uv run rubygemdb stack "CLI data pipeline tool" --out stacks/
+  ```
 
 ## Development Conventions
 
@@ -56,7 +69,7 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
 - `classified_gems.json`: A unified JSON export of all classified gems for TUI consumption.
 
 ### Classification Logic
-- **Heuristics First**: Gems are first matched against known patterns (e.g., `active_support` -> `runtime_spine`).
+- **Heuristics First**: Gems are first matched against keyword rules and scored by description text and txtai embedding similarity against category descriptions (e.g., `nokogiri` -> `document_parsing`).
 - **LLM Fallback**: If the heuristic confidence is below 0.7, the tool calls the LLM (Mistral/Devstral) for a more nuanced analysis.
 - **Confidence Threshold**: LLM results require a confidence > 0.6 to override initial heuristics.
 - **Metadata Update**: Users can manually refine Context7 IDs and Source URIs directly from the TUI, which updates the SQLite storage.

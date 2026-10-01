@@ -8,6 +8,8 @@ from smolagents import LiteLLMModel, ToolCallingAgent, tool  # type: ignore
 from smolagents import MCPClient
 from mcp import StdioServerParameters
 from rubygemdb.services.rubygems import RubyGemsService
+from rubygemdb.services.stack import guess_category
+from rubygemdb.models.categories import CATEGORIES, CATEGORY_BY_SLUG, LAYERS
 from rubygemdb.core.config import settings
 
 # Initialize RubyGems Service
@@ -99,6 +101,7 @@ class TxtaiAgent:
             backend="sqlite",
             content=True,
             hybrid=True,
+            gpu=settings.txtai_gpu,
             # Normalization / RRF Fusion
             # Convex combination is the default, but RRF is used for unnormalized sparse scores
             scoring={"method": "bm25", "normalize": False},
@@ -131,8 +134,13 @@ class TxtaiAgent:
         cursor = conn.cursor()
         
         try:
-            # Query the existing table
-            cursor.execute("SELECT name, homepage, source_code_uri, context7_id, description FROM inventory")
+            # Query the existing table; join classified_gems for the category
+            cursor.execute("""
+                SELECT i.name, i.homepage, i.source_code_uri, i.context7_id, i.description,
+                       c.classification
+                FROM inventory i
+                LEFT JOIN classified_gems c ON i.name = c.name
+            """)
             rows = cursor.fetchall()
             
             # Load gem_cache.json for last updated date
@@ -149,16 +157,28 @@ class TxtaiAgent:
                     updated_at = gem_info.get("version_created_at", "2000-01-01T00:00:00.000Z")
                     # Parent chunk is the full description
                     parent_text = row["description"] or f"Ruby gem {gem_name}"
-                    
+
+                    # Stack layer metadata from the classified category
+                    category = None
+                    try:
+                        classification = json.loads(row["classification"]) if row["classification"] else {}
+                        category = classification.get("primary")
+                    except (ValueError, TypeError):
+                        category = None
+                    if category not in CATEGORY_BY_SLUG:
+                        category = guess_category(gem_name)
+                    cat = CATEGORY_BY_SLUG[category]
+                    layer = cat.layer
+
                     # Split into child chunks for fine-grained retrieval
                     child_chunks = create_child_chunks(parent_text, max_chars=512)
                     if not child_chunks:
                         child_chunks = [parent_text]
-                        
+
                     for chunk_idx, child_text in enumerate(child_chunks):
                         # Prepend the gem name to the chunk so the embedding captures both
                         searchable_text = f"Gem Name: {gem_name}\nDescription: {child_text}"
-                        
+
                         document = {
                             "id": f"{gem_name}_{chunk_idx}",
                             "text": searchable_text, # Used for vector retrieval
@@ -167,6 +187,8 @@ class TxtaiAgent:
                             "context7_id": row["context7_id"],
                             "parent_text": parent_text, # Parent chunk stored for context recall
                             "type": "gem",
+                            "category": category,
+                            "layer": layer,
                             "updated_at": updated_at
                         }
                         yield document
@@ -269,7 +291,9 @@ class TxtaiAgent:
                 """
                 return self._execute_search_with_expansion(query, limit)
 
-            agent_prompt = """You are the RubyGemDB Architect. Your goal is to generate contextually deep, highly specific implementation plans that OTHER autonomous coding agents can blindly execute.
+            agent_prompt = f"""You are the RubyGemDB Architect. Your goal is to generate contextually deep, highly specific implementation plans that OTHER autonomous coding agents can blindly execute.
+
+STACKING MODEL: Every gem belongs to a stack layer — ordered {", ".join(LAYERS)} (substrate first, quality last). Search results carry "category" and "layer" metadata. For back-end tooling queries, present recommendations as a layered stack: group results by layer, substrate first, and start from the curated base picks ({", ".join(sorted({g for c in CATEGORIES for g in c.base_gems}))}) before adding context-specific gems on top.
 
 CRITICAL INSTRUCTION: If a `[Target Project Context: <project_name>]` is provided:
 1. You MUST call `get_architecture(project="<project_name>")`.
@@ -472,7 +496,7 @@ Execute these tools directly. Do not explain your reasoning beyond the necessary
         # 2. Search for all variations and gather candidates
         for q in queries:
             safe_query = q.replace("'", "''")
-            sql = f"SELECT id, text, name, source_code_uri, context7_id, parent_text, type, updated_at, score FROM txtai WHERE similar('{safe_query}') LIMIT {limit * 4}"
+            sql = f"SELECT id, text, name, source_code_uri, context7_id, parent_text, type, category, layer, updated_at, score FROM txtai WHERE similar('{safe_query}') LIMIT {limit * 4}"
             
             raw_results = _embeddings_ref.search(sql)
             
@@ -517,7 +541,9 @@ Execute these tools directly. Do not explain your reasoning beyond the necessary
                             "name": res.get("name"),
                             "last_updated": updated_at_str,
                             "context7_id": res.get("context7_id"),
-                            "source_code_uri": res.get("source_code_uri")
+                            "source_code_uri": res.get("source_code_uri"),
+                            "category": res.get("category"),
+                            "layer": res.get("layer")
                         })
                         
                     candidates.append(item)

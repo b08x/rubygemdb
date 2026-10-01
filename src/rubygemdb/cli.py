@@ -1,24 +1,30 @@
 import argparse
 import yaml  # type: ignore
 import os
+import shutil
 import logging
 import requests
 from collections import defaultdict
+from datetime import datetime
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
 from rich.table import Table
 from rich.prompt import Confirm, Prompt
 
+from rubygemdb.core.config import settings
 from rubygemdb.services.rubygems import RubyGemsService
 from rubygemdb.services.llm import LLMService
 from rubygemdb.services.classifier import GemClassifier
 from rubygemdb.services.context7 import Context7Service
+from rubygemdb.services.prune import PruneService
+from rubygemdb.services.stack import StackService
 from rubygemdb.storage.sqlite_storage import SQLiteStorage
+from rubygemdb.storage.json_storage import JSONStorage
 
 console = Console()
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-import re
+import re  # noqa: E402
 
 def verify_url(url: str) -> bool:
     if not url:
@@ -195,7 +201,7 @@ def run_process(args):
 
         console.print(f"[green]Phase 1 Complete! Updated metadata for {updated_count} gems. Deleted {deleted_count}.[/green]\n")
     
-    console.print(f"[bold magenta]--- PHASE 2: Heuristic & LLM Classification ---[/bold magenta]")
+    console.print("[bold magenta]--- PHASE 2: Heuristic & LLM Classification ---[/bold magenta]")
     
     results = []
     categorized = defaultdict(list)
@@ -257,21 +263,188 @@ def run_process(args):
             console.print(f"[red]Error during embeddings generation: {e}[/red]")
 
 
+def _load_prune_list(path: str) -> list:
+    """Load a plain-text prune list: one gem name per line, '#' comments allowed."""
+    names = []
+    with open(path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                names.append(line)
+    return names
+
+
+def run_reclassify(args):
+    """Approval-gated prune + fresh-start reclassification under the 21-category taxonomy."""
+    storage = SQLiteStorage(rubygems_service=RubyGemsService(), context7_service=Context7Service())
+
+    # 1. Back up the database (fresh start is destructive).
+    backup_path = f"{settings.sqlite_db_file}.bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    if settings.sqlite_db_file.exists():
+        shutil.copy2(settings.sqlite_db_file, backup_path)
+        console.print(f"[green]Database backed up to {backup_path}[/green]")
+
+    # 2. Prune report (approval-gated; nothing removed without an explicit choice).
+    inventory = storage.get_all_inventory_gems()
+    console.print(f"[cyan]Building prune report for {len(inventory)} inventory gems...[/cyan]")
+    pruner = PruneService(rubygems_service=storage.rubygems)
+    report = pruner.build_report(inventory)
+    report_path = pruner.write_report(report)
+    console.print(f"[cyan]Prune report written to {report_path}[/cyan]")
+    console.print(f"  Stale gems: {len(report.stale)}, overlap prunables: {len(report.overlaps)}")
+
+    if args.prune_list:
+        # Explicit subset approval: prune exactly the names in the file.
+        inventory_names = {g["name"] for g in inventory}
+        requested = _load_prune_list(args.prune_list)
+        unknown = [n for n in requested if n not in inventory_names]
+        if unknown:
+            console.print(f"[yellow]Not in inventory (ignored): {', '.join(unknown)}[/yellow]")
+        prune_names = [n for n in requested if n in inventory_names]
+        if prune_names:
+            for name in prune_names:
+                storage.delete_gem(name)
+            console.print(f"[red]Pruned {len(prune_names)} gems from --prune-list: {', '.join(prune_names)}[/red]")
+        else:
+            console.print("[yellow]--prune-list matched no inventory gems; nothing pruned.[/yellow]")
+    elif report.all_names:
+        apply_prune = args.apply_prune or Confirm.ask(
+            f"Remove all {len(report.all_names)} pruned gems listed in the report? "
+            "(use --prune-list for a subset)", default=False
+        )
+        if apply_prune:
+            for name in report.all_names:
+                storage.delete_gem(name)
+            console.print(f"[red]Pruned {len(report.all_names)} gems from the inventory.[/red]")
+
+    inventory = storage.get_all_inventory_gems()
+
+    # 3. Fresh start: wipe classified_gems table, classified_gems.json, txtai index.
+    storage.wipe_classified_gems()
+    if settings.classified_gems_file.exists():
+        settings.classified_gems_file.unlink()
+        console.print("[yellow]Wiped classified_gems.json[/yellow]")
+    if settings.txtai_dir.exists():
+        shutil.rmtree(settings.txtai_dir)
+        console.print("[yellow]Wiped txtai index directory[/yellow]")
+    console.print("[yellow]Wiped classified_gems table[/yellow]")
+
+    # 4. Re-classify every remaining inventory gem.
+    rg_service = storage.rubygems
+    llm_service = LLMService()
+    classifier = GemClassifier(rg_service, llm_service)
+
+    results = []
+    categorized = defaultdict(list)
+    with Progress(
+        SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+        BarColumn(), TaskProgressColumn(), TimeRemainingColumn(), console=console, transient=True,
+    ) as progress:
+        task = progress.add_task("[cyan]Reclassifying gems...[/cyan]", total=len(inventory))
+        for gem in inventory:
+            name = gem["name"]
+            progress.update(task, description=f"[cyan]Reclassifying [bold]{name}[/bold]...")
+            gem_entry = classifier.classify(
+                name,
+                homepage=gem.get("homepage"),
+                source_code_uri=gem.get("source_code_uri"),
+                context7_id=gem.get("context7_id"),
+            )
+            results.append(gem_entry)
+            categorized[gem_entry.classification.primary].append(gem_entry.model_dump())
+            progress.advance(task)
+
+    # 5. Save to SQLite, regenerate classified_gems.json from SQLite.
+    storage.save_classified_gems(results)
+    JSONStorage().save_classified_gems(storage.load_classified_gems())
+
+    # 6. Per-category YAML outputs.
+    os.makedirs(args.out, exist_ok=True)
+    for cat, items in categorized.items():
+        with open(f"{args.out}/{cat}.yaml", "w") as f:
+            yaml.dump(items, f, sort_keys=False)
+
+    table = Table(title="Reclassification Summary")
+    table.add_column("Category", style="cyan")
+    table.add_column("Count", style="magenta", justify="right")
+    for cat in sorted(categorized.keys()):
+        table.add_row(cat, str(len(categorized[cat])))
+    console.print(table)
+    console.print(f"[green]Reclassified {len(results)} gems. YAML reports saved to {args.out}/[/green]")
+
+    # 7. Rebuild the txtai index (skipped with a warning if ollama is down).
+    if getattr(args, "embed", False):
+        console.print("\n[bold cyan]--- Rebuilding txtai index (layer-aware) ---[/bold cyan]")
+        try:
+            from rubygemdb.agent import TxtaiAgent
+            TxtaiAgent().build_index()
+            console.print("[green]txtai index rebuilt![/green]")
+        except Exception as e:
+            console.print(f"[red]Error rebuilding txtai index (is ollama up?): {e}[/red]")
+
+
+def run_stack(args):
+    """Turn a context query into a layered gem-stack manifest plus a Gemfile snippet."""
+    storage = SQLiteStorage(rubygems_service=RubyGemsService(), context7_service=Context7Service())
+    service = StackService(storage=storage)
+    manifest = service.build_stack(args.query)
+
+    manifest_yaml = StackService.render_manifest_yaml(manifest)
+    gemfile = StackService.render_gemfile(manifest)
+
+    if args.out:
+        os.makedirs(args.out, exist_ok=True)
+        with open(os.path.join(args.out, "stack-manifest.yaml"), "w") as f:
+            f.write(manifest_yaml)
+        with open(os.path.join(args.out, "Gemfile"), "w") as f:
+            f.write(gemfile)
+        console.print(f"[green]Wrote {args.out}/stack-manifest.yaml and {args.out}/Gemfile[/green]")
+
+    console.print(manifest_yaml)
+    console.print("\n[bold cyan]Gemfile[/bold cyan]")
+    console.print(gemfile)
+
+
 def run_cli():
-    parser = argparse.ArgumentParser(description="Ruby Gem Classifier")
+    parent_parser = argparse.ArgumentParser(add_help=False)
+    parent_parser.add_argument("--cuda", action="store_true", default=argparse.SUPPRESS, help="Force enable CUDA acceleration")
+    parent_parser.add_argument("--cpu", action="store_true", default=argparse.SUPPRESS, help="Force CPU-only execution")
+
+    parser = argparse.ArgumentParser(description="Ruby Gem Classifier", parents=[parent_parser])
     subparsers = parser.add_subparsers(dest="command", required=True, help="Command to run")
-    
+
     # Unified Process Subcommand
-    process_parser = subparsers.add_parser("process", help="Verify metadata and classify gems (Combined Pipeline)")
+    process_parser = subparsers.add_parser("process", parents=[parent_parser], help="Verify metadata and classify gems (Combined Pipeline)")
     process_parser.add_argument("csv", nargs="?", help="Optional path to initial gems inventory CSV")
     process_parser.add_argument("--out", default="output", help="Output directory for YAML files")
     process_parser.add_argument("--skip-verify", action="store_true", help="Skip Phase 1 metadata verification and go straight to Phase 2")
     process_parser.add_argument("--embed", action="store_true", help="Run the txtai embedding process to vectorize the database")
-    
+
+    # Reclassify Subcommand
+    reclassify_parser = subparsers.add_parser("reclassify", parents=[parent_parser], help="Prune report + fresh-start reclassification under the 21-category taxonomy")
+    reclassify_parser.add_argument("--apply-prune", action="store_true", help="Apply the full prune report (all stale/overlapping gems) without asking")
+    reclassify_parser.add_argument("--prune-list", default=None, help="Path to a text file of gem names to prune (one per line, '#' comments) — subset approval; overrides --apply-prune")
+    reclassify_parser.add_argument("--out", default="output", help="Output directory for per-category YAML files")
+    reclassify_parser.add_argument("--embed", action="store_true", help="Rebuild the txtai index after reclassification")
+
+    # Stack Subcommand
+    stack_parser = subparsers.add_parser("stack", parents=[parent_parser], help="Turn a context query into a layered gem-stack manifest + Gemfile snippet")
+    stack_parser.add_argument("query", help="Context query, e.g. 'CLI data pipeline tool'")
+    stack_parser.add_argument("--out", default=None, help="Optional directory to write stack-manifest.yaml and Gemfile")
+
     args = parser.parse_args()
+
+    if getattr(args, "cuda", False):
+        settings.cuda_enabled = True
+    elif getattr(args, "cpu", False):
+        settings.cuda_enabled = False
 
     if args.command == "process":
         run_process(args)
+    elif args.command == "reclassify":
+        run_reclassify(args)
+    elif args.command == "stack":
+        run_stack(args)
 
 if __name__ == "__main__":
     run_cli()

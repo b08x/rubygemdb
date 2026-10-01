@@ -157,6 +157,17 @@ class SQLiteStorage(StorageBase):
             conn.commit()
             logger.info(f"Deleted gem {name} from storage")
 
+    def wipe_classified_gems(self):
+        """Delete every classified row (fresh start for reclassification).
+
+        Inventory rows are preserved; only classification output is wiped.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM classified_gems")
+            conn.commit()
+            logger.info("Wiped classified_gems table")
+
     def update_gem_classification(self, name: str, primary_category: str):
         """Manually update the primary classification of a gem."""
         with sqlite3.connect(self.db_path) as conn:

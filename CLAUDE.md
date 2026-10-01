@@ -9,9 +9,10 @@ RubyGemDB is a Ruby gem analysis and classification tool that categorizes gems i
 ## Architecture
 
 ### Core Classification System
-- **12 Architectural Categories**: runtime_spine, cli_terminal_ui, storage_persistence, async_networking_orchestration, ai_nlp, data_processing, retrieval_similarity_fuzzy, algorithms_knowledge_structures, validation_types, parsing_encoding, debugging_introspection, mcp_tooling
-- **Heuristic Analysis**: Pattern-based classification using gem names, dependencies, and metadata
-- **LLM Fallback**: Devstral LLM integration for ambiguous cases (confidence < 0.7)
+- **21 Functional Categories** (defined in `src/rubygemdb/models/categories.py`, each with a stack layer): web_frameworks, http_networking, servers_concurrency, background_jobs, persistence, document_parsing, document_generation, static_site_generation, cli_libraries, testing_qa, code_quality_typing, runtime_validation, developer_tools, ai_llm, mcp_tooling, text_search, security_auth, media_processing, gui_desktop, native_bindings, core_extensions
+- **Stack Layers**: every category is tagged substrate / plumbing / composition / quality so results can be presented as a layered stack for back-end tooling design
+- **Scoring Pipeline**: keyword rules (name + dependencies) + RubyGems description-text scoring + txtai embedding similarity against category descriptions; best score wins
+- **LLM Fallback**: Mistral LLM integration for ambiguous cases (confidence < 0.7)
 - **Confidence Scoring**: Risk assessment based on invasiveness, coupling, and abstraction leak potential
 
 ### Data Flow

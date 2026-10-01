@@ -16,7 +16,8 @@ from textual import on, work
 
 from rubygemdb.services.rubygems import RubyGemsService
 from rubygemdb.services.llm import LLMService
-from rubygemdb.services.classifier import GemClassifier, VALID_CATEGORIES
+from rubygemdb.services.classifier import GemClassifier
+from rubygemdb.models.categories import CATEGORIES
 from rubygemdb.services.context7 import Context7Service
 from rubygemdb.storage.sqlite_storage import SQLiteStorage
 from rubygemdb.core.config import settings
@@ -180,8 +181,8 @@ class EditGemScreen(ModalScreen[tuple]):
             
             yield Label("Primary Category", classes="section-title")
             with RadioSet(id="category-selection"):
-                for cat in VALID_CATEGORIES:
-                    yield RadioButton(cat.replace("_", " ").title(), id=f"edit_cls_{cat}", value=(cat == self.gem.classification.primary))
+                for cat in CATEGORIES:
+                    yield RadioButton(cat.label, id=f"edit_cls_{cat.slug}", value=(cat.slug == self.gem.classification.primary))
             
             yield Label("Source Code URI", classes="section-title")
             yield Input(value=self.gem.source_code_uri or "", placeholder="https://github.com/...", id="source-uri-input")
@@ -1033,7 +1034,7 @@ class GemApp(App):
         self._inventory_loaded = False
         self.table: DataTable = None  # Type annotation for mypy
         
-        self.classifications = list(VALID_CATEGORIES)
+        self.classifications = [(c.slug, c.label) for c in CATEGORIES]
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -1042,8 +1043,8 @@ class GemApp(App):
                 yield Label("Filter Classification", classes="section-title")
                 with RadioSet(id="class_filter"):
                     yield RadioButton("All Categories", id="cls_any", value=True)
-                    for cls in self.classifications:
-                        yield RadioButton(cls.replace("_", " ").title(), id=f"cls_{cls}")
+                    for cls_slug, cls_label in self.classifications:
+                        yield RadioButton(cls_label, id=f"cls_{cls_slug}")
                 
                 yield Label("System Stats", classes="section-title")
                 yield Label("Total Gems: 0", id="gem-count-label")

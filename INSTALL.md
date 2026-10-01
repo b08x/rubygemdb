@@ -74,7 +74,12 @@ $ rubygemdb-tui gems-inventory.csv
 ```bash
 git clone https://github.com/rwpannick/rubygemdb.git
 cd rubygemdb
-uv sync --dev
+
+# Standard installation (CPU)
+uv sync --extra cpu
+
+# Optional CUDA installation (NVIDIA GPU acceleration)
+uv sync --extra cuda
 ```
 
 </details>

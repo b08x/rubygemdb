@@ -1,231 +1,200 @@
-from typing import List, Tuple, Optional
+import re
+from typing import List, Optional, Tuple
+
 from rubygemdb.models.gem import GemEntry, GemClassification, GemSignals, GemRisks
+from rubygemdb.models.categories import CATEGORIES, CATEGORY_BY_SLUG, VALID_CATEGORIES
 from rubygemdb.services.rubygems import RubyGemsService
 from rubygemdb.services.llm import LLMService
+from rubygemdb.services.embedding_scorer import EmbeddingScorer
 
-# Valid architectural categories (12-category system)
-VALID_CATEGORIES = [
-    "runtime_spine",
-    "cli_terminal_ui",
-    "storage_persistence",
-    "async_networking_orchestration",
-    "ai_nlp",
-    "data_processing",
-    "retrieval_similarity_fuzzy",
-    "algorithms_knowledge_structures",
-    "validation_types",
-    "parsing_encoding",
-    "debugging_introspection",
-    "mcp_tooling",
-]
+_TOKEN_RE = re.compile(r"[^a-z0-9]+")
+
+# Scoring weights: name hits dominate, dependency hits nudge, description
+# term hits break ties for quiet-named gems.
+_NAME_HIT_WEIGHT = 1.0
+_NAME_HIT_CAP = 3
+_DEP_HIT_WEIGHT = 0.4
+_DEP_HIT_CAP = 2.0
+_DESC_HIT_WEIGHT = 0.06
+_DESC_HIT_CAP = 0.6
+_EMBEDDING_WEIGHT = 1.0
+
+# Fallback when nothing matches at all.
+_DEFAULT_CATEGORY = "core_extensions"
+_DEFAULT_CONFIDENCE = 0.4
+_DEFAULT_RISKS = GemRisks(invasiveness=3, coupling=1, abstraction_leak="low")
+
+
+def _tokens(text: str) -> list[str]:
+    return [t for t in _TOKEN_RE.split(text.lower()) if t]
+
+
+def _keyword_hits(tokens: list[str], text_lower: str, keyword: str) -> int:
+    """A keyword hits when it equals a token, or (if it contains separators)
+    appears as a substring of the raw text."""
+    k = keyword.lower()
+    if k in tokens:
+        return 1
+    if not k.isalnum() and k in text_lower:
+        return 1
+    return 0
+
 
 class GemClassifier:
-    def __init__(self, rubygems_service: RubyGemsService, llm_service: LLMService):
+    def __init__(self, rubygems_service: RubyGemsService, llm_service: LLMService,
+                 embedding_scorer: Optional[EmbeddingScorer] = None):
         self.rubygems = rubygems_service
         self.llm = llm_service
+        self.embedding_scorer = embedding_scorer
 
-    def heuristic_classify(self, name: str, info: dict, category: Optional[str] = None) -> Tuple[GemClassification, GemSignals, list, List[str]]:
-        lname = name.lower()
-        def has(keys):
-            return any(k in lname for k in keys)
+    def _get_embedding_scorer(self) -> Optional[EmbeddingScorer]:
+        if self.embedding_scorer is None:
+            self.embedding_scorer = EmbeddingScorer()
+        return self.embedding_scorer
 
-        classification = GemClassification(primary="data_processing", confidence=0.5)
-        signals = GemSignals()
+    def heuristic_classify(self, name: str, info: dict,
+                           category: Optional[str] = None) -> Tuple[GemClassification, GemSignals, list, List[str]]:
+        description = str(info.get("info", "")) if info else ""
         deps = [d["name"] for d in info.get("dependencies", {}).get("runtime", [])] if info else []
 
-        # 1. runtime_spine (Boot + Wiring) — Rails core, frameworks, core Ruby exts
-        if has(["rails", "engine", "railties", "active_support", "core_ext", "bundler"]):
-            classification.primary = "runtime_spine"
-            signals.rails = True
-            classification.confidence += 0.3
+        name_l = name.lower()
+        name_tokens = _tokens(name)
+        name_token_set = list(dict.fromkeys(name_tokens))
+        dep_texts = []
+        dep_tokens: list[str] = []
+        for dep in deps:
+            dep_l = dep.lower()
+            dep_texts.append(dep_l)
+            dep_tokens.extend(_tokens(dep))
+        desc_l = description.lower()
+        desc_tokens = _tokens(description)
 
-        # 9. validation_types — Validation, type systems, schemas (before generic dry- check)
-        elif has(["dry-validation", "dry-types", "dry-struct", "dry-schema",
-                  "validates", "valid_attr", "attribute",
-                  "json-schema", "json_schemer", "activemodel"]):
-            classification.primary = "validation_types"
-            classification.confidence += 0.3
+        # ---- keyword + description scoring over all categories ----
+        scores: dict[str, float] = {}
+        name_hits: dict[str, int] = {}
+        dep_hit_counts: dict[str, int] = {}
 
-        # runtime_spine fallback for other dry-* gems
-        elif has(["dry-"]):
-            classification.primary = "runtime_spine"
-            signals.rails = True
-            classification.confidence += 0.3
+        for cat in CATEGORIES:
+            n_hits = sum(_keyword_hits(name_token_set, name_l, kw) for kw in cat.keywords)
+            d_hits = sum(_keyword_hits(dep_tokens, dep_l, kw) for kw in cat.keywords) if dep_tokens else 0
+            t_hits = sum(_keyword_hits(desc_tokens, desc_l, kw) for kw in cat.keywords) if desc_tokens else 0
 
-        # 2. cli_terminal_ui — CLI frameworks, TUI tools
-        elif has(["thor", "gli", "gli", "tty-", "commander", "optimist", "clamp", "cli", "terminal", "curses", "ncurses"]):
-            classification.primary = "cli_terminal_ui"
-            classification.confidence += 0.3
+            name_hits[cat.slug] = n_hits
+            dep_hit_counts[cat.slug] = d_hits
+            scores[cat.slug] = (
+                min(_NAME_HIT_WEIGHT * n_hits, _NAME_HIT_CAP)
+                + min(_DEP_HIT_WEIGHT * d_hits, _DEP_HIT_CAP)
+                + min(_DESC_HIT_WEIGHT * t_hits, _DESC_HIT_CAP)
+            )
 
-        # 3. storage_persistence — ORMs, DB adapters, file stores
-        elif has(["activerecord", "sequel", "rom", "mongoid", "ohm", "redis-store", "leveldb", "lmdb", "sqlite", "ar-"]):
-            classification.primary = "storage_persistence"
-            classification.confidence += 0.3
+        # ---- embedding similarity (graceful degradation to empty dict) ----
+        embedding_scores: dict[str, float] = {}
+        try:
+            scorer = self._get_embedding_scorer()
+            if scorer is not None:
+                embedding_scores = scorer.score(name, description) or {}
+        except Exception:
+            embedding_scores = {}
 
-        # 4. async_networking_orchestration — HTTP, messaging, job queues, servers
-        elif has(["sidekiq", "async", "falcon", "puma", "unicorn", "resque", "delayed_job",
-                  "http", "faraday", "net-http", "excon", "typhoeus", "patron",
-                  "grpc", "kafka", "bunny", "mqtt", "celluloid", "concurrent",
-                  "eventmachine", "nio4r"]):
-            classification.primary = "async_networking_orchestration"
-            signals.external_io = True
-            classification.confidence += 0.3
+        if embedding_scores:
+            best_emb = max(embedding_scores.values()) or 1.0
+            for slug, sim in embedding_scores.items():
+                if slug in scores:
+                    scores[slug] += _EMBEDDING_WEIGHT * (sim / best_emb if best_emb else 0.0)
 
-        # 5. ai_nlp — AI/ML, NLP, LLM, embeddings
-        elif has(["openai", "ruby-openai", "anthropic", "llm", "gpt", "nlp", "langchain",
-                  "transformers", "embedding", "vector", "tiktoken", "tokenizer",
-                  "tensorflow", "torch", "onnx", "whisper"]):
-            classification.primary = "ai_nlp"
-            classification.confidence += 0.3
+        best_slug = max(scores, key=lambda s: scores[s])  # type: ignore[arg-type,return-value]
+        best_score = scores[best_slug]
+        n_best = name_hits.get(best_slug, 0)
+        d_best = dep_hit_counts.get(best_slug, 0)
 
-        # 6. data_processing — HTML/XML parsing, CSV, spreadsheets, PDF, scraping
-        elif has(["nokogiri", "oga", "loofah", "sanitiz",
-                  "roo", "spreadsheet", "caxlsx", "axlsx", "xlsx", "csv",
-                  "prawn", "wicked_pdf", "pdfkit", "hexapdf",
-                  "mechanize", "scraping", "scraper", "craw"]):
-            classification.primary = "data_processing"
-            classification.confidence += 0.3
+        classification = GemClassification(primary=best_slug, confidence=_DEFAULT_CONFIDENCE)
 
-        # 7. retrieval_similarity_fuzzy — Search, fuzzy matching, indexing
-        elif has(["elasticsearch", "searchkick", "chewy", "meilisearch",
-                  "fuzzy", "fuzz", "similar", "match",
-                  "pg_search", "ransack", "sunspot", "thinking-sphinx"]):
-            classification.primary = "retrieval_similarity_fuzzy"
-            classification.confidence += 0.3
-
-        # 8. algorithms_knowledge_structures — Data structures, algorithms, graph, tree
-        elif has(["algorithm", "rbtree", "tree", "graph", "heap", "queue",
-                  "set-theory", "bitset", "bloom", "trie", "hash_ring",
-                  "priority-queue", "linked-list"]):
-            classification.primary = "algorithms_knowledge_structures"
-            classification.confidence += 0.3
-
-        # 10. parsing_encoding — JSON, YAML, XML, MessagePack, serializers
-        elif has(["json", "yajl", "oj", "msgpack", "yaml", "toml", "xml",
-                  "serializ", "encode", "decode", "marshal", "protobuf"]):
-            classification.primary = "parsing_encoding"
-            classification.confidence += 0.3
-
-        # 11. debugging_introspection — Debuggers, profilers, loggers, introspection
-        elif has(["pry", "byebug", "debug", "debase", "ruby-debug",
-                  "stackprof", "ruby-prof", "memory_profiler", "allocation_tracer",
-                  "log", "logger", "sentry", "datadog", "newrelic", "honeybadger",
-                  "bugsnag", "airbrake", "rollbar", "opentelemetry"]):
-            classification.primary = "debugging_introspection"
-            signals.external_io = True
-            classification.confidence += 0.3
-
-        # 12. mcp_tooling — MCP (Model Context Protocol) tools
-        elif has(["mcp", "model-context-protocol"]):
-            classification.primary = "mcp_tooling"
-            classification.confidence += 0.3
-
-        # Fallback: dependency-based heuristics
+        if best_score <= 0:
+            classification.primary = _DEFAULT_CATEGORY
+        elif n_best >= 1:
+            classification.confidence = 0.8
+        elif d_best >= 1:
+            classification.confidence = 0.65
         else:
-            for dep in deps:
-                dl = dep.lower()
-                if "rails" in dl or "activesupport" in dl:
-                    classification.primary = "runtime_spine"
-                    signals.rails = True
-                    classification.confidence += 0.2
-                    break
-                if "sidekiq" in dl or "async" in dl or "falcon" in dl:
-                    classification.primary = "async_networking_orchestration"
-                    classification.confidence += 0.2
-                    break
-                if "sentry" in dl or "datadog" in dl or "newrelic" in dl:
-                    classification.primary = "debugging_introspection"
-                    classification.confidence += 0.2
-                    break
-                if "nokogiri" in dl or "csv" in dl:
-                    classification.primary = "data_processing"
-                    classification.confidence += 0.2
-                    break
+            # description-only or embedding-only match: too weak to trust
+            classification.confidence = min(0.6, 0.5 + 0.1 * min(best_score, 1.0))
 
-        if category in ["development", "test"]:
-            classification.primary = "cli_terminal_ui"
+        # CSV group hint: development/test-scoped gems are testing tooling
+        if category in ("development", "test"):
+            classification.primary = "testing_qa"
             classification.confidence = max(classification.confidence, 0.7)
 
+        signals = GemSignals()
         if info and info.get("platform") not in (None, "ruby"):
             signals.native_ext = True
+        if n_best and CATEGORY_BY_SLUG[best_slug].layer == "plumbing":
+            signals.external_io = True
+        if any("rails" in d.lower() for d in deps):
+            signals.rails = True
 
-        # Sub-category detection from dependencies
+        # ---- dependency-driven sub-category signals (kept from the old
+        # classifier; orthogonal to the 21-category taxonomy) ----
         sub_cats = set()
         for dep in deps:
-            dep_lower = dep.lower()
-            if "rails" in dep_lower:
+            dl = dep.lower()
+            if "rails" in dl:
                 sub_cats.add("rails")
-            if "sidekiq" in dep_lower:
+            if "sidekiq" in dl:
                 sub_cats.add("sidekiq")
                 sub_cats.add("background_jobs")
-            if "active_job" in dep_lower or "activejob" in dep_lower:
+            if "active_job" in dl or "activejob" in dl:
                 sub_cats.add("activejob")
-            if "puma" in dep_lower or "unicorn" in dep_lower:
+            if "puma" in dl or "unicorn" in dl:
                 sub_cats.add("server")
-            if "redis" in dep_lower:
+            if "redis" in dl:
                 sub_cats.add("redis")
-            if "postgresql" in dep_lower or "pg" in dep_lower or "mysql" in dep_lower or "mysql2" in dep_lower or "mariadb" in dep_lower:
+            if "postgres" in dl or dl == "pg" or "mysql" in dl or "mariadb" in dl:
                 sub_cats.add("database")
-            if "elasticsearch" in dep_lower or "search" in dep_lower:
+            if "elasticsearch" in dl or "search" in dl:
                 sub_cats.add("search")
-            if "jwt" in dep_lower or "oauth" in dep_lower:
+            if "jwt" in dl or "oauth" in dl:
                 sub_cats.add("auth")
-            if "graphql" in dep_lower or "grape" in dep_lower:
+            if "graphql" in dl or "grape" in dl:
                 sub_cats.add("api")
-            if "json" in dep_lower or "xml" in dep_lower:
+            if "json" in dl or "xml" in dl:
                 sub_cats.add("serialization")
-            if "csv" in dep_lower or "xlsx" in dep_lower or "excel" in dep_lower:
+            if "csv" in dl or "xlsx" in dl or "excel" in dl:
                 sub_cats.add("spreadsheet")
-            if "pdf" in dep_lower:
+            if "pdf" in dl:
                 sub_cats.add("pdf")
-            if "aws" in dep_lower or "gcp" in dep_lower or "google" in dep_lower or "azure" in dep_lower:
+            if "aws" in dl or "gcp" in dl or "google" in dl or "azure" in dl or "s3" in dl:
                 sub_cats.add("cloud")
-            if "s3" in dep_lower:
-                sub_cats.add("cloud")
-            if "sentry" in dep_lower or "datadog" in dep_lower or "newrelic" in dep_lower or "honeybadger" in dep_lower:
+            if "sentry" in dl or "datadog" in dl or "newrelic" in dl or "honeybadger" in dl:
                 sub_cats.add("monitoring")
-            if "delayed_job" in dep_lower or "resque" in dep_lower or "sidekiq" in dep_lower:
+            if "delayed_job" in dl or "resque" in dl or "sidekiq" in dl:
                 sub_cats.add("background_jobs")
-            if "kafka" in dep_lower or "bunny" in dep_lower or "mqtt" in dep_lower:
+            if "kafka" in dl or "bunny" in dl or "mqtt" in dl:
                 sub_cats.add("messaging")
 
         return classification, signals, deps, list(sub_cats)
 
     def score_gem(self, primary_cat: str, deps: list) -> GemRisks:
-        invasiveness_map = {
-            "runtime_spine": 5,
-            "async_networking_orchestration": 4,
-            "storage_persistence": 4,
-            "data_processing": 3,
-            "ai_nlp": 3,
-            "retrieval_similarity_fuzzy": 3,
-            "algorithms_knowledge_structures": 2,
-            "validation_types": 2,
-            "parsing_encoding": 2,
-            "cli_terminal_ui": 1,
-            "debugging_introspection": 1,
-            "mcp_tooling": 1,
-        }
-        inv = invasiveness_map.get(primary_cat, 3)
+        cat = CATEGORY_BY_SLUG.get(primary_cat)
+        if cat is None:
+            # Unknown slug: fall back to default risk values without raising.
+            return GemRisks(
+                invasiveness=_DEFAULT_RISKS.invasiveness,
+                coupling=min(4, max(1, len(deps) // 3 + 1)),
+                abstraction_leak=_DEFAULT_RISKS.abstraction_leak,
+            )
 
-        coupling = min(4, max(1, len(deps)//3 + 1))
+        coupling = min(4, max(1, len(deps) // 3 + 1))
+        return GemRisks(
+            invasiveness=cat.default_invasiveness,
+            coupling=coupling,
+            abstraction_leak=cat.default_abstraction_leak,
+        )
 
-        leak_map = {
-            "async_networking_orchestration": "high",
-            "storage_persistence": "high",
-            "runtime_spine": "medium",
-            "ai_nlp": "medium",
-            "data_processing": "medium",
-        }
-        leak = leak_map.get(primary_cat, "low")
-
-        return GemRisks(invasiveness=inv, coupling=coupling, abstraction_leak=leak)
-
-    def classify(self, name: str, category: Optional[str] = None, homepage: Optional[str] = None, source_code_uri: Optional[str] = None, context7_id: Optional[str] = None) -> GemEntry:
+    def classify(self, name: str, category: Optional[str] = None, homepage: Optional[str] = None,
+                 source_code_uri: Optional[str] = None, context7_id: Optional[str] = None) -> GemEntry:
         info = self.rubygems.fetch_gem_info(name) or {}
         classification, signals, deps, sub_cats = self.heuristic_classify(name, info, category)
-        
-        # Add sub_categories to classification
+
         classification.sub_categories = sub_cats
 
         # Unconditionally call the LLM to generate an agent-optimized description
@@ -236,11 +205,16 @@ class GemClassifier:
         if llm_result:
             # Only override heuristic classification if LLM is confident and heuristics weren't
             if classification.confidence < 0.7 and llm_result.get("confidence", 0) > 0.6:
-                classification.primary = llm_result["primary"]
-                classification.confidence = llm_result["confidence"]
+                llm_primary = llm_result.get("primary")
+                if llm_primary in VALID_CATEGORIES:
+                    classification.primary = llm_primary
+                    classification.confidence = llm_result["confidence"]
             agent_desc = llm_result.get("agent_description", "")
 
         risks = self.score_gem(classification.primary, deps)
+
+        cat = CATEGORY_BY_SLUG.get(classification.primary)
+        attaches_to = cat.slug.split("_")[0] if cat else classification.primary.split("_")[0]
 
         return GemEntry(
             name=name,
@@ -248,7 +222,7 @@ class GemClassifier:
             role={
                 "description": str(info.get("info", "")) if info else "",
                 "agent_description": agent_desc,
-                "attaches_to": classification.primary.split("_")[0]
+                "attaches_to": attaches_to
             },
             risks=risks,
             signals=signals,
