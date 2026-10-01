@@ -17,7 +17,7 @@
 - **21-Category Taxonomy** — Classifies gems into functional categories (web_frameworks, cli_libraries, ai_llm, etc.), each tagged with a stack layer (substrate, plumbing, composition, quality), with confidence scoring and sub-category detection from dependency analysis
 - **Heuristic + LLM Hybrid** — Fast pattern matching for obvious cases, with Mistral-powered LLM fallback when heuristic confidence drops below 0.7
 - **Semantic Vector Search** — txtai-powered embeddings with multi-query expansion and recency boosting for finding gems by natural language description
-- **AI Agent with MCP Tools** — Context7 documentation retrieval, Codebase Memory integration, and Trackboi backlog distillation via Model Context Protocol
+- **AI Agent with MCP Tools** — Context7 documentation retrieval and Codebase Memory integration via Model Context Protocol
 - **Phase-Walking Advisor** — Conversational project-brief chat that decomposes a brief into capabilities, then walks skeleton → input → processing → output phases, presenting gem picks you can accept, swap, ask about, skip, or revisit — exportable as markdown and JSON
 - **Interactive TUI** — Textual-based terminal UI for browsing, filtering, editing, and exporting classified gems with real-time classification
 - **Batch CLI Pipeline** — Headless processing of gem inventories with metadata verification, classification, and YAML report generation
@@ -64,7 +64,6 @@ graph LR
     ollama["Ollama\nembeddinggemma model"]
     mcp-context7["Context7 MCP\n@upstash/context7-mcp"]
     mcp-cbm["Codebase Memory MCP\ncodebase-memory-mcp"]
-    mcp-trackboi["Trackboi MCP\ntrackboi mcp"]
 
     rubygems-service["RubyGems Service"] -->|"fetches gem info"| rubygems-api
     context7-service["Context7 Service"] -->|"searches libraries"| context7-api
@@ -72,7 +71,6 @@ graph LR
     agent["AI Agent"] -->|"generates embeddings"| ollama
     agent -->|"retrieves docs"| mcp-context7
     agent -->|"searches code"| mcp-cbm
-    agent -->|"distills backlogs"| mcp-trackboi
 
     style rubygems-api fill:#585b70,stroke:#585b70,color:#cdd6f4
     style context7-api fill:#585b70,stroke:#585b70,color:#cdd6f4
@@ -80,7 +78,6 @@ graph LR
     style ollama fill:#585b70,stroke:#585b70,color:#cdd6f4
     style mcp-context7 fill:#585b70,stroke:#585b70,color:#cdd6f4
     style mcp-cbm fill:#585b70,stroke:#585b70,color:#cdd6f4
-    style mcp-trackboi fill:#585b70,stroke:#585b70,color:#cdd6f4
 ```
 
 ---
@@ -162,7 +159,6 @@ Export writes `output/chat_exports/chat_<timestamp>.md` and `.json` containing t
 | `fetch_rubygems_info` | Fetch detailed gem metadata from RubyGems API |
 | Context7 MCP | Retrieve library documentation and cheatsheets |
 | Codebase Memory MCP | Search target project architecture |
-| Trackboi MCP | Distill backlogs into task boards |
 
 ### Agent Prompt Structure
 

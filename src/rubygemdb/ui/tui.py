@@ -8,9 +8,7 @@ from textual.containers import Horizontal, Vertical, ScrollableContainer
 from textual.widgets import (
     Header, Footer, DataTable, RadioSet, RadioButton, Label,
     Button, Markdown, ListView, ListItem, Input, TabbedContent, TabPane, RichLog,
-    SelectionList
 )
-from textual.widgets.selection_list import Selection
 from textual.screen import ModalScreen
 from textual import on, work
 
@@ -234,92 +232,6 @@ class ConfirmDeleteScreen(ModalScreen[bool]):
 
 
 
-class ProjectFolderScreen(ModalScreen[str]):
-    """A screen to select a project folder and check for Trackboi board existence."""
-    def compose(self) -> ComposeResult:
-        with Vertical(id="project-folder-dialog", classes="modal-dialog"):
-            yield Label("Select Project Folder", classes="section-title")
-            yield Label("Enter the path to the target project folder:", classes="help-text")
-            yield Input(value=os.getcwd(), id="folder-input")
-            
-            yield Label("", id="board-status-label", classes="help-text")
-            
-            with Horizontal(id="dialog-buttons"):
-                yield Button("Cancel", id="cancel-folder-btn", variant="error")
-                yield Button("Check Folder", id="check-folder-btn", variant="primary")
-                yield Button("Create Board & Continue", id="create-board-btn", variant="success")
-
-    def on_mount(self):
-        self.query_one("#create-board-btn").display = False
-
-    @on(Button.Pressed, "#check-folder-btn")
-    def on_check(self):
-        folder = self.query_one("#folder-input").value
-        if not os.path.exists(folder):
-            self.query_one("#board-status-label").update("[red]Folder does not exist![/red]")
-            return
-            
-        # Check if Trackboi board exists (.trackboi directory)
-        trackboi_dir = os.path.join(folder, ".trackboi")
-        if os.path.exists(trackboi_dir):
-            self.dismiss(folder)  # Already exists, proceed!
-        else:
-            self.query_one("#board-status-label").update("[yellow]No Trackboi board found in this folder. Create a new one?[/yellow]")
-            self.query_one("#check-folder-btn").display = False
-            self.query_one("#create-board-btn").display = True
-
-    @on(Button.Pressed, "#create-board-btn")
-    def on_create(self):
-        folder = self.query_one("#folder-input").value
-        # Initialize a basic trackboi board structure
-        trackboi_dir = os.path.join(folder, ".trackboi")
-        os.makedirs(trackboi_dir, exist_ok=True)
-        # Create a basic board.json
-        with open(os.path.join(trackboi_dir, "board.json"), "w") as f:
-            json.dump({
-                "id": "default",
-                "name": os.path.basename(folder),
-                "columns": ["Backlog", "In Progress", "Review", "Done"]
-            }, f)
-            
-        self.app.notify("Trackboi board created successfully!", severity="information")
-        self.dismiss(folder)
-
-    @on(Button.Pressed, "#cancel-folder-btn")
-    def on_cancel(self):
-        self.dismiss(None)
-
-
-class DistillSelectionScreen(ModalScreen[list[str]]):
-    """A screen to select multiple implementation options/stories to distill to Trackboi."""
-    def __init__(self, options: list[str]):
-        super().__init__()
-        self.options = options
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="distill-dialog", classes="modal-dialog"):
-            yield Label("Distill to Trackboi", classes="section-title")
-            yield Label("Select implementation options to create tracks/cards:", classes="help-text")
-            
-            selections = [Selection(opt, opt) for opt in self.options]
-            yield SelectionList(*selections, id="options-list")
-            
-            with Horizontal(id="dialog-buttons"):
-                yield Button("Cancel", id="cancel-btn", variant="error")
-                yield Button("Distill Selected", id="submit-btn", variant="success")
-
-    @on(Button.Pressed, "#submit-btn")
-    def on_submit(self):
-        selected = self.query_one("#options-list", SelectionList).selected
-        if selected:
-            self.dismiss(selected)
-        else:
-            self.app.notify("No options selected.", severity="warning")
-
-    @on(Button.Pressed, "#cancel-btn")
-    def on_cancel(self):
-        self.dismiss(None)
-
 
 class ExportTab(ScrollableContainer):
     """Export tab with format selection and path input."""
@@ -458,7 +370,6 @@ class AgentChatTab(ScrollableContainer):
                 with Horizontal(id="chat-actions"):
                     yield Button("Export to Markdown", id="export-chat-btn", variant="primary")
                     yield Button("Clear Chat", id="clear-chat-btn", variant="error")
-                    yield Button("Distill to Trackboi", id="distill-chat-btn", variant="success")
             with Vertical(id="chat-trace"):
                 yield Label("Agent Execution Trace", id="trace-title", classes="section-title")
                 yield RichLog(id="trace-log", markup=True, wrap=True)
@@ -565,14 +476,6 @@ class AgentChatTab(ScrollableContainer):
     @work(thread=True)
     def process_query(self, query: str) -> None:
         self.app.call_from_thread(self._start_thinking)
-        
-        is_distill = query.startswith("[DISTILL_TRACKBOI")
-        target_folder = None
-        if is_distill:
-            end_idx = query.find("]")
-            target_folder = query[17:end_idx].strip()
-            query = query[end_idx+1:].strip()
-            
         import threading
         import time
         self._thinking = True
@@ -600,19 +503,6 @@ class AgentChatTab(ScrollableContainer):
             response = str(self.agent.advise(query))
             self._thinking = False
             self.app.call_from_thread(self._add_message, "agent", response)
-            
-            # 2. Trackboi Distiller Agent Distills the Backlog
-            if is_distill:
-                self.app.call_from_thread(self._add_trace, "[magenta]➜[/magenta] Starting Multi-Agent Trackboi Distillation...")
-                try:
-                    # Let the user configure the provider/model via settings if needed, or default
-                    distiller_agent = self.agent.get_trackboi_distiller_agent()
-                    distiller_query = f"Target Project Folder: {target_folder}\n\nImplementation Backlog:\n{response}"
-                    distill_result = str(distiller_agent.run(distiller_query))
-                    self.app.call_from_thread(self._add_message, "system", f"**Trackboi Sync Complete:**\n{distill_result}")
-                    self.app.call_from_thread(self._add_trace, "[green]➜[/green] Trackboi Distillation Complete.")
-                except Exception as dist_e:
-                    self.app.call_from_thread(self._add_message, "error", f"Trackboi Distillation failed: {dist_e}")
             self.app.call_from_thread(self._update_phase_label)
         except Exception as e:
             self._thinking = False
@@ -687,63 +577,6 @@ class AgentChatTab(ScrollableContainer):
         self._update_phase_label()
         self._add_message("agent", "System ready. Loading embeddings index...")
         self.load_agent()
-
-    @on(Button.Pressed, "#distill-chat-btn")
-    def on_distill_chat(self) -> None:
-        last_agent_msg = None
-        for msg in reversed(self._chat_messages):
-            if msg["role"] == "agent":
-                last_agent_msg = msg["content"]
-                break
-        
-        if not last_agent_msg:
-            self.app.notify("No agent message found to distill.", severity="warning")
-            return
-            
-        import re
-        options = []
-        
-        # If the JSON was partially parsed or literal \n were replaced:
-        cleaned_msg = last_agent_msg.replace("\\n", "\n")
-        
-        # Try to find explicit User Stories or Options
-        matches = re.findall(r'#+\s*(?:User Story|Option|Task).*?:?\s*(.*)', cleaned_msg, re.IGNORECASE)
-        for m in matches:
-            opt = m.strip().strip('*_')
-            if opt and opt not in options:
-                options.append(opt)
-                
-        if not options:
-            # Fallback 1: Look for ANY markdown header (## something)
-            matches = re.findall(r'#+\s+([^#\n]+)', cleaned_msg)
-            for m in matches:
-                opt = m.strip().strip('*_')
-                if opt and opt not in options:
-                    options.append(opt)
-                    
-        if not options:
-            self.app.notify("Could not find structured options or headers in the last message.", severity="warning")
-            return
-            
-        def handle_folder(selected_folder):
-            if not selected_folder:
-                return
-                
-            def handle_selection(selected_options):
-                if selected_options:
-                    self._add_message("system", f"Selected {len(selected_options)} option(s) to distill to Trackboi in '{selected_folder}'.")
-                    for opt in selected_options:
-                        prompt = f"I have selected the following option/decision: '{opt}'. Please generate a concrete implementation backlog for this specific choice, formatted as User Stories and technical tasks so it can be distilled into Trackboi in project {selected_folder}."
-                        if getattr(self, "_thinking", False):
-                            self._query_queue.append(prompt)
-                            self._add_message("system", f"Added to queue. ({len(self._query_queue)} pending)")
-                        else:
-                            self._thinking = True
-                            self.process_query(prompt)
-
-            self.app.push_screen(DistillSelectionScreen(options), handle_selection)
-
-        self.app.push_screen(ProjectFolderScreen(), handle_folder)
 
 
 class GemApp(App):

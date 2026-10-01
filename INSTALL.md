@@ -204,7 +204,6 @@ RATE_LIMIT_DELAY=0.5
 
 # Agent Configuration
 RUBYGEMDB_AGENT_MODEL=mistral/mistral-small-latest
-TRACKBOI_DISTILLER_MODEL=mistral/mistral-large-latest
 
 # Storage Paths
 PROJECT_ROOT=./

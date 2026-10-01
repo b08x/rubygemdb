@@ -11,7 +11,6 @@ class Settings(BaseSettings):
     llm_endpoint: str = "https://api.mistral.ai/v1/chat/completions"
     rubygemdb_model: str = "mistral-medium-latest"
     rubygemdb_agent_model: str = "mistral/mistral-small-latest"
-    trackboi_distiller_model: str = "mistral/mistral-large-latest"
     rubygems_api_url: str = "https://rubygems.org/api/v1/gems/{name}.json"
     
     # Delays & Batches
