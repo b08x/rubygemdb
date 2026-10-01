@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     rubygemdb_model: str = "mistral-medium-latest"
     rubygemdb_agent_model: str = "mistral/mistral-small-latest"
     rubygems_api_url: str = "https://rubygems.org/api/v1/gems/{name}.json"
+    rubygems_search_url: str = "https://rubygems.org/api/v1/search.json?query={query}"
     
     # Delays & Batches
     rate_limit_delay: float = 0.5

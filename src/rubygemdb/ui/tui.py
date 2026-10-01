@@ -10,6 +10,7 @@ from textual.widgets import (
     Button, Markdown, ListView, ListItem, Input, TabbedContent, TabPane, RichLog,
 )
 from textual.screen import ModalScreen
+from textual.timer import Timer
 from textual import on, work
 
 from rubygemdb.services.rubygems import RubyGemsService
@@ -149,15 +150,52 @@ class C7SelectionScreen(ModalScreen[str]):
         self.dismiss(None)
 
 class AddGemScreen(ModalScreen[str]):
-    """A screen to manually add a gem by name."""
+    """A screen to manually add a gem by name, with incremental (find-as-you-type)
+    search over the local inventory plus debounced rubygems.org suggestions."""
+    REMOTE_DEBOUNCE = 0.4
+
+    def __init__(self, existing_names: Optional[list] = None):
+        super().__init__()
+        self.existing_names = sorted({n.lower(): n for n in (existing_names or [])}.values())
+        self._local_matches: list[str] = []
+        self._remote_matches: list[dict] = []
+        self._query = ""
+        self._remote_timer: Optional[Timer] = None
+
     def compose(self) -> ComposeResult:
         with Vertical(id="add-gem-dialog", classes="modal-dialog"):
             yield Label("Add New Gem", classes="section-title")
-            yield Label("Enter the name of the Ruby gem to add:", classes="help-text")
+            yield Label(
+                "Type to search the inventory and rubygems.org. "
+                "Enter adds the typed name; Tab into the list to pick a match.",
+                classes="help-text",
+            )
             yield Input(placeholder="gem-name", id="gem-name-input")
+            yield ListView(id="gem-suggestions")
             with Horizontal(id="dialog-buttons"):
                 yield Button("Add Gem", id="add-btn", variant="primary")
                 yield Button("Cancel", id="cancel-btn", variant="error")
+
+    def on_mount(self) -> None:
+        self.query_one("#gem-name-input", Input).focus()
+        self._render_suggestions()
+
+    @on(Input.Changed, "#gem-name-input")
+    def on_query_changed(self, event: Input.Changed) -> None:
+        self._query = event.value.strip()
+        self._update_local_matches()
+        self._schedule_remote_search()
+
+    @on(Input.Submitted, "#gem-name-input")
+    def on_query_submitted(self, event: Input.Submitted) -> None:
+        if event.value.strip():
+            self.dismiss(event.value.strip())
+
+    @on(ListView.Selected, "#gem-suggestions")
+    def on_suggestion_selected(self, event: ListView.Selected) -> None:
+        name = getattr(event.item, "gem_name", None)
+        if name:
+            self.dismiss(name)
 
     @on(Button.Pressed, "#add-btn")
     def on_add(self):
@@ -169,6 +207,69 @@ class AddGemScreen(ModalScreen[str]):
     def on_cancel(self):
         self.dismiss(None)
 
+    def _update_local_matches(self) -> None:
+        """Instant substring filter over the local inventory (find-as-you-type)."""
+        query = self._query.lower()
+        if query:
+            self._local_matches = [n for n in self.existing_names if query in n.lower()][:8]
+        else:
+            self._local_matches = []
+        self._render_suggestions()
+
+    def _schedule_remote_search(self) -> None:
+        """Debounce rubygems.org lookups so each keystroke doesn't hit the API."""
+        if self._remote_timer is not None:
+            self._remote_timer.stop()
+            self._remote_timer = None
+        if len(self._query) < 2:
+            self._remote_matches = []
+            self._render_suggestions()
+            return
+        self._remote_timer = self.set_timer(self.REMOTE_DEBOUNCE, self._run_remote_search)
+
+    def _run_remote_search(self) -> None:
+        """Run the rubygems.org lookup off the UI thread (debounced by caller)."""
+        self.run_worker(self._remote_search_work, thread=True, exclusive=True)
+
+    def _remote_search_work(self) -> None:
+        query = self._query
+        service = getattr(self.app, "rg_service", None)
+        if service is None:
+            return
+        results = service.search_gems(query)
+
+        def apply(res: Optional[list]) -> None:
+            if self._query == query:  # ignore stale in-flight responses
+                self._remote_matches = res or []
+                self._render_suggestions()
+
+        self.app.call_from_thread(apply, results)
+
+    def _render_suggestions(self) -> None:
+        suggestions = self.query_one("#gem-suggestions", ListView)
+        suggestions.clear()
+        existing = {n.lower() for n in self.existing_names}
+
+        for name in self._local_matches:
+            item = ListItem(Label(f"{name} [dim]— already in database[/dim]"))
+            setattr(item, "gem_name", name)
+            suggestions.append(item)
+
+        for gem in self._remote_matches:
+            gem_name = gem.get("name")
+            if not gem_name or gem_name.lower() in existing:
+                continue
+            desc = (gem.get("info") or "").strip()
+            if len(desc) > 60:
+                desc = desc[:60] + "..."
+            item = ListItem(Label(f"{gem_name} [dim]— rubygems.org[/dim]\n[i]{desc}[/i]"))
+            setattr(item, "gem_name", gem_name)
+            suggestions.append(item)
+
+        if self._query and len(suggestions) == 0:
+            suggestions.append(ListItem(Label(f"No matches for '{self._query}'")))
+        elif not self._query:
+            suggestions.append(ListItem(Label("Start typing to search...")))
 
 class EditGemScreen(ModalScreen[tuple]):
     """A screen to manually edit a gem's metadata."""
@@ -369,6 +470,7 @@ class AgentChatTab(ScrollableContainer):
                 yield Select([], prompt="Optional: Select a codebase memory project for context", id="project-input")
                 yield Input(placeholder="Ask the agent a question...", id="chat-input")
                 with Horizontal(id="chat-actions"):
+                    yield Button("Add Gem", id="chat-add-gem-btn", variant="success")
                     yield Button("Export to Markdown", id="export-chat-btn", variant="primary")
                     yield Button("Clear Chat", id="clear-chat-btn", variant="error")
             with Vertical(id="chat-trace"):
@@ -549,6 +651,25 @@ class AgentChatTab(ScrollableContainer):
         self.log_widget.loading = False
         self._add_trace("[b green]Execution completed.[/b green]")
 
+    @on(Button.Pressed, "#chat-add-gem-btn")
+    def on_chat_add_gem(self) -> None:
+        """Open the incremental-search dialog to add a gem from agent chat."""
+        app = self.app
+        if not isinstance(app, GemApp):
+            return
+        existing = [g.name for g in app.all_gems]
+
+        def handle_add(name: Optional[str]) -> None:
+            if not name:
+                return
+            self._add_message("system", f"Adding '{name}' to the gem database...")
+            try:
+                app.add_gem_worker(name)
+            except Exception as e:
+                self._add_message("error", f"Failed to add gem '{name}': {e}")
+
+        self.app.push_screen(AddGemScreen(existing), handle_add)
+
     @on(Button.Pressed, "#export-chat-btn")
     def on_export_chat(self) -> None:
         """Export the confirmed stack and transcript as markdown + JSON."""
@@ -598,6 +719,7 @@ class GemApp(App):
         ("d", "delete_gem", "Delete"),
         ("p", "toggle_preferred", "Prefer"),
         ("plus", "add_gem", "Add"),
+        ("slash", "focus_search", "Search"),
         ("t", "switch_tab", "Switch Tab"),
     ]
 
@@ -711,6 +833,17 @@ class GemApp(App):
         width: 20;
         margin-left: 1;
     }
+    #gem-search-input {
+        height: 3;
+        margin-bottom: 1;
+        border: solid $background;
+    }
+    #gem-suggestions {
+        height: auto;
+        max-height: 12;
+        margin: 1 0;
+        border: solid $background;
+    }
     #category-selection {
         height: auto;
         max-height: 15;
@@ -814,6 +947,7 @@ class GemApp(App):
         
         self.all_gems = []
         self.filtered_gems = []
+        self.search_filter: str = ""
         self._selected_gems = set()
         self._selection_lock = threading.Lock()
         self._bulk_update_queue = []
@@ -840,6 +974,10 @@ class GemApp(App):
             with Vertical(id="main-area"):
                 with TabbedContent(id="main-tabs"):
                     with TabPane("Explorer", id=TabConstants.EXPLORER):
+                        yield Input(
+                            placeholder="Type to filter gems (name, category, description)...",
+                            id="gem-search-input",
+                        )
                         self.table = DataTable(id="gems_table")
                         yield self.table
                     with TabPane("Chat", id=TabConstants.CHAT):
@@ -983,6 +1121,16 @@ class GemApp(App):
                         continue
                 filtered.append(g)
 
+            # Incremental text filter (find-as-you-type)
+            search = self.search_filter
+            if search:
+                filtered = [
+                    g for g in filtered
+                    if search in g.name.lower()
+                    or search in (g.classification.primary or "").lower()
+                    or search in (g.description or "").lower()
+                ]
+
             # Sort alphabetically by name
             filtered.sort(key=lambda x: x.name.lower())
 
@@ -1017,6 +1165,16 @@ class GemApp(App):
     @on(RadioSet.Changed)
     def on_filter_changed(self, event):
         self.update_table()
+
+    @on(Input.Changed, "#gem-search-input")
+    def on_search_changed(self, event: Input.Changed) -> None:
+        """Incremental search: refilter the gem table on every keystroke."""
+        self.search_filter = event.value.strip().lower()
+        self.update_table()
+
+    def action_focus_search(self) -> None:
+        """Focus the find-as-you-type filter (bound to /)."""
+        self.query_one("#gem-search-input", Input).focus()
 
     @on(TabbedContent.TabActivated)
     def on_tab_activated(self, event: TabbedContent.TabActivated):
@@ -1306,7 +1464,7 @@ class GemApp(App):
                 self.notify(f"Adding {name}...")
                 self.add_gem_worker(name)
 
-        self.push_screen(AddGemScreen(), handle_add)
+        self.push_screen(AddGemScreen([g.name for g in self.all_gems]), handle_add)
 
     @work(thread=True)
     def add_gem_worker(self, name: str):

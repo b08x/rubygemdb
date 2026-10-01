@@ -1,6 +1,7 @@
 import time
 import requests
 import json
+from urllib.parse import quote_plus
 from rubygemdb.core.config import settings
 
 from typing import Optional
@@ -46,3 +47,36 @@ class RubyGemsService:
             except Exception:
                 time.sleep(1 * (attempt + 1))
         return None
+
+    def search_gems(self, query: str, limit: int = 8) -> Optional[list[dict]]:
+        """Incremental gem search against rubygems.org; used for find-as-you-type.
+
+        Results are cached per query so repeated keystrokes don't re-hit the API.
+        """
+        query = query.strip()
+        if not query:
+            return []
+
+        cache_key = f"__search__{query.lower()}"
+        if cache_key in self.cache:
+            return self.cache[cache_key]
+
+        url = settings.rubygems_search_url.format(query=quote_plus(query))
+        try:
+            self._wait_for_rate_limit()
+            r = requests.get(url, timeout=5, params={"page": 1})
+            if r.status_code != 200:
+                return None
+            data = r.json()
+            if not isinstance(data, list):
+                return None
+            results = [
+                {"name": g.get("name"), "info": g.get("info") or ""}
+                for g in data
+                if g.get("name")
+            ][:limit]
+            self.cache[cache_key] = results
+            self._save_cache()
+            return results
+        except Exception:
+            return None
