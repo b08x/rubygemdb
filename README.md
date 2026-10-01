@@ -18,6 +18,7 @@
 - **Heuristic + LLM Hybrid** — Fast pattern matching for obvious cases, with Mistral-powered LLM fallback when heuristic confidence drops below 0.7
 - **Semantic Vector Search** — txtai-powered embeddings with multi-query expansion and recency boosting for finding gems by natural language description
 - **AI Agent with MCP Tools** — Context7 documentation retrieval, Codebase Memory integration, and Trackboi backlog distillation via Model Context Protocol
+- **Phase-Walking Advisor** — Conversational project-brief chat that decomposes a brief into capabilities, then walks skeleton → input → processing → output phases, presenting gem picks you can accept, swap, ask about, skip, or revisit — exportable as markdown and JSON
 - **Interactive TUI** — Textual-based terminal UI for browsing, filtering, editing, and exporting classified gems with real-time classification
 - **Batch CLI Pipeline** — Headless processing of gem inventories with metadata verification, classification, and YAML report generation
 - **Risk Assessment** — Invasiveness, coupling, and abstraction leak scoring for architectural impact analysis
@@ -125,20 +126,39 @@ Automatic sub-category extraction from dependency names:
 
 ## AI Agent Architecture
 
-### Semantic Search Pipeline
+### Hybrid Search Pipeline
 
-The agent implements a multi-stage search process:
+Gem retrieval combines two signals fused with Reciprocal Rank Fusion (K=60):
 
-1. **Query Expansion** — "Other Steve" prompt architect rewrites queries into SFL-compliant semantic variations
-2. **Vector Retrieval** — Hybrid search (dense + sparse) with 30% recency boost for updated gems
-3. **Codebase Context** — Optional MCP integration with Codebase Memory for target project analysis
-4. **Synthesis** — Generates pragmatic implementation backlogs with concrete file references
+1. **Vector Retrieval** — txtai embedding similarity (`ollama/embeddinggemma`) with a 30% recency boost for recently updated gems
+2. **Full-Text Search** — SQLite FTS5 index (`gem_fts`) over gem names and descriptions; tries a strict AND-joined match first and falls back to the looser OR match, so single-token coincidences do not outrank full matches
+3. **RRF Fusion** — `services/hybrid_search.py` merges both rankings into one candidate list; degrades gracefully to whichever signal is available
+4. **Category Narrowing** — when a phase filter is active, query tokens restrict results to the categories they actually target (stem-matched against category keywords), so a "chunk text" query no longer pulls in persistence or media gems
+
+### Advisor Conversation Flow
+
+The chat tab (`services/advisor.py`) is card-driven, not a phase walk:
+
+1. **Card** — the brief is extracted into a structured requirement card (deliverable, inputs, transforms, outputs, constraints, open questions) and shown for review. Reply `go` to propose, or edit any slot in plain English ("inputs are DOCX files, not PDFs").
+2. **Proposal** — each searchable slot runs its own hybrid search, restricted to the categories of its build phase (deliverable → skeleton, inputs → input, transforms → processing, outputs → output). Every card item is searched separately and merged by best score, so one item's keywords cannot drown out another's. The whole stack is presented at once, grouped by slot, with one-line reasons.
+3. **Iteration** — you steer the whole proposal with actions or free-form feedback:
+   - `accept` — confirm the proposed stack as the final pick
+   - `remove <gem>` — drop a gem from the proposal
+   - `add <gem> [<gem> ...]` — manually include inventoried gems that were never offered
+   - `swap <gem> for <gem>` — replace one gem with another candidate from the same slot
+   - `retry <slot> <focus>` — re-search a slot with your focus words folded into the query; if no slot is named, the focus infers the slot from the categories it targets
+   - `edit <slot> ...` — change the card; only the affected slots are re-searched
+   - `ask <gem> <question>` — LLM answer about a specific gem
+   - `start over` — reset with a new brief
+   - anything else reads as conversational feedback — the intent LLM answers it and suggests the next action
+
+Export writes `output/chat_exports/chat_<timestamp>.md` and `.json` containing the brief, the requirement card, the confirmed stack by slot, and the transcript.
 
 ### MCP Tool Integration
 
 | Tool | Purpose |
 |------|---------|
-| `search_memory_tool` | Primary semantic search across gems, chat history, and docs |
+| `search_memory_tool` | Hybrid (vector + FTS5) gem search backing the advisor's slot candidates |
 | `fetch_rubygems_info` | Fetch detailed gem metadata from RubyGems API |
 | Context7 MCP | Retrieve library documentation and cheatsheets |
 | Codebase Memory MCP | Search target project architecture |
@@ -146,14 +166,7 @@ The agent implements a multi-stage search process:
 
 ### Agent Prompt Structure
 
-```
-Pragmatic Intent → Context & Findings → Implementation Backlog → Risks & Trade-offs
-```
-
-Each backlog item includes:
-- User Story (`As a <system>, I need <capability>`)
-- Technical tasks with concrete file references
-- Architectural integration points
+The tool-calling agent behind `ask <gem> <question>` answers gem questions only — what a gem does, whether it fits the project, how two gems compare, its risks. It does not design implementation backlogs or scaffold code; advisor state, card and stack progression, and exports are handled deterministically by `services/advisor.py`.
 
 ---
 
@@ -184,12 +197,16 @@ Alternatively, set `CUDA_ENABLED=true` / `CUDA_ENABLED=false` or `DEVICE=cuda` i
 rubygemdb/
 ├── src/rubygemdb/
 │   ├── cli.py              # CLI batch processor
-│   ├── agent.py            # AI agent with txtai embeddings
+│   ├── agent.py            # Card-driven advisor with tool-calling agent
 │   ├── core/
 │   │   └── config.py       # Pydantic Settings configuration
 │   ├── models/
-│   │   └── gem.py          # Pydantic data models
+│   │   ├── gem.py          # Pydantic data models
+│   │   └── phases.py       # skeleton/input/processing/output phase mapping
 │   ├── services/
+│   │   ├── advisor.py      # Advisor conversation state machine
+│   │   ├── advisor_export.py # Markdown/JSON chat export
+│   │   ├── hybrid_search.py # FTS5 + vector search with RRF fusion
 │   │   ├── classifier.py   # Heuristic + LLM classification
 │   │   ├── rubygems.py     # RubyGems API client
 │   │   ├── llm.py          # Mistral LLM client

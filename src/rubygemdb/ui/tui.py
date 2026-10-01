@@ -19,6 +19,7 @@ from rubygemdb.services.llm import LLMService
 from rubygemdb.services.classifier import GemClassifier
 from rubygemdb.models.categories import CATEGORIES
 from rubygemdb.services.context7 import Context7Service
+from rubygemdb.services.advisor_export import write_export
 from rubygemdb.storage.sqlite_storage import SQLiteStorage
 from rubygemdb.core.config import settings
 from rubygemdb.models.gem import GemEntry
@@ -169,6 +170,7 @@ class AddGemScreen(ModalScreen[str]):
     def on_cancel(self):
         self.dismiss(None)
 
+
 class EditGemScreen(ModalScreen[tuple]):
     """A screen to manually edit a gem's metadata."""
     def __init__(self, gem: GemEntry):
@@ -229,7 +231,6 @@ class ConfirmDeleteScreen(ModalScreen[bool]):
     @on(Button.Pressed, "#cancel-btn")
     def on_cancel(self):
         self.dismiss(False)
-
 
 
 
@@ -449,7 +450,7 @@ class AgentChatTab(ScrollableContainer):
     def compose(self) -> ComposeResult:
         with Horizontal(id="chat-split"):
             with Vertical(id="chat-main"):
-                yield Label("RubyGemDB Agent (Txtai/Ollama)", id="chat-title")
+                yield Label("RubyGemDB Advisor", id="chat-title")
                 yield RichLog(id="chat-log", markup=True, wrap=True)
                 from textual.widgets import Select
                 yield Select([], prompt="Optional: Select a codebase memory project for context", id="project-input")
@@ -575,17 +576,15 @@ class AgentChatTab(ScrollableContainer):
         import threading
         import time
         self._thinking = True
-        
+
+        session = getattr(self.agent, "advisor_session", None)
+        stage = session.stage if session is not None else None
+
         def status_updater():
-            statuses = [
-                "Tokenizing semantic input...",
-                "Activating 'Other Steve' query expansion...",
-                "Injecting Codebase Memory context...",
-                "Traversing knowledge graph...",
-                "Evaluating heuristic confidence bounds...",
-                "Synthesizing pragmatic backlog...",
-                "Formatting User Stories..."
-            ]
+            statuses = ["Extracting requirement card..."]
+            if stage in ("card", "stack", "done"):
+                statuses.append("Searching slots for candidate gems...")
+                statuses.append("Ranking the proposed stack...")
             for status in statuses:
                 if not self._thinking:
                     break
@@ -594,40 +593,12 @@ class AgentChatTab(ScrollableContainer):
                 except Exception:
                     pass
                 time.sleep(2)
-        
+
         threading.Thread(target=status_updater, daemon=True).start()
 
         try:
-            # 1. Architect Agent generates the backlog
-            response = str(self.agent.run(query))
+            response = str(self.agent.advise(query))
             self._thinking = False
-            
-            # Smolagents managed agents sometimes return stringified dictionaries for final answers.
-            # E.g. "Here is the final answer...: {'1. Task...': '...'}"
-            import ast
-            try:
-                # Find the first '{' if it looks like a dict representation
-                start_idx = response.find("{")
-                if start_idx != -1 and response.rstrip().endswith("}"):
-                    dict_str = response[start_idx:]
-                    parsed = ast.literal_eval(dict_str)
-                    if isinstance(parsed, dict):
-                        # Reconstruct the response as markdown blocks
-                        prefix = response[:start_idx].strip()
-                        formatted = "\n\n".join(str(v) for v in parsed.values())
-                        if prefix:
-                            response = f"{prefix}\n\n{formatted}"
-                        else:
-                            response = formatted
-            except Exception as e:
-                self.app.call_from_thread(self.app.log_debug, f"Failed to parse agent dictionary output: {e}")  # type: ignore
-                # Fallback: if it failed to parse, at least replace literal \n with real newlines
-                # and strip the managed agent prefix
-                prefix = "Here is the final answer from your managed agent 'None': "
-                if response.startswith(prefix):
-                    response = response[len(prefix):]
-                response = response.replace("\\n", "\n")
-                
             self.app.call_from_thread(self._add_message, "agent", response)
             
             # 2. Trackboi Distiller Agent Distills the Backlog
@@ -642,7 +613,7 @@ class AgentChatTab(ScrollableContainer):
                     self.app.call_from_thread(self._add_trace, "[green]➜[/green] Trackboi Distillation Complete.")
                 except Exception as dist_e:
                     self.app.call_from_thread(self._add_message, "error", f"Trackboi Distillation failed: {dist_e}")
-
+            self.app.call_from_thread(self._update_phase_label)
         except Exception as e:
             self._thinking = False
             self.app.call_from_thread(self._add_message, "error", str(e))
@@ -654,6 +625,24 @@ class AgentChatTab(ScrollableContainer):
                 self.app.call_from_thread(self.process_query, next_query)
             else:
                 self._thinking = False
+
+    def _update_phase_label(self) -> None:
+        """Show the advisor stage in the chat title."""
+        session = getattr(self.agent, "advisor_session", None)
+        try:
+            label = self.query_one("#chat-title", Label)
+        except Exception:
+            return
+        stage_labels = {
+            "brief": "gathering brief",
+            "card": "reviewing requirement card",
+            "stack": "reviewing proposed stack",
+            "done": "stack confirmed",
+        }
+        if session is not None and session.stage in stage_labels:
+            label.update(f"RubyGemDB Advisor — {stage_labels[session.stage]}")
+        else:
+            label.update("RubyGemDB Advisor")
 
     def _start_thinking(self):
         self.log_widget.loading = True
@@ -669,72 +658,35 @@ class AgentChatTab(ScrollableContainer):
         self.log_widget.loading = False
         self._add_trace("[b green]Execution completed.[/b green]")
 
-    def _export_chat_to_markdown(self) -> None:
-        """Export the chat conversation to a markdown file."""
-        if not self._chat_messages:
-            self.notify("No messages to export", severity="warning")
-            return
-
-        from datetime import datetime
-        out_dir = settings.project_root / "output" / "chat_exports"
-        os.makedirs(out_dir, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filepath = out_dir / f"chat_{timestamp}.md"
-
-        lines = [
-            "# RubyGemDB Agent Chat Export",
-            "",
-            f"**Exported**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            f"**Messages**: {len(self._chat_messages)}",
-            "",
-            "---",
-            "",
-        ]
-
-        for msg in self._chat_messages:
-            role = msg["role"]
-            content = msg["content"]
-            ts = msg["timestamp"]
-
-            if role == "user":
-                lines.append("## User")
-                lines.append(f"*{ts}*")
-                lines.append("")
-                lines.append(content)
-            elif role == "agent":
-                lines.append("## Agent")
-                lines.append(f"*{ts}*")
-                lines.append("")
-                lines.append(content)
-            else:
-                heading = "Error" if role == "error" else "System"
-                lines.append(f"### {heading}")
-                lines.append(f"*{ts}*")
-                lines.append("")
-                lines.append(f"> {content}")
-
-            lines.append("")
-            lines.append("---")
-            lines.append("")
-
-        with open(filepath, "w") as f:
-            f.write("\n".join(lines))
-
-        self.notify(f"Chat exported to {filepath}")
-        self.log_widget.write(f"\n[dim]Chat exported to {filepath}[/dim]")
-
     @on(Button.Pressed, "#export-chat-btn")
     def on_export_chat(self) -> None:
-        self._export_chat_to_markdown()
+        """Export the confirmed stack and transcript as markdown + JSON."""
+        session = getattr(self.agent, "advisor_session", None)
+        if session is None:
+            self.notify("No advisor session to export yet.", severity="warning")
+            return
+        try:
+            md_path, json_path = write_export(
+                session, out_dir=settings.project_root / "output" / "chat_exports"
+            )
+            self.notify(f"Chat exported to {md_path}")
+            self.log_widget.write(f"\n[dim]Stack exported to {md_path} and {json_path}[/dim]")
+        except Exception as e:
+            self.notify(f"Export failed: {e}", severity="error")
 
 
     @on(Button.Pressed, "#clear-chat-btn")
     def on_clear_chat(self) -> None:
         self._chat_messages.clear()
         self.log_widget.clear()
+        if self.agent is not None:
+            try:
+                self.agent.reset_advisor()
+            except Exception:
+                pass
+        self._update_phase_label()
         self._add_message("agent", "System ready. Loading embeddings index...")
         self.load_agent()
-
 
     @on(Button.Pressed, "#distill-chat-btn")
     def on_distill_chat(self) -> None:
@@ -1517,7 +1469,7 @@ class GemApp(App):
                 self.log_info(f"User manually adding gem: {name}")
                 self.notify(f"Adding {name}...")
                 self.add_gem_worker(name)
-        
+
         self.push_screen(AddGemScreen(), handle_add)
 
     @work(thread=True)

@@ -24,10 +24,15 @@ RubyGemDB is a Ruby gem analysis and classification tool that categorizes gems i
 ```
 src/rubygemdb/
 ├── cli.py              # Command-line interface entry point
-├── ui/tui.py          # Interactive Textual-based TUI with gem explorer
+├── agent.py            # Advisor wiring: card/intent/reason LLMs + tool-calling agent
+├── ui/tui.py          # Interactive Textual-based TUI with gem explorer + advisor chat
 ├── core/config.py     # Settings and environment variable handling  
 ├── models/gem.py      # Pydantic data models for gem data
+├── models/phases.py   # skeleton/input/processing/output phase mapping (search filters)
 ├── services/          # Core business logic
+│   ├── advisor.py     # Card-driven advisor session state machine
+│   ├── advisor_export.py # Markdown + JSON export of advisor sessions
+│   ├── hybrid_search.py # SQLite FTS5 + txtai vector search, RRF fusion
 │   ├── classifier.py  # Heuristic and LLM classification logic
 │   ├── rubygems.py    # RubyGems API client with caching
 │   ├── llm.py         # Devstral LLM client for fallback classification
@@ -37,6 +42,16 @@ src/rubygemdb/
     ├── json_storage.py# JSON file storage implementation
     └── sqlite_storage.py # SQLite storage implementation (primary)
 ```
+
+### Advisor Chat (TUI chat tab)
+The chat tab is a card-driven project-brief advisor, not a general chatbot:
+1. User submits a project brief; the advisor extracts a structured requirement card — deliverable, inputs, transforms, outputs, constraints, open questions — (may ask one clarifying question when the brief is too vague) and shows it for review
+2. On `go`, each searchable slot runs its own hybrid search restricted to its build phase's categories (deliverable → skeleton, inputs → input, transforms → processing, outputs → output; `models/phases.py` is now purely a search-filter taxonomy). Every card item is searched separately and merged by best score
+3. The whole stack is proposed at once, grouped by slot, with one-line reasons. Retrieval is hybrid (txtai vectors + SQLite FTS5, RRF K=60): the FTS match is AND-joined before falling back to OR, and the phase's category bucket is narrowed to the categories the query's tokens target (`hybrid_search.narrow_categories`)
+4. Stack actions: `accept` (confirm the whole stack), `remove <gem>`, `add <gem>` (manually include an inventoried gem that was never offered), `swap <gem> for <gem>` (within a slot), `retry <slot> <focus>` (re-search a slot; without a named slot the focus infers it from targeted categories), `edit <slot> ...` (change the card; only affected slots re-search), `ask <gem> <question>`, `start over`. Any other message is answered conversationally by the intent LLM, which also suggests the next action
+5. Export writes `output/chat_exports/chat_<timestamp>.md` and `.json` with brief, card, stack by slot, and transcript; Clear resets the session
+
+State lives in `services/advisor.py` (`AdvisorSession`, stages brief → card → stack → done); `agent.py` supplies the LLM-backed card extractor, intent parser, reason generator, and the tool-calling agent that answers `ask` questions.
 
 ## Common Development Tasks
 

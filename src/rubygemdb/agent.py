@@ -9,7 +9,9 @@ from smolagents import MCPClient
 from mcp import StdioServerParameters
 from rubygemdb.services.rubygems import RubyGemsService
 from rubygemdb.services.stack import guess_category
-from rubygemdb.models.categories import CATEGORIES, CATEGORY_BY_SLUG, LAYERS
+from rubygemdb.services.hybrid_search import build_fts_index, ensure_fts_index, hybrid_search
+from rubygemdb.services.advisor import AdvisorSession
+from rubygemdb.models.categories import CATEGORY_BY_SLUG
 from rubygemdb.core.config import settings
 
 # Initialize RubyGems Service
@@ -76,10 +78,6 @@ def fetch_rubygems_info(gem_name: str) -> str:
     }, indent=2)
 
 
-# Module-level reference set after TxtaiAgent builds its index.
-# smolagents introspects this wrapper (not the raw bound method) so all
-# parameters must carry type hints.
-_embeddings_ref: "Embeddings | None" = None
 
 
 
@@ -112,20 +110,20 @@ class TxtaiAgent:
         self.index_path = os.path.join(self.txtai_dir, "rubygems_index")
         self._initialize_index()
 
-        # Wire the module-level search wrapper so smolagents can introspect it
-        global _embeddings_ref
-        _embeddings_ref = self.embeddings
-        
         # Agent is lazily initialized on first run() call to avoid loading
         # the LLM during --embed (index-only) operations.
         self._agent = None
         self.model: LiteLLMModel | None = None
+        # Phase-walking advisor session, created on first advise() call.
+        self._advisor: AdvisorSession | None = None
         
     def _initialize_index(self, force_rebuild: bool = False):
         """Loads data from the original sqlite table and indexes into txtai."""
         if os.path.exists(self.index_path) and not force_rebuild:
             self.embeddings.load(self.index_path)
             print("Loaded existing txtai index.")
+            # Keep the FTS5 keyword index in sync when loading from disk.
+            ensure_fts_index(self.db_path)
             return
 
         print("Building txtai index from SQLite...")
@@ -195,6 +193,8 @@ class TxtaiAgent:
             
             self.embeddings.index(stream_data())
             self.embeddings.save(self.index_path)
+            # The FTS5 keyword index is built or refreshed together with the txtai index.
+            build_fts_index(self.db_path)
             print(f"Successfully indexed {len(rows)} gems into txtai via sqlite-vec.")
             
         except sqlite3.OperationalError as e:
@@ -277,37 +277,28 @@ class TxtaiAgent:
                     return forward_interceptor
                 tool_obj.forward = wrap_forward()
 
-            # Define the memory tool dynamically so it can access self.model
+            # Define the memory tool dynamically so it can access the agent instance
             @tool
             def search_memory_tool(query: str, limit: int = 5) -> str:
                 """
-                Primary semantic search engine. Use this tool FIRST when asked to explore, 
-                design, or find Ruby gems for a specific use-case or functionality (e.g., 'NLP pipeline').
-                It searches a vector database of Ruby gems, past chat history, and Context7 docs.
+                Hybrid search engine over the Ruby gem database. Use this tool FIRST
+                when asked to find, explain, or compare Ruby gems for a use-case.
 
                 Args:
                     query: Natural language search query (e.g., 'fast web framework' or 'NLP text processing').
                     limit: Maximum number of results to return (default 5).
                 """
-                return self._execute_search_with_expansion(query, limit)
+                results = hybrid_search(query, phase=None, limit=limit, vector_search=self._vector_search, db_path=self.db_path)
+                return json.dumps(results, indent=2)
 
-            agent_prompt = f"""You are the RubyGemDB Architect. Your goal is to generate contextually deep, highly specific implementation plans that OTHER autonomous coding agents can blindly execute.
+            agent_prompt = """You are the RubyGemDB Gem Advisor. You answer follow-up questions about Ruby gems: what a gem does, whether it fits the user's project, how two gems compare, or what its risks are. You do NOT design implementation backlogs or scaffold code.
 
-STACKING MODEL: Every gem belongs to a stack layer — ordered {", ".join(LAYERS)} (substrate first, quality last). Search results carry "category" and "layer" metadata. For back-end tooling queries, present recommendations as a layered stack: group results by layer, substrate first, and start from the curated base picks ({", ".join(sorted({g for c in CATEGORIES for g in c.base_gems}))}) before adding context-specific gems on top.
-
-CRITICAL INSTRUCTION: If a `[Target Project Context: <project_name>]` is provided:
-1. You MUST call `get_architecture(project="<project_name>")`.
-2. You MUST call `search_graph` or `search_code` to discover the EXACT classes, files, or modules in the target project where the new gems should be integrated.
-3. NEVER output generic "how-to-use-this-gem" tutorials. Your plan must dictate exactly HOW and WHERE the gem fits into the target project's specific file structure and architecture.
-
-Format your response exactly using these sections:
-1. **Pragmatic Intent**: The overarching goal of the integration.
-2. **Context & Findings**: A summary of the target project's current architecture and the relevant gems discovered.
-3. **Implementation Backlog**:
-   - Write out discrete User Stories (`As a <system>, I need <capability>`).
-   - Under each story, list highly specific technical tasks.
-   - EVERY task MUST reference concrete architectural integration points (e.g., "Inject `terminal-table` formatting inside `lib/sfl_engine/cli/output_renderer.rb` within the `render_results` method"). DO NOT provide standalone, contextless code snippets.
-4. **Risks & Trade-offs**: Integration risks, coupling concerns, or conflicts with the existing architecture."""
+Rules:
+- Call `search_memory_tool` first to find relevant gems; results carry category, layer, and build phase metadata.
+- Call `fetch_rubygems_info` for current gem metadata (version, dependencies).
+- Use the Context7 tools for usage documentation when available.
+- If a `[Target Project Context: <project_name>]` is provided, call `get_architecture(project="<project_name>")` and `search_graph` or `search_code` to ground the answer in that project's actual structure.
+- Keep answers concise, cite gems by name, and note integration risks or coupling concerns when relevant."""
 
             self._agent = ToolCallingAgent(
                 model=self.model,
@@ -321,7 +312,7 @@ Format your response exactly using these sections:
                 max_steps=10
             )
         return self._agent
-        
+
     def get_trackboi_distiller_agent(self, provider: str | None = None, model_id: str | None = None) -> ToolCallingAgent:
         """
         Creates a specialized Multi-Agent Collaboration agent purely for distilling implementation backlogs into Trackboi.
@@ -366,193 +357,193 @@ Execute these tools directly. Do not explain your reasoning beyond the necessary
             add_base_tools=False
         )
 
-    def _execute_search_with_expansion(self, query: str, limit: int) -> str:
-        if _embeddings_ref is None:
-            return "Embeddings index not yet loaded."
-            
-        # 1. Multi-Query Expansion (Other Steve Persona)
-        system_prompt = """<agent name="Other Steve: Ruby Prompt Architect">
-  <role>
-    Senior Staff Engineer acting as a prompt architect for Ruby.
-    Diagnose why a user's Ruby-related prompt will fail in production 
-    (brittleness, hallucination triggers, vague constraints) and rewrite it 
-    into discrete, actionable tasks with SFL-compliant instructions.
-  </role>
+    # -- phase-walking advisor -----------------------------------------------
 
-  <core_directives>
-    <directive name="Anti-Slop Filter">
-      <rule>
-        <name>Strip Conversational Padding</name>
-        <remove>please, thanks, kindly, just, simply, apologies, disclaimers, might, maybe, try</remove>
-      </rule>
-      <rule>
-        <name>Destroy Vibe Words</name>
-        <remove>elegant, idiomatic, Rubyist, clean, beautiful, robust</remove>
-        <replace_with>Explicit constraints (e.g., O(n) time complexity, no monkey-patching)</replace_with>
-      </rule>
-      <rule>
-        <name>Eradicate Metaphorical Instructions</name>
-        <remove>craft, weave, dive into, unleash</remove>
-        <replace_with>Concrete verbs (e.g., implement, refactor, validate, parse)</replace_with>
-      </rule>
-      <rule>
-        <name>Banish Ambiguous Scope</name>
-        <example>
-          <remove>handle edge cases</remove>
-          <replace_with>raise `ArgumentError` if input is `nil`</replace_with>
-        </example>
-        <example>
-          <remove>follow best practices</remove>
-          <replace_with>use `frozen_string_literal: true`</replace_with>
-        </example>
-      </rule>
-      <rule>
-        <name>Eliminate Redundant Comments</name>
-        <remove># This method does X if the method name is `do_x`</remove>
-        <keep>Comments that explain *why* (not *what*)</keep>
-      </rule>
-      <rule>
-        <name>Enforce Literal Output Requirements</name>
-        <example>
-          <remove>Write a Ruby method</remove>
-          <replace_with>Define `Array#compact_map` with signature `(->(Array<A>) { Array<B> })`</replace_with>
-        </example>
-        <example>
-          <remove>Return a hash</remove>
-          <replace_with>Return `{ symbol: Integer }`</replace_with>
-        </example>
-      </rule>
-    </directive>
+    def _ensure_model(self) -> LiteLLMModel:
+        """Lazily create the LiteLLM model shared by the agent and the advisor."""
+        if self.model is None:
+            self.model = LiteLLMModel(model_id=settings.rubygemdb_agent_model)
+        return self.model
 
-    <directive name="SFL Compiler">
-      <metafunction name="Field (Ideational)">
-        <description>Define the compute task, entities, processes, and data constraints.</description>
-        <example_entities>Hash, Array, String</example_entities>
-        <example_processes>parse, serialize, validate</example_processes>
-        <example_constraints>input is a JSON string</example_constraints>
-      </metafunction>
-      <metafunction name="Tenor (Interpersonal)">
-        <description>Define the AI's persona, audience, and constraints.</description>
-        <example_persona>Senior Ruby Engineer</example_persona>
-        <example_audience>Peer Ruby Developer</example_audience>
-        <example_constraints>no metaprogramming, avoid `Object#send`</example_constraints>
-      </metafunction>
-      <metafunction name="Mode (Textual)">
-        <description>Define the output schema, formatting, and length constraints.</description>
-        <example_output_schema>Ruby code, Markdown, JSON</example_output_schema>
-        <example_formatting>use `snake_case` for methods</example_formatting>
-        <example_length>< 50 lines</example_length>
-      </metafunction>
-    </directive>
-
-    <directive name="Conciseness Engine">
-      <rule>Omit needless words.</rule>
-      <rule>Use positive statements (Do X > Avoid Y).</rule>
-      <rule>Ground instructions in measurable reality (e.g., time complexity must be O(1)).</rule>
-    </directive>
-  </core_directives>
-
-  <execution_protocol>
-    <step name="The Diagnostic">
-      <description>2-3 sentences: Teardown the original prompt.</description>
-    </step>
-    <step name="The SFL Breakdown">
-      <field>Concrete task + entities + constraints</field>
-      <tenor>Persona + audience + constraints</tenor>
-      <mode>Output schema + formatting + length</mode>
-    </step>
-    <step name="The Refactored Tasks">
-      <description>Break the intent into separate, discrete tasks.</description>
-    </step>
-    <step name="XML Output">
-      <description>Provide an XML representation of the Refactored Tasks. Crucially, emit <query>...</query> tags for the best 2-3 semantic search queries derived from the refactored intent to search a Ruby gems database.</description>
-    </step>
-  </execution_protocol>
-</agent>"""
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Refactor this prompt for semantic gem search: {query}"}
-        ]
-        
+    def _llm_json(self, system_prompt: str, user_prompt: str) -> dict | None:
+        """One JSON-only LLM call; returns None on any failure."""
         try:
-            expansion_response = self.model(messages).content # type: ignore
-            import re
-            extracted_queries = re.findall(r'<query>(.*?)</query>', expansion_response, re.DOTALL)
-            if extracted_queries:
-                queries = [query] + [q.strip() for q in extracted_queries]
-            else:
-                # Fallback if no tags
-                queries = [query]
+            model = self._ensure_model()
+            response = model([
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]).content
+            text = str(response).strip()
+            if "```json" in text:
+                text = text.split("```json")[1].split("```")[0].strip()
+            elif "```" in text:
+                text = text.split("```")[1].split("```")[0].strip()
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else None
         except Exception as e:
-            print(f"Query expansion failed: {e}")
-            queries = [query] # Fallback to original query on failure
-            
-        unique_parents = set()
-        candidates = []
-        
-        from datetime import datetime
-        current_year = datetime.now().year
-        
-        # 2. Search for all variations and gather candidates
-        for q in queries:
-            safe_query = q.replace("'", "''")
-            sql = f"SELECT id, text, name, source_code_uri, context7_id, parent_text, type, category, layer, updated_at, score FROM txtai WHERE similar('{safe_query}') LIMIT {limit * 4}"
-            
-            raw_results = _embeddings_ref.search(sql)
-            
-            for res in raw_results:
-                doc_type = res.get("type", "unknown")
-                parent_text = res.get("parent_text", "")
-                dedup_key = res.get("name") if doc_type == "gem" and res.get("name") else parent_text
-                
-                if dedup_key not in unique_parents:
-                    unique_parents.add(dedup_key)
-                    
-                    match_score = res.get("score", 0.0)
-                    updated_at_str = res.get("updated_at", "2000-01-01T00:00:00.000Z")
-                    
-                    # Calculate recency boost
-                    recency_score = 0.0
-                    try:
-                        dt = datetime.fromisoformat(updated_at_str.replace("Z", "+00:00"))
-                        # Boost starts decaying from the current year
-                        years_old = current_year - dt.year
-                        if years_old <= 0:
-                            recency_score = 1.0
-                        elif years_old < 10:
-                            recency_score = 1.0 - (years_old * 0.1) # 0.9 for 1 yr old, 0.1 for 9 yrs old
-                    except Exception:
-                        pass
-                        
-                    # Hybrid weighting: 70% semantic, 30% recency
-                    hybrid_score = (match_score * 0.7) + (recency_score * 0.3)
-                    
-                    item = {
-                        "type": doc_type,
-                        "content": parent_text,
-                        "match_score": round(match_score, 4),
-                        "recency_score": round(recency_score, 4),
-                        "hybrid_score": round(hybrid_score, 4),
-                        "matched_query": q
-                    }
-                    
-                    if doc_type == "gem":
-                        item.update({
-                            "name": res.get("name"),
-                            "last_updated": updated_at_str,
-                            "context7_id": res.get("context7_id"),
-                            "source_code_uri": res.get("source_code_uri"),
-                            "category": res.get("category"),
-                            "layer": res.get("layer")
-                        })
-                        
-                    candidates.append(item)
+            print(f"Advisor LLM call failed: {e}")
+            return None
 
-        # 3. Sort by hybrid score and limit
-        candidates.sort(key=lambda x: x["hybrid_score"], reverse=True)
-        formatted_results = candidates[:limit]
-                
-        return json.dumps(formatted_results, indent=2)
+    def _vector_search(self, query: str, categories: list[str] | None, limit: int) -> list[dict]:
+        """txtai similarity search restricted to gem documents (and optionally categories)."""
+        safe_query = query.replace("'", "''")
+        sql = (
+            "SELECT name, category, layer, parent_text, source_code_uri, context7_id, score "
+            "FROM txtai WHERE similar('" + safe_query + "')"
+        )
+        if categories:
+            cat_list = ", ".join("'" + c.replace("'", "''") + "'" for c in categories)
+            sql += f" AND category IN ({cat_list})"
+        sql += f" LIMIT {max(1, int(limit))}"
+        hits = []
+        for res in self.embeddings.search(sql):
+            if res.get("type") != "gem":
+                continue
+            hits.append({
+                "name": res.get("name"),
+                "description": res.get("parent_text", ""),
+                "category": res.get("category"),
+                "layer": res.get("layer"),
+                "source_code_uri": res.get("source_code_uri"),
+                "context7_id": res.get("context7_id"),
+                "score": res.get("score", 0.0),
+            })
+        return hits
+
+    def _card_llm(self, brief: str) -> dict | None:
+        system = (
+            "You extract a structured requirement card from a Ruby project brief.\n"
+            "- deliverable: one line, the shape of the thing being built (CLI tool, "
+            "web service, library, GUI app)\n"
+            "- inputs: data formats and sources the tool takes in (e.g. PDF "
+            "documents, CSV files, HTTP APIs)\n"
+            "- transforms: processing steps applied to that data (e.g. chunk text "
+            "with context, extract tables, embed passages)\n"
+            "- outputs: artifacts the tool produces (e.g. markdown report, JSON "
+            "manifest, PDF)\n"
+            "- constraints: hard requirements (e.g. no native extensions, must run "
+            "offline)\n"
+            "Also return open_questions: up to 3 short questions for anything "
+            "genuinely ambiguous or missing. Do not invent requirements.\n"
+            "If the brief is too vague to fill deliverable plus at least one other "
+            'slot, return {"clarify": "<one clarifying question>"} instead.\n'
+            'Return JSON only: {"card": {"deliverable": "...", "inputs": [...], '
+            '"transforms": [...], "outputs": [...], "constraints": [...]}, '
+            '"open_questions": [...]}'
+        )
+        return self._llm_json(system, f"Brief:\n{brief}")
+
+    def _intent_llm(self, text: str, context: str) -> dict | None:
+        system = (
+            "You steer a gem-stack advisor conversation. Classify the user's "
+            "message into exactly one action:\n"
+            "- go: (card stage only) accept the requirement card and propose a stack\n"
+            '- edit: change the requirement card (include "card" with any of '
+            '"deliverable", "inputs", "transforms", "outputs", "constraints" — '
+            "lists or strings)\n"
+            "- accept: confirm the proposed stack as the final pick\n"
+            '- add: include a named gem that was never offered (include "gem")\n'
+            '- remove: drop a gem from the proposal (include "gem")\n'
+            '- swap: replace one gem with another (include "gem" and "with")\n'
+            "- retry: the proposed gems for a slot are off target; re-search with "
+            'adjusted focus (include "slot" — deliverable/inputs/transforms/outputs '
+            '- and "hint" with the words to focus on)\n'
+            '- ask: a follow-up question about a gem (include "gem" and "question")\n'
+            "- restart: start over with a new brief\n"
+            "- chat: anything conversational — feedback, preferences, concerns. "
+            "Answer it in one or two sentences that acknowledge the current card "
+            'and stack, and suggest the next action (include "reply")\n'
+            "The context line carries the stage, the current card, and the proposed "
+            "stack. Return JSON only, with only the fields the action needs."
+        )
+        return self._llm_json(system, f"Context: {context}\nUser message: {text}")
+
+    def _reason_llm(self, card_text: str, gems: list[dict]) -> dict | None:
+        system = (
+            "Given a project requirement summary and candidate gems, write a "
+            "one-line reason per gem tying it to the requirements. If a gem "
+            "ignores a stated constraint, say so in its reason.\n"
+            'Return JSON only: {"<gem name>": "<one-line reason>", ...}'
+        )
+        gem_lines = "\n".join(f"- {g.get('name')}: {g.get('description', '')}" for g in gems)
+        return self._llm_json(system, f"Requirements:\n{card_text}\nCandidate gems:\n{gem_lines}")
+
+    def _ask_gem(self, gem: str, question: str) -> str:
+        """Delegate a follow-up question to the tool-calling agent."""
+        brief = self._advisor.brief if self._advisor else ""
+        context = f"Project brief: {brief}\n\n" if brief else ""
+        prompt = f"{context}Follow-up question about the Ruby gem '{gem}': {question}"
+        return str(self.agent(prompt))
+
+    def _fetch_gem(self, name: str) -> dict | None:
+        """Case-insensitive inventory lookup for manually named gems."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+        except sqlite3.Error:
+            return None
+        try:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT i.name, i.description, i.source_code_uri, i.context7_id, c.classification "
+                "FROM inventory i LEFT JOIN classified_gems c ON i.name = c.name "
+                "WHERE i.name = ? COLLATE NOCASE",
+                (name,),
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        category: str | None = None
+        if row["classification"]:
+            try:
+                category = (json.loads(row["classification"]) or {}).get("primary")
+            except (ValueError, TypeError):
+                category = None
+        if category not in CATEGORY_BY_SLUG:
+            category = guess_category(row["name"])
+        return {
+            "name": row["name"],
+            "description": row["description"] or "",
+            "category": category,
+            "source_code_uri": row["source_code_uri"],
+            "context7_id": row["context7_id"],
+        }
+
+    def _build_advisor(self) -> AdvisorSession:
+        def search(query: str, phase: str | None, limit: int) -> list[dict]:
+            return hybrid_search(
+                query,
+                phase=phase,
+                limit=limit,
+                vector_search=self._vector_search,
+                db_path=self.db_path,
+            )
+
+        return AdvisorSession(
+            card_llm=self._card_llm,
+            intent_llm=self._intent_llm,
+            reason_llm=self._reason_llm,
+            search=search,
+            ask=self._ask_gem,
+            fetch_gem=self._fetch_gem,
+        )
+
+    def advise(self, message: str) -> str:
+        """Run the card-driven advisor over one chat message."""
+        if self._advisor is None:
+            self._advisor = self._build_advisor()
+        return self._advisor.respond(message)
+
+    @property
+    def advisor_session(self) -> AdvisorSession | None:
+        """The active advisor session, if one has been started."""
+        return self._advisor
+
+    def reset_advisor(self) -> None:
+        """Drop the advisor session (Clear Chat)."""
+        self._advisor = None
 
     def run(self, query: str) -> str:
         """Run the txtai Agent to answer a query and manage memory window."""

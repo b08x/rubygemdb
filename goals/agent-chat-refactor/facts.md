@@ -1,0 +1,31 @@
+# Facts
+
+- Nothing named trackboi or distill remains under src/, tests/, or the project docs: no distiller agent, no trackboi_distiller_model setting, no DistillSelectionScreen, no distill button, no [DISTILL_TRACKBOI query path.
+- The chat tab has no 'Distill to Trackboi' button; the remaining actions are Export and Clear.
+- ProjectFolderScreen is removed if nothing else uses it; if something else uses it, it stays.
+- Context7 tools and the optional codebase-memory project selector still work in the chat.
+- The user enters a project brief as the first chat message (e.g. 'a CLI app that parses PDFs, chunks text with context, and extracts images, tables, and code blocks').
+- The agent decomposes the brief into a list of capabilities (e.g. pdf text extraction, contextual chunking, image extraction, table extraction, code-block extraction) and shows the list to the user.
+- Each capability is tagged with exactly one build phase: skeleton, input, processing, or output.
+- The build phases are defined in one place in the code, as an ordered list with a mapping from each of the 21 categories to one phase.
+- The agent walks the phases in order: skeleton, input, processing, output, one phase at a time.
+- At each phase the agent presents 3-5 ranked candidate gems, each with a one-line reason tied to the user's brief.
+- The agent does not present the next phase until the user has accepted, swapped, or skipped the current one.
+- At each phase the user can accept the picks, swap a pick for an alternative, ask a follow-up question about a gem, or skip the phase.
+- The user can go back to a previous phase and change its picks.
+- A phase with no capabilities or no matching gems is reported as empty and the agent moves on to the next phase.
+- If the brief is too vague to decompose, the agent asks one clarifying question before searching.
+- If the user rejects every candidate in a phase, the agent offers the next-ranked gems or searches again using the user's own words.
+- Gem search for each capability is hybrid: txtai vector search and SQLite FTS5 keyword search over the gem database, merged with reciprocal rank fusion.
+- An FTS5 index over gem name, description, and category exists in the SQLite database and is built or refreshed together with the txtai index.
+- A gem that ranks high in only one of the two searches (keyword only or vector only) still appears in the fused results.
+- Search results carry each gem's category, layer, and build phase, and phase filtering restricts results to that phase's categories.
+- The previous LLM multi-query expansion step is replaced by the brief-decomposition step.
+- The confirmed picks are kept for the rest of the session and are the source for the export.
+- The Export button writes one markdown file under output/chat_exports/ containing the original brief, the confirmed stack grouped by phase with a rationale per gem, a Gemfile snippet, and the full Q&A transcript.
+- The Export button also writes a JSON file next to the markdown file containing the brief and the confirmed stack by phase with gem names and rationales.
+- Exporting before any picks are confirmed still writes the transcript and states that no stack was confirmed.
+- Clear Chat resets the brief, the capability list, the current phase, and the confirmed picks.
+- The feature is available in the TUI chat tab only; no new CLI command is added, and the agent logic lives in agent.py.
+- The chat sliding-window memory trimming still applies and does not drop the confirmed picks.
+- Out of scope: parsing PDFs, generating scaffolded code, and saving sessions across app restarts.
