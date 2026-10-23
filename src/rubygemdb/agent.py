@@ -645,7 +645,10 @@ Rules:
         messages = [{"role": "system", "content": system_prompt}]
 
         for turn in self._chat_history[-4:]:
-            messages.append({"role": turn["role"], "content": turn["content"]})
+            # Normalize internal domain role 'agent' to LLM provider role 'assistant'
+            role = "assistant" if turn["role"] == "agent" else turn["role"]
+            if role in ("user", "assistant"):
+                messages.append({"role": role, "content": turn["content"]})
 
         messages.append({"role": "user", "content": user_prompt})
 

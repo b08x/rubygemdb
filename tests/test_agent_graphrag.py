@@ -111,3 +111,49 @@ def test_clear_chat(mock_agent: TxtaiAgent):
     mock_agent._chat_history = [{"role": "user", "content": "Hello"}]
     mock_agent.clear_chat()
     assert mock_agent._chat_history == []
+
+
+def test_chat_with_graphrag_multi_turn_valid_message_roles(mock_agent: TxtaiAgent):
+    from smolagents.models import MessageRole  # type: ignore[import-untyped]
+
+    mock_service = MagicMock()
+    mock_service.nodes_by_id = {"node1": {}}
+    mock_service.retrieve.return_value = {"primary_nodes": [], "expanded_nodes": [], "edges": []}
+    mock_service.format_grounded_context.return_value = "### Grounded API\n- Thor.start"
+    mock_agent.graphrag_service = mock_service
+    mock_agent._graphrag_gems = ["thor"]
+    mock_agent._graphrag_intention = "CLI pipeline"
+
+    captured_messages_per_call = []
+
+    def fake_model_call(messages):
+        captured_messages_per_call.append(list(messages))
+        resp = MagicMock()
+        resp.content = f"Answer to turn {len(captured_messages_per_call)}"
+        return resp
+
+    mock_agent.model = fake_model_call
+
+    # Turn 1
+    ans1 = mock_agent.chat("How to invoke CLI?")
+    assert "Answer to turn 1" in ans1
+
+    # Turn 2: uses chat history from turn 1
+    ans2 = mock_agent.chat("the objective is to take a file path and extract and parse")
+    assert "Answer to turn 2" in ans2
+    assert not ans2.startswith("LLM generation failed:")
+
+    # Verify messages in Turn 2
+    turn2_messages = captured_messages_per_call[1]
+    roles = [m["role"] for m in turn2_messages]
+    assert "agent" not in roles
+    assert "assistant" in roles
+    assert "user" in roles
+    assert "system" in roles
+
+    # Ensure every message passed to the model has a valid smolagents MessageRole
+    for m in turn2_messages:
+        role_enum = MessageRole(m["role"])
+        assert role_enum in (MessageRole.SYSTEM, MessageRole.USER, MessageRole.ASSISTANT)
+
+
