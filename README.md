@@ -18,8 +18,9 @@
 - **Heuristic + LLM Hybrid** — Fast pattern matching for obvious cases, with a Mistral-powered LLM pass that can override the heuristic category when confidence drops below 0.7
 - **Semantic Vector Search** — txtai-powered embeddings with multi-query expansion and recency boosting for finding gems by natural language description
 - **AI Agent with MCP Tools** — Context7 documentation retrieval and Codebase Memory integration via Model Context Protocol
-- **Native MCP Server** — `rubygemdb-mcp` serves the taxonomy, gem metadata, and stack composition to coding agents (Claude Code, Antigravity, Cursor) over stdio or a background SSE daemon — strictly read-only
+- **Native MCP Server** — `rubygemdb-mcp` serves the taxonomy, gem metadata, stack composition, and GraphRAG sessions to coding agents (Claude Code, Antigravity, Cursor) over stdio or a background SSE daemon — the gem catalog is strictly read-only
 - **Contextual GraphRAG Pipeline** — On-demand containerized extraction of AST symbol hierarchies (`rubydex`) and structured documentation (`decode`) from gem source repositories, embedded into ephemeral `txtai` vector stores with 2-stage retrieval for deeply grounded coding agent chat and MCP queries
+- **Persistent GraphRAG Sessions** — Conversations, retrieved-node citations, and execution traces persist in a dedicated `data/sessions.sqlite` store; the TUI auto-restores the most recent session on open, and MCP clients can list, inspect, resume, export, and delete sessions
 - **Interactive TUI** — Textual-based terminal UI for browsing, filtering, editing, and exporting classified gems with real-time classification
 - **Batch CLI Pipeline** — Headless processing of gem inventories with metadata verification, classification, and YAML report generation
 - **Risk Assessment** — Invasiveness, coupling, and abstraction leak scoring for architectural impact analysis
@@ -46,8 +47,8 @@ graph LR
     tui -->|"launches agent queries"| agent
     agent -->|"semantic search"| services
     agent -->|"indexes/retrieves"| storage
-    mcp -->|"serves read-only tools"| services
-    mcp -->|"reads (mode=ro)"| storage
+    mcp -->|"serves catalog (read-only) & sessions"| services
+    mcp -->|"catalog: mode=ro / sessions: rw"| storage
     services -->|"uses"| core
     services -->|"returns"| models
     storage -->|"persists"| models
@@ -143,7 +144,8 @@ The chat tab provides an on-demand, containerized GraphRAG pipeline for deep Rub
 3. **Containerized Extraction** — Clicking `Build GraphRAG Context` spins up the ephemeral `rubygemdb-indexer:latest` container (prioritizing Podman, fallback to Docker), running `Rubydex::Graph` (AST, class hierarchy, method calls) and `Decode::Index` (docstrings, `@parameter`, `@returns`, and `@example` code snippets) over mounted shallow-cloned gem repositories. If git cloning fails, the system automatically falls back to unpacking released `.gem` archives.
 4. **Ephemeral Vector Store** — Host Python ingests the normalized `graph.json` artifact into an ephemeral `txtai` index, caching the graph and vector embeddings by a deterministic hash of the selected gem set.
 5. **Two-Stage Grounded Retrieval** — Queries execute semantic vector search for top-K symbol and example nodes, followed by 1-hop graph neighborhood expansion across inheritance, call relations, parameter types, and attached code examples.
-6. **Transcript Export** — Export writes `output/chat_exports/graphrag_chat_<timestamp>.md` and `.json` containing active intention, indexed gems, full conversation history, and grounded symbol summaries.
+6. **Session Persistence** — Each conversation lives in a persistent session in `data/sessions.sqlite`: every turn is saved as it happens and indexed into txtai as a `session_turn` document, and the chat tab auto-restores the most recent session — active gems, intention, chat history, and the last 200 execution traces — on startup. New Session and Delete Session buttons manage the session list.
+7. **Transcript Export** — Export writes the session transcript to `output/chat_exports/graphrag_chat_<timestamp>.md` and `.json` containing active intention, indexed gems, full conversation history, and grounded symbol summaries.
 
 ### MCP Tool Integration
 
@@ -155,6 +157,8 @@ The chat tab provides an on-demand, containerized GraphRAG pipeline for deep Rub
 | `build_gem_graphrag` | Pre-warm and index AST symbols and documentation for gems |
 | Context7 MCP | Retrieve library documentation and cheatsheets |
 | Codebase Memory MCP | Search target project architecture |
+
+Chat turns made through these tools persist to the session store — `build_gem_graphrag` and `query_gem_graphrag` accept an optional `session_id` and return the id of the session they recorded the turn in.
 
 ### Agent Prompt Structure
 
@@ -197,15 +201,20 @@ Daemon artifacts land in `data/`: `mcp.pid`, the `mcp.json` host/port sidecar, a
 
 ### Exposed Capabilities
 
-- **Tools (Read-Only)**:
+- **Tools**:
   - `search_gems(query, category=None, phase=None, limit=10)`: Sub-millisecond SQLite FTS5 search. `category` takes one of the 21 category slugs; `phase` takes `skeleton`, `input`, `processing`, or `output`. The txtai vector index is consulted only when FTS5 returns zero hits.
   - `get_gem(name)`: Complete architectural metadata, layer, sub-categories, agent description, dependencies, signals, and risks. Gems present in the inventory but not yet classified return the same shape with `classified: false` and zero confidence; unknown names return an `error` object.
   - `compose_stack(query)`: Composes layered gem stack manifest (substrate -> quality) and Gemfile snippet. Runs in read-only mode — curated seed gems are not written back to the inventory.
   - `list_categories()`: Lists 21 architectural categories, stack layers, descriptions, and curated base gems.
-  - `build_gem_graphrag(gems, intention="")`: Pre-warms and builds the containerized AST symbol and decode graph index for a set of gems.
-  - `query_gem_graphrag(gems, query, intention=None)`: Executes 2-stage GraphRAG retrieval over indexed gem graphs, returning exact AST signatures, decode parameter types, and code examples.
+  - `build_gem_graphrag(gems, intention="", session_id=None)`: Pre-warms and builds the containerized AST symbol and decode graph index for a set of gems; records the build in a session and returns its `session_id`.
+  - `query_gem_graphrag(gems, query, intention=None, session_id=None)`: Executes 2-stage GraphRAG retrieval over indexed gem graphs, returning exact AST signatures, decode parameter types, and code examples. Each turn is persisted with its retrieved-node citations to the session store; the response carries the `session_id`.
+  - `list_rag_sessions(limit=20)`: Lists sessions, most recently updated first.
+  - `get_rag_session(session_id)`: Full session metadata plus its messages and execution traces.
+  - `resume_rag_session(session_id)`: Resumes a session — pre-warms its gems' GraphRAG index and returns the last 5 messages. Full context restore happens in the TUI; this tool is a pre-warm plus summary.
+  - `export_rag_session_transcript(session_id, format="markdown")`: Exports a session transcript as markdown or JSON.
+  - `delete_rag_session(session_id)`: Deletes a session along with its messages and traces.
 
-Every tool opens the SQLite database read-only (`mode=ro`), and in that mode all mutating storage methods raise `PermissionError` — read-only by construction, not by convention.
+Catalog tools (`search_gems`, `get_gem`, `compose_stack`, `list_categories`) open the gem database read-only (`mode=ro`), and in that mode all mutating storage methods raise `PermissionError` — read-only by construction, not by convention. Session tools write only to the separate `data/sessions.sqlite` store; the gem catalog is never modified.
 - **Resources**:
   - `rubygemdb://taxonomy`: Markdown guide of all 21 categories, layers, and sub-category vocabularies.
   - `rubygemdb://stack-seeds`: Markdown guide of curated base gems grouped by layer.
@@ -291,7 +300,8 @@ rubygemdb/
 │   ├── models/
 │   │   ├── gem.py          # Pydantic data models
 │   │   ├── categories.py   # Single source of truth: 21 categories, layers, sub-category facets
-│   │   └── phases.py       # skeleton/input/processing/output phase mapping
+│   │   ├── phases.py       # skeleton/input/processing/output phase mapping
+│   │   └── session.py      # RAGSession/RAGMessage/RAGTrace session models
 │   ├── services/
 │   │   ├── container_runner.py # Podman/Docker runner for indexer container
 │   │   ├── gem_fetcher.py  # Git shallow-cloner with .gem unpack fallback
@@ -307,7 +317,8 @@ rubygemdb/
 │   ├── storage/
 │   │   ├── base.py         # Storage interface
 │   │   ├── json_storage.py # JSON file storage
-│   │   └── sqlite_storage.py # SQLite storage
+│   │   ├── sqlite_storage.py # SQLite storage
+│   │   └── session_storage.py # Persistent GraphRAG session store (data/sessions.sqlite)
 │   └── ui/
 │       └── tui.py          # Textual TUI application
 ├── docker/
