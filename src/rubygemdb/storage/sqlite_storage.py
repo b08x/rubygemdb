@@ -12,13 +12,32 @@ from rubygemdb.services.context7 import Context7Service
 logger = logging.getLogger(__name__)
 
 class SQLiteStorage(StorageBase):
-    def __init__(self, rubygems_service: Optional[RubyGemsService] = None, context7_service: Optional[Context7Service] = None):
-        self.db_path = settings.sqlite_db_file
+    def __init__(
+        self,
+        rubygems_service: Optional[RubyGemsService] = None,
+        context7_service: Optional[Context7Service] = None,
+        read_only: bool = False,
+        db_path: Optional[str] = None,
+    ):
+        self.db_path = str(db_path) if db_path else str(settings.sqlite_db_file)
+        self.read_only = read_only
         self.rubygems = rubygems_service or RubyGemsService()
         self.context7 = context7_service or Context7Service()
-        self._init_db()
+        if not self.read_only:
+            self._init_db()
+
+    @property
+    def is_read_only(self) -> bool:
+        return bool(getattr(self, "read_only", False))
+
+    def _get_connection(self) -> sqlite3.Connection:
+        if self.is_read_only:
+            return sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        return sqlite3.connect(self.db_path, uri=True)
 
     def _init_db(self):
+        if self.is_read_only:
+            return
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             
@@ -63,6 +82,8 @@ class SQLiteStorage(StorageBase):
             conn.commit()
 
     def load_inventory(self, path: str) -> List[GemInventoryItem]:
+        if self.is_read_only:
+            raise PermissionError("Storage is in read-only mode")
         items = []
         with open(path, "r") as f:
             reader = csv.DictReader(f)
@@ -120,6 +141,8 @@ class SQLiteStorage(StorageBase):
         return items
 
     def save_classified_gems(self, gems: List[GemEntry]):
+        if self.is_read_only:
+            raise PermissionError("Storage is in read-only mode")
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             for gem in gems:
@@ -150,6 +173,8 @@ class SQLiteStorage(StorageBase):
             conn.commit()
 
     def update_gem_metadata(self, name: str, context7_id: Optional[str] = None, source_code_uri: Optional[str] = None):
+        if self.is_read_only:
+            raise PermissionError("Storage is in read-only mode")
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             if context7_id is not None and source_code_uri is not None:
@@ -162,6 +187,8 @@ class SQLiteStorage(StorageBase):
 
     def delete_gem(self, name: str):
         """Remove a gem from both inventory and classified_gems tables."""
+        if self.is_read_only:
+            raise PermissionError("Storage is in read-only mode")
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM classified_gems WHERE name = ?", (name,))
@@ -171,6 +198,8 @@ class SQLiteStorage(StorageBase):
 
     def set_preferred(self, names: List[str], preferred: bool):
         """Mark (or unmark) gems as preferred picks."""
+        if self.is_read_only:
+            raise PermissionError("Storage is in read-only mode")
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             for name in names:
@@ -182,7 +211,7 @@ class SQLiteStorage(StorageBase):
         from rubygemdb.models.categories import CATEGORY_BY_SLUG
         from rubygemdb.services.stack import guess_category
 
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 """
@@ -216,6 +245,8 @@ class SQLiteStorage(StorageBase):
 
         Inventory rows are preserved; only classification output is wiped.
         """
+        if self.is_read_only:
+            raise PermissionError("Storage is in read-only mode")
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM classified_gems")
@@ -224,6 +255,8 @@ class SQLiteStorage(StorageBase):
 
     def update_gem_classification(self, name: str, primary_category: str):
         """Manually update the primary classification of a gem."""
+        if self.is_read_only:
+            raise PermissionError("Storage is in read-only mode")
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             # Fetch existing classification to preserve other fields
@@ -240,6 +273,8 @@ class SQLiteStorage(StorageBase):
 
     def add_gem_to_inventory(self, name: str):
         """Add a gem name to inventory for subsequent classification."""
+        if self.is_read_only:
+            raise PermissionError("Storage is in read-only mode")
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             # If it already exists in inventory but not classified, we don't need to do much.
@@ -252,7 +287,7 @@ class SQLiteStorage(StorageBase):
 
     def load_classified_gems(self) -> List[GemEntry]:
         gems = []
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             # Join with inventory to get metadata
@@ -285,14 +320,60 @@ class SQLiteStorage(StorageBase):
                 ))
         return gems
 
+    def get_classified_gem(self, name: str) -> Optional[GemEntry]:
+        """Fetch a single classified gem by name, or None if not found."""
+        with self._get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT c.*, i.homepage, i.source_code_uri, i.context7_id, i.preferred
+                FROM classified_gems c
+                LEFT JOIN inventory i ON c.name = i.name
+                WHERE c.name = ?
+            """, (name,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            cls_data = json.loads(row["classification"])
+            if not cls_data.get("sub_categories") and "sub_categories" in row.keys() and row["sub_categories"]:
+                try:
+                    cls_data["sub_categories"] = json.loads(row["sub_categories"])
+                except Exception:
+                    pass
+            return GemEntry(
+                name=row["name"],
+                classification=GemClassification(**cls_data),
+                role=json.loads(row["role"]),
+                capabilities=json.loads(row["capabilities"]),
+                risks=GemRisks(**json.loads(row["risks"])),
+                signals=GemSignals(**json.loads(row["signals"])),
+                dependencies=json.loads(row["dependencies"]),
+                description=row["description"],
+                homepage=row["homepage"],
+                source_code_uri=row["source_code_uri"],
+                context7_id=row["context7_id"],
+                preferred=bool(row["preferred"])
+            )
+
+    def get_inventory_gem(self, name: str) -> Optional[dict]:
+        """Fetch a single inventory record by name, or None if not found."""
+        with self._get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT name, homepage, source_code_uri, description, context7_id, preferred FROM inventory WHERE name = ?", (name,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
     def get_all_inventory_gems(self) -> List[dict]:
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT name, homepage, source_code_uri, description, context7_id FROM inventory")
             return [dict(row) for row in cursor.fetchall()]
 
     def update_gem_verification(self, name: str, homepage: str, source_code_uri: str, description: str, context7_id: str):
+        if self.is_read_only:
+            raise PermissionError("Storage is in read-only mode")
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("""

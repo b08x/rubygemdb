@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.14"
 dependencies = [
+    "mcp>=1.29.0",
     "pydantic>=2.12.5",
     "pydantic-settings>=2.13.1",
     "python-dotenv>=1.2.2",
@@ -39,6 +40,7 @@ cu126 = [
 [project.scripts]
 rubygemdb = "rubygemdb.cli:run_cli"
 rubygemdb-tui = "rubygemdb.ui.tui:run_tui"
+rubygemdb-mcp = "rubygemdb.mcp_server:main"
 
 [build-system]
 requires = ["uv_build>=0.9.28,<0.13.0"]

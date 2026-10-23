@@ -58,6 +58,7 @@ Each category also carries curated `base_gems` stack seeds (e.g. dotenv, drydock
 src/rubygemdb/
 ├── agent.py            # Layer-aware txtai RAG agent (smolagents)
 ├── cli.py              # Command-line interface (process / reclassify / stack)
+├── mcp_server.py       # Native MCP server & daemon lifecycle (FastMCP)
 ├── ui/
 │   └── tui.py          # Interactive Textual TUI explorer
 ├── core/
@@ -140,6 +141,18 @@ uv run rubygemdb stack "CLI data pipeline tool"           # print to stdout
 uv run rubygemdb stack "CLI data pipeline tool" --out stacks/  # also write files
 ```
 Output is advisory, not a dependency resolver. Deeper Rubysmith project generation from a stack manifest is a follow-up goal.
+
+### MCP Server (`rubygemdb-mcp`)
+Native Model Context Protocol server exposing read-only tools (`search_gems`, `get_gem`, `compose_stack`, `list_categories`), resources (`rubygemdb://taxonomy`, `rubygemdb://stack-seeds`), and prompt template (`design-ruby-stack`):
+```bash
+# Stdio transport (default, for host agents)
+uv run rubygemdb-mcp
+
+# Background SSE daemon lifecycle
+uv run rubygemdb-mcp --daemon start --port 8011
+uv run rubygemdb-mcp --daemon status
+uv run rubygemdb-mcp --daemon stop
+```
 
 ### Linting & Type Checking
 ```bash

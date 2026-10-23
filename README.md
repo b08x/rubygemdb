@@ -163,6 +163,81 @@ The tool-calling agent behind `ask <gem> <question>` answers gem questions only 
 
 ---
 
+## MCP Server (`rubygemdb-mcp`)
+
+RubyGemDB exposes a native Model Context Protocol (MCP) server so coding agents (Claude Code, Antigravity, OpenCode, Cursor) can directly discover Ruby gems, query classifications and architectural layers, and compose layered gem stacks.
+
+### CLI Usage & Lifecycle Management
+
+- **Stdio Mode (Default)**: Runs as a child-process communicating over standard I/O (recommended for Claude Code, Antigravity, Cursor):
+  ```bash
+  uv run rubygemdb-mcp
+  ```
+- **SSE Daemon Mode**: Run detached in the background over Server-Sent Events (SSE):
+  ```bash
+  uv run rubygemdb-mcp --daemon start --port 8011    # start background server
+  uv run rubygemdb-mcp --daemon status               # check running status
+  uv run rubygemdb-mcp --daemon stop                 # stop server cleanly
+  uv run rubygemdb-mcp --sse                         # shortcut for --daemon start
+  ```
+
+### Exposed Capabilities
+
+- **Tools (Read-Only)**:
+  - `search_gems(query, category=None, phase=None, limit=10)`: Sub-millisecond SQLite FTS5 search with category and phase filtering.
+  - `get_gem(name)`: Complete architectural metadata, layer, sub-categories, agent description, dependencies, signals, and risks.
+  - `compose_stack(query)`: Composes layered gem stack manifest (substrate -> quality) and Gemfile snippet.
+  - `list_categories()`: Lists 21 architectural categories, stack layers, descriptions, and curated base gems.
+- **Resources**:
+  - `rubygemdb://taxonomy`: Markdown guide of all 21 categories, layers, and sub-category vocabularies.
+  - `rubygemdb://stack-seeds`: Markdown guide of curated base gems grouped by layer.
+- **Prompts**:
+  - `design-ruby-stack(project_description)`: Guided prompt for formulating queries and layering architectures.
+
+### Client Configuration Snippets
+
+#### Claude Code (`~/.claude.json` or `.claude.json`)
+```json
+{
+  "mcpServers": {
+    "rubygemdb": {
+      "command": "uv",
+      "args": ["--directory", "/path/to/rubygemdb", "run", "rubygemdb-mcp"]
+    }
+  }
+}
+```
+
+#### Antigravity / Cursor (`mcp_config.json`)
+```json
+{
+  "mcpServers": {
+    "rubygemdb": {
+      "command": "uv",
+      "args": ["--directory", "/path/to/rubygemdb", "run", "rubygemdb-mcp"]
+    }
+  }
+}
+```
+
+#### SSE Setup (Remote or Multi-Agent)
+Start the background daemon:
+```bash
+uv run rubygemdb-mcp --daemon start --port 8011
+```
+Configure your client with URL `http://127.0.0.1:8011/sse`:
+```json
+{
+  "mcpServers": {
+    "rubygemdb": {
+      "url": "http://127.0.0.1:8011/sse"
+    }
+  }
+}
+```
+
+---
+
 ## Installation & Accelerator Support
 
 ```bash
