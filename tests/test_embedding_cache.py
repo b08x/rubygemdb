@@ -1,10 +1,12 @@
 """Automated tests for universal EmbeddingCache and wrap_embeddings."""
 
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import numpy as np
 
+from rubygemdb.core.config import settings
 from rubygemdb.services.embedding_cache import (
     EmbeddingCache,
     compute_content_hash,
@@ -172,3 +174,161 @@ def test_wrap_embeddings_idempotent(tmp_path: Path):
 
     wrap_embeddings(mock_embeddings)
     assert mock_embeddings.model.encode is first_encode
+
+
+def test_embedding_cache_default_db_path_reads_settings(tmp_path: Path, monkeypatch):
+    # Verify default reads settings.embeddings_cache_file
+    cache_default = EmbeddingCache()
+    assert cache_default.db_path == settings.embeddings_cache_file
+
+    # Verify modifying settings.embeddings_cache_file updates the default path
+    custom_file = tmp_path / "custom_embeddings.sqlite"
+    monkeypatch.setattr(settings, "embeddings_cache_file", custom_file)
+    cache_custom = EmbeddingCache()
+    assert cache_custom.db_path == custom_file
+
+
+def test_embedding_cache_clear_with_vacuum(tmp_path: Path):
+    db_file = tmp_path / "vacuum_test.sqlite"
+    cache = EmbeddingCache(db_path=db_file)
+
+    # Insert 50 large vectors to expand database size
+    items = [(f"large item {i}", np.ones(1000, dtype=np.float32) * i) for i in range(50)]
+    cache.put_many(items, "model-large")
+
+    stats_before = cache.stats()
+    assert stats_before["total_vectors"] == 50
+    total_bytes_before = stats_before["total_disk_bytes"]
+    assert total_bytes_before > 0
+
+    # Clear with vacuum=True
+    deleted = cache.clear(vacuum=True)
+    assert deleted == 50
+    stats_after = cache.stats()
+    assert stats_after["total_vectors"] == 0
+
+    total_bytes_after = stats_after["total_disk_bytes"]
+    assert total_bytes_after < total_bytes_before
+
+
+def test_embedding_cache_prune_by_ttl(tmp_path: Path):
+    db_file = tmp_path / "ttl_test.sqlite"
+    cache = EmbeddingCache(db_path=db_file)
+
+    # Insert 5 items
+    items = [(f"item {i}", np.array([float(i)], dtype=np.float32)) for i in range(5)]
+    cache.put_many(items, "model-ttl")
+
+    now = time.time()
+    # Backdate items 0, 1, 2 to 200 days ago, items 3, 4 to 10 days ago
+    conn = cache._get_connection()
+    try:
+        with conn:
+            conn.execute(
+                "UPDATE embedding_cache SET created_at = ? WHERE content_hash IN (?, ?, ?)",
+                (
+                    now - (200 * 86400.0),
+                    compute_content_hash("model-ttl", "item 0"),
+                    compute_content_hash("model-ttl", "item 1"),
+                    compute_content_hash("model-ttl", "item 2"),
+                ),
+            )
+            conn.execute(
+                "UPDATE embedding_cache SET created_at = ? WHERE content_hash IN (?, ?)",
+                (
+                    now - (10 * 86400.0),
+                    compute_content_hash("model-ttl", "item 3"),
+                    compute_content_hash("model-ttl", "item 4"),
+                ),
+            )
+    finally:
+        conn.close()
+
+    res = cache.prune(max_age_days=100, max_entries=None, vacuum=False)
+    assert res["deleted_expired"] == 3
+    assert res["deleted_capacity"] == 0
+    assert res["total_deleted"] == 3
+    assert res["vacuumed"] is False
+
+    assert cache.stats()["total_vectors"] == 2
+    assert cache.get("item 3", "model-ttl") is not None
+    assert cache.get("item 4", "model-ttl") is not None
+    assert cache.get("item 0", "model-ttl") is None
+
+
+def test_embedding_cache_prune_by_capacity(tmp_path: Path):
+    db_file = tmp_path / "capacity_test.sqlite"
+    cache = EmbeddingCache(db_path=db_file)
+
+    items = [(f"cap item {i}", np.array([float(i)], dtype=np.float32)) for i in range(10)]
+    cache.put_many(items, "model-cap")
+
+    now = time.time()
+    conn = cache._get_connection()
+    try:
+        with conn:
+            for i in range(10):
+                conn.execute(
+                    "UPDATE embedding_cache SET created_at = ? WHERE content_hash = ?",
+                    (now + (i * 10), compute_content_hash("model-cap", f"cap item {i}")),
+                )
+    finally:
+        conn.close()
+
+    # Cap at 4 entries; oldest 6 should be trimmed
+    res = cache.prune(max_age_days=None, max_entries=4, vacuum=False)
+    assert res["deleted_expired"] == 0
+    assert res["deleted_capacity"] == 6
+    assert res["total_deleted"] == 6
+
+    assert cache.stats()["total_vectors"] == 4
+    # The newest 4 are items 6, 7, 8, 9
+    for i in range(6, 10):
+        assert cache.get(f"cap item {i}", "model-cap") is not None
+    for i in range(6):
+        assert cache.get(f"cap item {i}", "model-cap") is None
+
+
+def test_embedding_cache_opportunistic_inline_pruning(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(settings, "embeddings_cache_max_entries", 5)
+
+    db_file = tmp_path / "inline_test.sqlite"
+    cache = EmbeddingCache(db_path=db_file)
+
+    # Insert 8 items via put_many
+    items = [(f"inline item {i}", np.array([float(i)], dtype=np.float32)) for i in range(8)]
+    cache.put_many(items, "model-inline")
+
+    # Should have been opportunistically trimmed to 5 entries
+    assert cache.stats()["total_vectors"] == 5
+
+
+def test_embedding_cache_stats_file_sizes(tmp_path: Path):
+    db_file = tmp_path / "sizes_test.sqlite"
+    cache = EmbeddingCache(db_path=db_file)
+
+    cache.put("sample text", "m1", np.array([1.0, 2.0, 3.0], dtype=np.float32))
+    stats = cache.stats()
+
+    assert stats["db_file_bytes"] > 0
+    assert stats["wal_file_bytes"] >= 0
+    assert stats["shm_file_bytes"] >= 0
+    assert stats["total_disk_bytes"] == stats["db_file_bytes"] + stats["wal_file_bytes"] + stats["shm_file_bytes"]
+
+
+def test_embedding_cache_prune_auto_vacuum(tmp_path: Path):
+    db_file = tmp_path / "auto_vac_test.sqlite"
+    cache = EmbeddingCache(db_path=db_file)
+
+    items = [(f"vac item {i}", np.array([float(i)], dtype=np.float32)) for i in range(20)]
+    cache.put_many(items, "model-vac")
+
+    # Pruning 1 item out of 20 = 5% <= 10%, auto-vacuum should be False
+    res1 = cache.prune(max_age_days=None, max_entries=19, vacuum=None)
+    assert res1["total_deleted"] == 1
+    assert res1["vacuumed"] is False
+
+    # Pruning 10 items out of 19 > 10%, auto-vacuum should be True
+    res2 = cache.prune(max_age_days=None, max_entries=9, vacuum=None)
+    assert res2["total_deleted"] == 10
+    assert res2["vacuumed"] is True

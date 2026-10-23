@@ -18,6 +18,7 @@ from rubygemdb.services.classifier import GemClassifier
 from rubygemdb.services.context7 import Context7Service
 from rubygemdb.services.prune import PruneService
 from rubygemdb.services.stack import StackService
+from rubygemdb.services.embedding_cache import EmbeddingCache
 from rubygemdb.services.tracing import flush_tracing
 from rubygemdb.storage.sqlite_storage import SQLiteStorage
 from rubygemdb.storage.json_storage import JSONStorage
@@ -330,6 +331,11 @@ def run_reclassify(args):
         console.print("[yellow]Wiped txtai index directory[/yellow]")
     console.print("[yellow]Wiped classified_gems table[/yellow]")
 
+    if getattr(args, "clear_embeddings_cache", False):
+        cache = EmbeddingCache()
+        deleted = cache.clear(vacuum=True)
+        console.print(f"[yellow]Wiped and vacuumed embedding cache ({deleted:,} vectors cleared)[/yellow]")
+
     # 4. Re-classify every remaining inventory gem.
     rg_service = storage.rubygems
     llm_service = LLMService()
@@ -415,6 +421,62 @@ def run_stack(args):
     console.print(gemfile)
 
 
+def _format_bytes(num_bytes: int) -> str:
+    n = float(num_bytes)
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if abs(n) < 1024.0:
+            return f"{n:.2f} {unit}" if unit != "B" else f"{int(n)} B"
+        n /= 1024.0
+    return f"{n:.2f} PB"
+
+
+def run_cache(args):
+    """Manage the universal vector embedding cache (stats, clear, prune)."""
+    cache = EmbeddingCache()
+
+    if args.cache_command == "stats":
+        stats = cache.stats(model=args.model)
+        table = Table(title="Universal Embedding Cache Statistics")
+        table.add_column("Metric", style="cyan")
+        table.add_column("Value", style="magenta")
+
+        table.add_row("Database File", stats["db_file"])
+        table.add_row("Total Vectors", f"{stats['total_vectors']:,}")
+        table.add_row("Approx Vector Bytes", _format_bytes(stats["approx_vector_bytes"]))
+        table.add_row("DB File Size", _format_bytes(stats["db_file_bytes"]))
+        table.add_row("WAL File Size", _format_bytes(stats["wal_file_bytes"]))
+        table.add_row("Total Disk Footprint", _format_bytes(stats["total_disk_bytes"]))
+        table.add_row("Models Cached", ", ".join(stats["models"]) if stats["models"] else "None")
+
+        console.print(table)
+
+    elif args.cache_command == "clear":
+        vacuum = not getattr(args, "no_vacuum", False)
+        deleted = cache.clear(model=args.model, vacuum=vacuum)
+        target = f"for model '{args.model}'" if args.model else "across all models"
+        console.print(f"[green]Cleared {deleted:,} vector(s) {target} from embedding cache.[/green]")
+        if vacuum:
+            console.print("[cyan]Executed SQLite VACUUM to reclaim host disk space.[/cyan]")
+
+    elif args.cache_command == "prune":
+        vacuum = not getattr(args, "no_vacuum", False)
+        res = cache.prune(
+            max_age_days=args.max_age_days,
+            max_entries=args.max_entries,
+            vacuum=vacuum,
+        )
+        table = Table(title="Embedding Cache Prune Summary")
+        table.add_column("Metric", style="cyan")
+        table.add_column("Value", style="magenta")
+
+        table.add_row("Expired Vectors Deleted", f"{res['deleted_expired']:,}")
+        table.add_row("Capacity Vectors Trimmed", f"{res['deleted_capacity']:,}")
+        table.add_row("Total Vectors Deleted", f"{res['total_deleted']:,}")
+        table.add_row("Disk Reclaimed (VACUUM)", "Yes" if res["vacuumed"] else "No")
+
+        console.print(table)
+
+
 def run_cli():
     parent_parser = argparse.ArgumentParser(add_help=False)
     parent_parser.add_argument("--cuda", action="store_true", default=argparse.SUPPRESS, help="Force enable CUDA acceleration")
@@ -436,6 +498,7 @@ def run_cli():
     reclassify_parser.add_argument("--prune-list", default=None, help="Path to a text file of gem names to prune (one per line, '#' comments) — subset approval; overrides --apply-prune")
     reclassify_parser.add_argument("--out", default="output", help="Output directory for per-category YAML files")
     reclassify_parser.add_argument("--embed", action="store_true", help="Rebuild the txtai index after reclassification")
+    reclassify_parser.add_argument("--clear-embeddings-cache", action="store_true", help="Wipe and vacuum the universal vector embedding cache alongside classified data")
 
     # Stack Subcommand
     stack_parser = subparsers.add_parser("stack", parents=[parent_parser], help="Turn a context query into a layered gem-stack manifest + Gemfile snippet")
@@ -444,6 +507,25 @@ def run_cli():
 
     # Build Indexer Subcommand
     subparsers.add_parser("build-indexer", parents=[parent_parser], help="Build or rebuild the GraphRAG container indexer image")
+
+    # Cache Subcommand
+    cache_parser = subparsers.add_parser("cache", parents=[parent_parser], help="Manage the universal vector embedding cache")
+    cache_subparsers = cache_parser.add_subparsers(dest="cache_command", required=True, help="Cache action to execute")
+
+    # Cache Stats
+    cache_stats_parser = cache_subparsers.add_parser("stats", parents=[parent_parser], help="Display embedding cache statistics and disk usage")
+    cache_stats_parser.add_argument("--model", default=None, help="Filter stats by embedding model name")
+
+    # Cache Clear
+    cache_clear_parser = cache_subparsers.add_parser("clear", parents=[parent_parser], help="Clear entries from the embedding cache and reclaim disk space")
+    cache_clear_parser.add_argument("--model", default=None, help="Clear only entries for a specific model")
+    cache_clear_parser.add_argument("--no-vacuum", action="store_true", help="Skip SQLite VACUUM disk reclamation after clearing")
+
+    # Cache Prune
+    cache_prune_parser = cache_subparsers.add_parser("prune", parents=[parent_parser], help="Prune expired or excess entries from the embedding cache")
+    cache_prune_parser.add_argument("--max-age-days", type=int, default=None, help=f"Purge vectors older than N days (default: {settings.embeddings_cache_ttl_days})")
+    cache_prune_parser.add_argument("--max-entries", type=int, default=None, help=f"Cap total vectors, evicting oldest (default: {settings.embeddings_cache_max_entries})")
+    cache_prune_parser.add_argument("--no-vacuum", action="store_true", help="Skip SQLite VACUUM disk reclamation")
 
     args = parser.parse_args()
 
@@ -461,6 +543,8 @@ def run_cli():
             run_stack(args)
         elif args.command == "build-indexer":
             run_build_indexer(args)
+        elif args.command == "cache":
+            run_cache(args)
     finally:
         flush_tracing()
 

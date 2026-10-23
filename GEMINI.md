@@ -45,6 +45,8 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
 
     Optional retrieval-quality stages (both off by default): set `QUERY_EXPANSION_ENABLED` / `RERANKER_ENABLED` to enable local GGUF query expansion and cross-encoder reranking. Models download lazily from Hugging Face into `data/models/`; retrieval degrades to baseline when they are unavailable.
 
+    Optional embedding cache retention: configure `EMBEDDINGS_CACHE_MAX_ENTRIES` (default: 100,000) and `EMBEDDINGS_CACHE_TTL_DAYS` (default: 180) to govern universal vector cache retention.
+
 ### Execution Commands
 
 - **Batch Classifier (CLI)**:
@@ -59,9 +61,19 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
   ```
   *Note: The CSV is only required for the first run to populate the SQLite database.*
 - **Reclassification (fresh start)**:
-  Builds an approval-gated prune report (`data/prune-report.md`), then wipes and rebuilds all classified data under the 21-category taxonomy. A dated SQLite backup is written first.
+  Builds an approval-gated prune report (`data/prune-report.md`), then wipes and rebuilds all classified data under the 21-category taxonomy. A dated SQLite backup is written first. Pass `--clear-embeddings-cache` to also purge and vacuum the vector cache.
   ```bash
   uv run rubygemdb reclassify --apply-prune --embed --out output/
+  uv run rubygemdb reclassify --clear-embeddings-cache --apply-prune
+  ```
+- **Embedding Cache Management (`rubygemdb cache`)**:
+  Inspect, prune, and clear the shared vector embedding cache:
+  ```bash
+  uv run rubygemdb cache stats                           # formatted table of vector counts, models, and disk sizes
+  uv run rubygemdb cache clear                           # purge all vectors and reclaim host disk space via VACUUM
+  uv run rubygemdb cache clear --model "model_name"     # clear vectors for a specific model only
+  uv run rubygemdb cache prune                           # prune expired vectors (>180d) and cap at 100k entries
+  uv run rubygemdb cache prune --max-age-days 90 --max-entries 50000  # custom retention limits
   ```
 - **Gem-Stack Composition**:
   Turns a context query into a layered stack manifest (substrate -> quality) plus a Gemfile snippet, starting from curated base picks (dotenv, drydock, pry, rubocop, journald-logger).
@@ -88,7 +100,7 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
 - `rubygemdb.sqlite`: Central SQLite database for inventory, verified results, and manual metadata updates (Source URIs, Context7 IDs).
 - `data/cache/gem_cache.json`: Caches raw responses from the RubyGems API.
 - `data/cache/llm_cache.json`: Caches prompts and responses from the LLM classifier.
-- `data/cache/embeddings_cache.sqlite`: Universal content-addressable vector cache (SHA-256 of model path + text) shared by GraphRAG indexing, classifier embedding scoring, and agent sessions — repeat vectorization of known texts skips the embedding model entirely. No TTL or size cap; the file grows until `EmbeddingCache.clear()` is called.
+- `data/cache/embeddings_cache.sqlite`: Universal content-addressable vector cache (SHA-256 of model path + text) shared by GraphRAG indexing, classifier embedding scoring, and agent sessions — repeat vectorization of known texts skips the embedding model entirely. Configurable capacity (default 100,000) and TTL retention (default 180 days), opportunistic inline eviction during `put_many`, and operator CLI lifecycle management (`rubygemdb cache`).
 - `classified_gems.json`: A unified JSON export of all classified gems for TUI consumption.
 - `sessions.sqlite`: Persistent GraphRAG session store (`data/sessions.sqlite`; `rag_sessions`, `rag_messages`, `rag_traces` tables, auto-created on first use).
 - `data/models/`: Local GGUF model cache for query expansion and reranking (lazily downloaded from Hugging Face).

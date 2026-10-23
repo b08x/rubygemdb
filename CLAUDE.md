@@ -99,6 +99,12 @@ export RERANKER_ENABLED="true"            # Local GGUF cross-encoder reranking
 ```
 Tunables: `QUERY_EXPANDER_REPO_ID`/`_FILENAME`/`_N_CTX`/`_N_THREADS`, `RERANKER_REPO_ID`/`_FILENAME`/`_N_CTX`/`_N_THREADS`, `RERANKER_CANDIDATE_MULTIPLIER` (default 3, pool clamped 15–50), `MODELS_CACHE_DIR`. Both stages fall back to baseline retrieval when models are disabled, missing, or fail.
 
+Optional embedding cache retention:
+```bash
+export EMBEDDINGS_CACHE_MAX_ENTRIES="100000"  # max entries before oldest evicted (default: 100,000)
+export EMBEDDINGS_CACHE_TTL_DAYS="180"         # TTL in days for vector records (default: 180)
+```
+
 ### Running the CLI Classifier
 Process a CSV of gem names and generate YAML output reports:
 ```bash
@@ -110,6 +116,19 @@ python -m rubygemdb gems-inventory.csv --out output/
 
 # With uv
 uv run rubygemdb gems-inventory.csv --out output/
+
+# Fresh start reclassification with embedding cache purge
+uv run rubygemdb reclassify --clear-embeddings-cache --apply-prune
+```
+
+### Managing the Universal Embedding Cache
+Inspect, prune, and clear vector entries:
+```bash
+uv run rubygemdb cache stats                           # Rich table of vector counts, models, disk sizes
+uv run rubygemdb cache clear                           # purge vectors and reclaim disk space via VACUUM
+uv run rubygemdb cache clear --model "model_name"     # clear vectors for a single model
+uv run rubygemdb cache prune                           # prune expired vectors (>180d) and cap at 100k
+uv run rubygemdb cache prune --max-age-days 90 --max-entries 50000  # custom retention limits
 ```
 
 ### Running the TUI Explorer
@@ -186,7 +205,7 @@ CSV files must contain either:
 - **API Cache**: `data/cache/gem_cache.json` - Persistent cache for RubyGems API responses
 - **LLM Cache**: `data/cache/llm_cache.json` - SHA256-hashed prompt caching for LLM responses (temperature 0)
 - **Results Cache**: `data/classified_gems.json` - Persists TUI state between sessions
-- **Embedding Cache**: `data/cache/embeddings_cache.sqlite` - Universal content-addressable vector cache (SHA-256 of model path + text, `services/embedding_cache.py`) shared by GraphRAG indexing, classifier embedding scoring, and agent sessions via `wrap_embeddings()`; repeat vectorization of known texts skips the embedding model. No TTL or size cap — grows until `EmbeddingCache.clear()` is called
+- **Embedding Cache**: `data/cache/embeddings_cache.sqlite` - Universal content-addressable vector cache (SHA-256 of model path + text, `services/embedding_cache.py`) shared by GraphRAG indexing, classifier embedding scoring, and agent sessions via `wrap_embeddings()`; repeat vectorization of known texts skips the embedding model. Configurable capacity and TTL retention policies (`settings.embeddings_cache_max_entries` default 100,000; `settings.embeddings_cache_ttl_days` default 180), opportunistic inline eviction during `put_many`, and operator CLI management via `rubygemdb cache {stats, clear, prune}` and `rubygemdb reclassify --clear-embeddings-cache`
 - **GGUF Model Cache**: `data/models/` - Query-expansion and reranker weights, lazily downloaded from Hugging Face via `services/model_manager.py`
 
 ## TUI Interface Features

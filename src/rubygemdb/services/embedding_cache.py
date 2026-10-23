@@ -34,7 +34,7 @@ class EmbeddingCache:
     """SQLite-backed persistent vector embedding cache."""
 
     def __init__(self, db_path: Optional[Union[str, Path]] = None):
-        self.db_path = Path(db_path or settings.cache_dir / "embeddings_cache.sqlite")
+        self.db_path = Path(db_path or settings.embeddings_cache_file)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
@@ -63,6 +63,9 @@ class EmbeddingCache:
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_embedding_model ON embedding_cache(model);"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_embedding_created_at ON embedding_cache(created_at);"
             )
 
     def get(self, text: str, model: str) -> Optional[np.ndarray]:
@@ -172,8 +175,27 @@ class EmbeddingCache:
                 records,
             )
 
+        self._check_and_prune()
+
+    def _check_and_prune(self) -> None:
+        """Opportunistically prune if total rows exceed configured max entries."""
+        max_entries = settings.embeddings_cache_max_entries
+        if max_entries is None or max_entries <= 0:
+            return
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM embedding_cache")
+            total = cursor.fetchone()[0] or 0
+
+        if total > max_entries:
+            self.prune(
+                max_age_days=settings.embeddings_cache_ttl_days,
+                max_entries=max_entries,
+            )
+
     def stats(self, model: Optional[str] = None) -> Dict[str, Any]:
-        """Return cache statistics (entry count, storage size, models)."""
+        """Return cache statistics (entry count, storage size, models, disk file footprints)."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             if model:
@@ -196,22 +218,136 @@ class EmbeddingCache:
                 cursor.execute("SELECT DISTINCT model FROM embedding_cache")
                 models = [r[0] for r in cursor.fetchall()]
 
+        db_file_bytes = self.db_path.stat().st_size if self.db_path.exists() else 0
+        wal_path = Path(f"{self.db_path}-wal")
+        wal_file_bytes = wal_path.stat().st_size if wal_path.exists() else 0
+        shm_path = Path(f"{self.db_path}-shm")
+        shm_file_bytes = shm_path.stat().st_size if shm_path.exists() else 0
+        total_disk_bytes = db_file_bytes + wal_file_bytes + shm_file_bytes
+
         return {
             "total_vectors": count,
             "approx_vector_bytes": bytes_used,
             "models": models,
             "db_file": str(self.db_path),
+            "db_file_bytes": db_file_bytes,
+            "wal_file_bytes": wal_file_bytes,
+            "shm_file_bytes": shm_file_bytes,
+            "total_disk_bytes": total_disk_bytes,
         }
 
-    def clear(self, model: Optional[str] = None) -> int:
+    def vacuum(self) -> None:
+        """Execute checkpoint and VACUUM to reclaim free disk pages and shrink files."""
+        if not self.db_path.exists():
+            return
+        conn = sqlite3.connect(str(self.db_path), isolation_level=None, timeout=30.0)
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+            conn.execute("VACUUM;")
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        finally:
+            conn.close()
+
+    def clear(self, model: Optional[str] = None, vacuum: bool = True) -> int:
         """Delete entries from the cache. Returns number of rows deleted."""
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            if model:
-                cursor.execute("DELETE FROM embedding_cache WHERE model = ?", (model,))
-            else:
-                cursor.execute("DELETE FROM embedding_cache")
-            return cursor.rowcount
+        conn = self._get_connection()
+        try:
+            with conn:
+                cursor = conn.cursor()
+                if model:
+                    cursor.execute("DELETE FROM embedding_cache WHERE model = ?", (model,))
+                else:
+                    cursor.execute("DELETE FROM embedding_cache")
+                deleted = cursor.rowcount
+        finally:
+            conn.close()
+
+        if vacuum:
+            self.vacuum()
+
+        return deleted
+
+    def prune(
+        self,
+        max_age_days: Optional[int] = None,
+        max_entries: Optional[int] = None,
+        vacuum: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """Purge expired vectors by TTL and trim oldest records exceeding capacity.
+
+        Args:
+            max_age_days: Purge vectors older than this many days.
+            max_entries: Cap total vector rows to this number, trimming oldest.
+            vacuum: Whether to run SQLite VACUUM. If None, auto-vacuums when >10% of entries pruned.
+
+        Returns:
+            Dictionary with deletion metrics and vacuum status.
+        """
+        if max_age_days is None and max_entries is None:
+            max_age_days = settings.embeddings_cache_ttl_days
+            max_entries = settings.embeddings_cache_max_entries
+
+        deleted_expired = 0
+        deleted_capacity = 0
+
+        conn = self._get_connection()
+        try:
+            with conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM embedding_cache")
+                initial_count = cursor.fetchone()[0] or 0
+
+                # 1. TTL Purge
+                if max_age_days is not None and max_age_days >= 0:
+                    cutoff = time.time() - (max_age_days * 86400.0)
+                    cursor.execute(
+                        "DELETE FROM embedding_cache WHERE created_at < ?",
+                        (cutoff,),
+                    )
+                    deleted_expired = cursor.rowcount
+
+                # 2. Capacity Trim
+                if max_entries is not None and max_entries >= 0:
+                    cursor.execute("SELECT COUNT(*) FROM embedding_cache")
+                    current_count = cursor.fetchone()[0] or 0
+                    if current_count > max_entries:
+                        excess = current_count - max_entries
+                        cursor.execute(
+                            """
+                            DELETE FROM embedding_cache
+                            WHERE content_hash IN (
+                                SELECT content_hash FROM embedding_cache
+                                ORDER BY created_at ASC
+                                LIMIT ?
+                            )
+                            """,
+                            (excess,),
+                        )
+                        deleted_capacity = cursor.rowcount
+        finally:
+            conn.close()
+
+        total_deleted = deleted_expired + deleted_capacity
+
+        should_vacuum = False
+        if vacuum is True:
+            should_vacuum = True
+        elif vacuum is None:
+            if initial_count > 0 and total_deleted > 0 and (total_deleted / initial_count) > 0.10:
+                should_vacuum = True
+
+        if should_vacuum:
+            self.vacuum()
+            vacuumed = True
+        else:
+            vacuumed = False
+
+        return {
+            "deleted_expired": deleted_expired,
+            "deleted_capacity": deleted_capacity,
+            "total_deleted": total_deleted,
+            "vacuumed": vacuumed,
+        }
 
 
 _default_cache: Optional[EmbeddingCache] = None

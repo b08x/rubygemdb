@@ -34,6 +34,18 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("rubygemdb_embedding_model", "embedding_model"),
     )
     embedding_chunk_size: int = 500
+    embeddings_cache_max_entries: int = Field(
+        default=100_000,
+        validation_alias=AliasChoices(
+            "embeddings_cache_max_entries", "EMBEDDINGS_CACHE_MAX_ENTRIES"
+        ),
+    )
+    embeddings_cache_ttl_days: int = Field(
+        default=180,
+        validation_alias=AliasChoices(
+            "embeddings_cache_ttl_days", "EMBEDDINGS_CACHE_TTL_DAYS"
+        ),
+    )
     rubygems_api_url: str = "https://rubygems.org/api/v1/gems/{name}.json"
     rubygems_search_url: str = "https://rubygems.org/api/v1/search.json?query={query}"
 
@@ -228,7 +240,10 @@ class Settings(BaseSettings):
     
     gem_cache_file: Path = cache_dir / "gem_cache.json"
     llm_cache_file: Path = cache_dir / "llm_cache.json"
-    embeddings_cache_file: Path = cache_dir / "embeddings_cache.sqlite"
+    embeddings_cache_file: Path = Field(
+        default=cache_dir / "embeddings_cache.sqlite",
+        validation_alias=AliasChoices("embeddings_cache_file", "EMBEDDINGS_CACHE_FILE"),
+    )
     classified_gems_file: Path = data_dir / "classified_gems.json"
     sqlite_db_file: Path = data_dir / "rubygemdb.sqlite"
     session_db_file: Path = data_dir / "sessions.sqlite"

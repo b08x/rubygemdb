@@ -144,9 +144,21 @@ Produces an approval-gated prune report (`data/prune-report.md` listing overlapp
 uv run rubygemdb reclassify --out output/          # interactive prune confirmation
 uv run rubygemdb reclassify --apply-prune --embed  # non-interactive: full report + rebuild txtai index
 uv run rubygemdb reclassify --prune-list prune.txt --embed  # prune only the gems named in the file
+uv run rubygemdb reclassify --clear-embeddings-cache  # also purge and vacuum universal embedding cache
 ```
 The prune list file is plain text: one gem name per line, `#` comments allowed — use it to approve a subset instead of the whole report.
 A dated SQLite backup (`data/rubygemdb.sqlite.bak-<date>`) is written before anything is wiped. Run with ollama up for best embedding-assisted classification.
+
+### Universal Embedding Cache Management (`rubygemdb cache`)
+Inspect, prune, and clear the shared vector embedding cache (`data/cache/embeddings_cache.sqlite`):
+```bash
+uv run rubygemdb cache stats                           # display Rich table of vector counts, models, and disk sizes
+uv run rubygemdb cache clear                           # wipe all vectors and reclaim host disk space via VACUUM
+uv run rubygemdb cache clear --model "model_name"     # clear vectors for a specific model only
+uv run rubygemdb cache prune                           # prune expired vectors (>180d) and cap at 100k entries
+uv run rubygemdb cache prune --max-age-days 90 --max-entries 50000  # custom retention limits
+```
+Use `--no-vacuum` on `clear` or `prune` to skip physical disk page reclamation. Reclassification also supports `--clear-embeddings-cache` to wipe and vacuum cached vectors during fresh-start taxonomical rebuilds.
 
 ### Gem-Stack Composition
 Turn a context query into a layered stack manifest (layer, category, gem, role) plus a Gemfile snippet, starting from the curated base picks (dotenv, drydock, pry, rubocop, journald-logger):
@@ -207,6 +219,12 @@ export RERANKER_ENABLED="true"         # cross-encoder rerank of the candidate p
 ```
 Further knobs: `QUERY_EXPANDER_REPO_ID` / `QUERY_EXPANDER_FILENAME` / `QUERY_EXPANDER_N_CTX` / `QUERY_EXPANDER_N_THREADS`, `RERANKER_REPO_ID` / `RERANKER_FILENAME` / `RERANKER_N_CTX` / `RERANKER_N_THREADS`, `RERANKER_CANDIDATE_MULTIPLIER` (default 3; candidate pool = top_k × multiplier, clamped 15–50), and `MODELS_CACHE_DIR` (default `data/models/`). Legacy aliases `EXPANDER_*`, `CROSS_ENCODER_*`, `CANDIDATE_MULTIPLIER`, and `MODEL_CACHE_DIR` are also accepted. Both stages degrade to baseline retrieval when disabled, missing, or failing — no exceptions surface to callers.
 
+Optional embedding cache retention policies:
+```bash
+export EMBEDDINGS_CACHE_MAX_ENTRIES="100000"  # maximum cached vectors before oldest entries are pruned (default: 100,000)
+export EMBEDDINGS_CACHE_TTL_DAYS="180"         # vector time-to-live in days (default: 180)
+```
+
 ---
 
 ## Classification Logic
@@ -254,7 +272,7 @@ Local cache files:
 8. `data/mcp.pid` + `data/mcp.json` + `data/mcp.log`: MCP daemon PID file, host/port sidecar, and daemon log
 9. `data/sessions.sqlite`: Persistent GraphRAG session store (`rag_sessions`, `rag_messages`, `rag_traces` tables, auto-created on first use via `SessionStorage`; separate from the gem catalog, which stays read-only)
 10. `data/models/`: Local GGUF model cache for query expansion and reranking (lazily downloaded from Hugging Face via `services/model_manager.py`; the directory is auto-created at startup)
-11. `data/cache/embeddings_cache.sqlite`: Universal content-addressable vector cache keyed by SHA-256 of model path + text, shared by GraphRAG indexing, classifier embedding scoring, and agent sessions (`services/embedding_cache.py`). Repeat vectorization of known texts skips the embedding model entirely. No TTL or size cap — the file grows until `EmbeddingCache.clear()` is called
+11. `data/cache/embeddings_cache.sqlite`: Universal content-addressable vector cache keyed by SHA-256 of model path + text, shared by GraphRAG indexing, classifier embedding scoring, and agent sessions (`services/embedding_cache.py`). Repeat vectorization of known texts skips the embedding model entirely. Configurable capacity and TTL retention policies (`settings.embeddings_cache_max_entries` default 100,000; `settings.embeddings_cache_ttl_days` default 180), opportunistic inline eviction during `put_many`, auto-vacuum on >10% prune, and operator management via `rubygemdb cache {stats, clear, prune}` and `rubygemdb reclassify --clear-embeddings-cache`
 
 ---
 

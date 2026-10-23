@@ -294,6 +294,21 @@ Optional retrieval-quality models: enabling `QUERY_EXPANSION_ENABLED` or `RERANK
 
 Optional Langfuse observability: set `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` to enable tracing (plus `LANGFUSE_HOST` or `LANGFUSE_BASE_URL` for a self-hosted instance — the default is `https://cloud.langfuse.com`). Tracing is off unless both keys are set, and `LANGFUSE_ENABLED=false` disables it even when they are. No keys, no client: the tracer degrades to no-op observations and never initializes the Langfuse SDK. Traced operations cover classification, LLM calls, hybrid search, GraphRAG retrieval, agent chat turns, and MCP GraphRAG tools; the CLI flushes buffered traces when a command finishes.
 
+Optional embedding cache retention: configure `EMBEDDINGS_CACHE_MAX_ENTRIES` (default: 100,000) and `EMBEDDINGS_CACHE_TTL_DAYS` (default: 180) to govern universal vector cache capacity and TTL retention.
+
+### Embedding Cache Management
+
+Manage and reclaim disk space from the shared vector embedding cache (`data/cache/embeddings_cache.sqlite`):
+```bash
+uv run rubygemdb cache stats                           # inspect vector counts, models, and file sizes
+uv run rubygemdb cache clear                           # purge all vectors and reclaim disk space via VACUUM
+uv run rubygemdb cache clear --model "model_name"     # clear vectors for a specific model only
+uv run rubygemdb cache prune                           # prune expired vectors (>180d) and cap at 100k entries
+uv run rubygemdb cache prune --max-age-days 90 --max-entries 50000  # custom retention limits
+uv run rubygemdb reclassify --clear-embeddings-cache  # purge cache during fresh-start reclassification
+```
+Pass `--no-vacuum` on `clear` or `prune` to skip physical SQLite page reclamation. Opportunistic inline pruning triggers during `put_many` batch writes when capacity thresholds are exceeded.
+
 ---
 
 ## Development
