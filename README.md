@@ -16,7 +16,8 @@
 
 - **21-Category Taxonomy** — Classifies gems into functional categories (web_frameworks, cli_libraries, ai_llm, etc.), each tagged with a stack layer (substrate, plumbing, composition, quality), with confidence scoring and taxonomy-driven sub-category faceting — every category carries a curated facet vocabulary (e.g. web_frameworks → full_stack_frameworks, micro_frameworks, rack_middleware)
 - **Heuristic + LLM Hybrid** — Fast pattern matching for obvious cases, with a Mistral-powered LLM pass that can override the heuristic category when confidence drops below 0.7
-- **Semantic Vector Search** — txtai-powered embeddings with multi-query expansion and recency boosting for finding gems by natural language description
+- **Semantic Vector Search** — txtai-powered embeddings with recency boosting for finding gems by natural language description
+- **Local Query Expansion & Cross-Encoder Reranking** — optional, off-by-default retrieval quality stages: a local Qwen3 GGUF model (`mradermacher/qmd-query-expansion-1.7B-GGUF`) expands queries into lexical and vector variations, multi-pass results fuse via Reciprocal Rank Fusion, and a Qwen3 cross-encoder (`ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF`) re-scores the candidate pool — both stages degrade transparently to baseline retrieval when disabled or offline
 - **AI Agent with MCP Tools** — Context7 documentation retrieval and Codebase Memory integration via Model Context Protocol
 - **Native MCP Server** — `rubygemdb-mcp` serves the taxonomy, gem metadata, stack composition, and GraphRAG sessions to coding agents (Claude Code, Antigravity, Cursor) over stdio or a background SSE daemon — the gem catalog is strictly read-only
 - **Contextual GraphRAG Pipeline** — On-demand containerized extraction of AST symbol hierarchies (`rubydex`) and structured documentation (`decode`) from gem source repositories, embedded into ephemeral `txtai` vector stores with 2-stage retrieval for deeply grounded coding agent chat and MCP queries
@@ -130,10 +131,12 @@ Detected facets persist in the `classified_gems.sub_categories` SQLite column, f
 
 Gem retrieval combines two signals fused with Reciprocal Rank Fusion (K=60):
 
-1. **Vector Retrieval** — txtai embedding similarity (`ollama/embeddinggemma`) with a 30% recency boost for recently updated gems
-2. **Full-Text Search** — SQLite FTS5 index (`gem_fts`) over gem names and descriptions; tries a strict AND-joined match first and falls back to the looser OR match, so single-token coincidences do not outrank full matches
-3. **RRF Fusion** — `services/hybrid_search.py` merges both rankings into one candidate list; degrades gracefully to whichever signal is available
-4. **Category Narrowing** — an explicit `category` slug restricts results directly; otherwise, when a phase filter is active, query tokens restrict results to the categories they actually target (stem-matched against category keywords), so a "chunk text" query no longer pulls in persistence or media gems
+1. **Query Expansion (optional)** — when `QUERY_EXPANSION_ENABLED=true`, `services/query_expander.py` expands the query into lexical and vector variations with a local GGUF model; each variation is searched alongside the original query
+2. **Vector Retrieval** — txtai embedding similarity (`ollama/embeddinggemma`) with a 30% recency boost for recently updated gems
+3. **Full-Text Search** — SQLite FTS5 index (`gem_fts`) over gem names and descriptions; tries a strict AND-joined match first and falls back to the looser OR match, so single-token coincidences do not outrank full matches
+4. **RRF Fusion** — `services/hybrid_search.py` merges the rankings of every pass into one candidate list; degrades gracefully to whichever signal is available
+5. **Cross-Encoder Reranking (optional)** — when `RERANKER_ENABLED=true`, the candidate pool (oversampled to `top_k × RERANKER_CANDIDATE_MULTIPLIER`, default 3, clamped 15–50) is re-scored by the local Qwen3 reranker and truncated to the requested limit
+6. **Category Narrowing** — an explicit `category` slug restricts results directly; otherwise, when a phase filter is active, query tokens restrict results to the categories they actually target (stem-matched against category keywords), so a "chunk text" query no longer pulls in persistence or media gems
 
 ### Contextual GraphRAG Flow
 
@@ -143,7 +146,7 @@ The chat tab provides an on-demand, containerized GraphRAG pipeline for deep Rub
 2. **Project Intention** — Define your architectural requirements or project context in the intention input field.
 3. **Containerized Extraction** — Clicking `Build GraphRAG Context` spins up the ephemeral `rubygemdb-indexer:latest` container (prioritizing Podman, fallback to Docker), running `Rubydex::Graph` (AST, class hierarchy, method calls) and `Decode::Index` (docstrings, `@parameter`, `@returns`, and `@example` code snippets) over mounted shallow-cloned gem repositories. If git cloning fails, the system automatically falls back to unpacking released `.gem` archives.
 4. **Ephemeral Vector Store** — Host Python ingests the normalized `graph.json` artifact into an ephemeral `txtai` index, caching the graph and vector embeddings by a deterministic hash of the selected gem set.
-5. **Two-Stage Grounded Retrieval** — Queries execute semantic vector search for top-K symbol and example nodes, followed by 1-hop graph neighborhood expansion across inheritance, call relations, parameter types, and attached code examples.
+5. **Two-Stage Grounded Retrieval** — Queries execute semantic vector search for top-K symbol and example nodes, followed by 1-hop graph neighborhood expansion across inheritance, call relations, parameter types, and attached code examples. With query expansion enabled, vector search runs over the original query plus its generated variations; with the reranker enabled, the candidate nodes are re-scored by the local cross-encoder before the neighborhood expansion. Both stages are off by default and fall back to baseline retrieval when their models are unavailable.
 6. **Session Persistence** — Each conversation lives in a persistent session in `data/sessions.sqlite`: every turn is saved as it happens and indexed into txtai as a `session_turn` document, and the chat tab auto-restores the most recent session — active gems, intention, chat history, and the last 200 execution traces — on startup. New Session and Delete Session buttons manage the session list.
 7. **Transcript Export** — Export writes the session transcript to `output/chat_exports/graphrag_chat_<timestamp>.md` and `.json` containing active intention, indexed gems, full conversation history, and grounded symbol summaries.
 
@@ -283,6 +286,8 @@ uv run rubygemdb --cpu process gems.csv --embed
 ```
 Alternatively, set `CUDA_ENABLED=true` / `CUDA_ENABLED=false` or `DEVICE=cuda` in `.env`.
 
+Optional retrieval-quality models: enabling `QUERY_EXPANSION_ENABLED` or `RERANKER_ENABLED` lazily downloads GGUF models (~1.1 GB and ~640 MB) from Hugging Face into `data/models/` on first use. No model setup is needed to run the baseline pipeline — both stages are off by default.
+
 ---
 
 ## Development
@@ -307,6 +312,9 @@ rubygemdb/
 │   │   ├── gem_fetcher.py  # Git shallow-cloner with .gem unpack fallback
 │   │   ├── graphrag.py     # Two-stage GraphRAG retrieval & prompt synthesizer
 │   │   ├── hybrid_search.py # FTS5 + vector search with RRF fusion
+│   │   ├── query_expander.py # Local GGUF query expansion (optional, off by default)
+│   │   ├── reranker.py     # Local GGUF cross-encoder reranking (optional, off by default)
+│   │   ├── model_manager.py # Hugging Face GGUF download & llama.cpp instance cache
 │   │   ├── classifier.py   # Heuristic + LLM classification with sub-category faceting
 │   │   ├── embedding_scorer.py # txtai embedding similarity vs category descriptions
 │   │   ├── stack.py        # Layered gem-stack composition

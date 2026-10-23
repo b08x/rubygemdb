@@ -15,6 +15,8 @@ from typing import Callable, Optional
 from rubygemdb.core.config import settings
 from rubygemdb.models.categories import CATEGORY_BY_SLUG
 from rubygemdb.models.phases import PHASE_BY_CATEGORY, categories_for, phase_for
+from rubygemdb.services.query_expander import QueryExpander, default_query_expander
+from rubygemdb.services.reranker import CrossEncoderReranker, default_reranker
 from rubygemdb.services.stack import guess_category
 
 RRF_K = 60
@@ -260,6 +262,8 @@ def hybrid_search(
     fts_search: Optional[SearchCallable] = None,
     db_path: str | None = None,
     category: Optional[str] = None,
+    query_expander: Optional[QueryExpander] = None,
+    reranker: Optional[CrossEncoderReranker] = None,
 ) -> list[dict]:
     """Fuse vector and keyword search with reciprocal rank fusion.
 
@@ -271,6 +275,8 @@ def hybrid_search(
         fts_search: FTS5-backed search callable (defaults to the SQLite gem_fts table).
         db_path: path to SQLite database.
         category: category slug to restrict results to, or None for no filter.
+        query_expander: optional QueryExpander instance.
+        reranker: optional CrossEncoderReranker instance.
 
     Returns up to `limit` hits sorted by fused score, each carrying name,
     description, category, layer, phase, source_code_uri, context7_id, score.
@@ -288,21 +294,55 @@ def hybrid_search(
         categories = narrow_categories(query, categories)
     keyword_search = fts_search or make_fts_search(db_path)
 
-    vector_results: list[dict] = []
+    active_expander = query_expander or default_query_expander
+    active_reranker = reranker or default_reranker
+
+    # Dynamic candidate pool size clamped between 15 and 50
+    pool_size = max(15, min(50, limit * settings.reranker_candidate_multiplier))
+    fetch_limit = pool_size if (active_reranker.is_enabled or active_expander.is_enabled) else limit
+
+    expansion = None
+    if active_expander.is_enabled:
+        try:
+            expansion = active_expander.expand(query)
+        except Exception:
+            expansion = None
+
+    all_result_lists: list[list[dict]] = []
+
+    # Vector search passes
     if vector_search is not None:
         try:
-            vector_results = vector_search(query, categories, limit) or []
+            vec_res = vector_search(query, categories, fetch_limit) or []
+            all_result_lists.append(vec_res)
         except Exception:
-            vector_results = []
+            pass
 
-    keyword_results: list[dict] = []
+        if expansion and expansion.vector:
+            for vq in expansion.vector:
+                try:
+                    ev_res = vector_search(vq, categories, fetch_limit) or []
+                    all_result_lists.append(ev_res)
+                except Exception:
+                    pass
+
+    # Keyword search passes
     try:
-        keyword_results = keyword_search(query, categories, limit) or []
+        kw_res = keyword_search(query, categories, fetch_limit) or []
+        all_result_lists.append(kw_res)
     except Exception:
-        keyword_results = []
+        pass
+
+    if expansion and expansion.lexical:
+        for lq in expansion.lexical:
+            try:
+                ek_res = keyword_search(lq, categories, fetch_limit) or []
+                all_result_lists.append(ek_res)
+            except Exception:
+                pass
 
     fused: dict[str, dict] = {}
-    for source, results in (("vector", vector_results), ("keyword", keyword_results)):
+    for results in all_result_lists:
         seen: set[str] = set()
         rank = 0
         for hit in results:
@@ -322,8 +362,18 @@ def hybrid_search(
         if entry["preferred"]:
             entry["score"] = round(entry["score"] + PREFERRED_BOOST, 6)
 
-    ranked = sorted(fused.values(), key=lambda h: h["score"], reverse=True)
-    return ranked[:limit]
+    candidates = sorted(fused.values(), key=lambda h: h["score"], reverse=True)
+
+    if active_reranker.is_enabled and candidates:
+        pool_candidates = candidates[:pool_size]
+        return active_reranker.rerank(
+            query=query,
+            items=pool_candidates,
+            text_extractor=lambda h: f"{h.get('name', '')}: {h.get('description', '')}",
+            top_k=limit,
+        )
+
+    return candidates[:limit]
 
 
 def _preferred_names(names: list[str], db_path: str | None) -> set[str]:

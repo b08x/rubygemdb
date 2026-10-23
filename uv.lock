@@ -3150,9 +3150,11 @@ wheels = [
 
 [[package]]
 name = "rubygemdb"
-version = "0.7.0"
+version = "0.8.0"
 source = { editable = "." }
 dependencies = [
+    { name = "huggingface-hub" },
+    { name = "llama-cpp-python" },
     { name = "mcp" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -3196,6 +3198,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "huggingface-hub", specifier = ">=0.28.0" },
+    { name = "llama-cpp-python", specifier = ">=0.3.0" },
     { name = "mcp", specifier = ">=1.29.0" },
     { name = "pydantic", specifier = ">=2.12.5" },
     { name = "pydantic-settings", specifier = ">=2.13.1" },

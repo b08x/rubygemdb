@@ -17,7 +17,7 @@ RubyGemDB is a Ruby gem analysis and classification tool that categorizes gems i
 
 ### Data Flow
 1. CSV input → RubyGems API → Heuristic classification → LLM enhancement → SQLite/YAML output
-2. Caching layers for both API responses (`data/cache/gem_cache.json`) and LLM responses (`llm_cache.json`)
+2. Caching layers for both API responses (`data/cache/gem_cache.json`) and LLM responses (`data/cache/llm_cache.json`)
 3. Results cached in `data/classified_gems.json` and SQLite database for TUI persistence
 
 ### Key Components
@@ -36,6 +36,9 @@ src/rubygemdb/
 │   ├── gem_fetcher.py  # Git shallow-cloner with .gem unpack fallback
 │   ├── graphrag.py     # Two-stage GraphRAG retrieval & prompt synthesizer
 │   ├── hybrid_search.py # SQLite FTS5 + txtai vector search, RRF fusion (explicit `category` filter; `phase` narrows via category keywords)
+│   ├── query_expander.py # Local GGUF query expansion → lexical/vector variations (off by default)
+│   ├── reranker.py     # Local GGUF cross-encoder reranking of candidates (off by default)
+│   ├── model_manager.py # Hugging Face GGUF download + llama.cpp instance cache (data/models/)
 │   ├── classifier.py  # Heuristic and LLM classification logic
 │   ├── embedding_scorer.py # txtai embedding similarity vs category descriptions
 │   ├── stack.py       # Layered gem-stack composition (read_only mode for MCP)
@@ -56,7 +59,7 @@ The chat tab provides on-demand, containerized GraphRAG for grounded Ruby gem ar
 2. User enters an optional project intention and clicks `Build GraphRAG Context`
 3. Ephemeral container runner (`rubygemdb-indexer:latest`, Podman priority with Docker fallback) shallow-clones repositories (with `.gem` archive unpack fallback) and runs `rubydex` (AST symbols, hierarchy, calls) and `decode` (structured docstrings, `@parameter`, `@returns`, and `@example` usage blocks), outputting `graph.json`
 4. Host Python ingests `graph.json` into an ephemeral `txtai` index, cached by a deterministic SHA-256 hash of the selected gem set
-5. Queries execute two-stage retrieval: semantic vector search for top-K nodes followed by 1-hop graph neighborhood expansion across inheritance, calls, parameters, and code examples
+5. Queries execute two-stage retrieval: semantic vector search for top-K nodes followed by 1-hop graph neighborhood expansion across inheritance, calls, parameters, and code examples — with query expansion enabled, vector search covers the original query plus generated variations, and with the reranker enabled, candidates are re-scored by the local cross-encoder first (both off by default, degrading to baseline retrieval when models are unavailable)
 6. Conversations persist as sessions in `data/sessions.sqlite` — every turn is saved with its retrieved-node citations, indexed into txtai as a `session_turn` document, and the chat tab auto-restores the most recent session (gems, intention, history, last 200 traces) on open
 7. Answers are grounded in actual signatures and verified examples; Export writes the session transcript to `output/chat_exports/graphrag_chat_<timestamp>.md` and `.json` containing intention, gems, and conversation history
 
@@ -77,6 +80,13 @@ Required environment variables for full functionality:
 export MISTRAL_API_KEY="your_key"          # For LLM classification
 export CONTEXT7_API_KEY="your_key"        # For cheatsheet generation
 ```
+
+Optional retrieval-quality stages (off by default; GGUF models download lazily from Hugging Face into `data/models/`):
+```bash
+export QUERY_EXPANSION_ENABLED="true"     # Local GGUF query expansion
+export RERANKER_ENABLED="true"            # Local GGUF cross-encoder reranking
+```
+Tunables: `QUERY_EXPANDER_REPO_ID`/`_FILENAME`/`_N_CTX`/`_N_THREADS`, `RERANKER_REPO_ID`/`_FILENAME`/`_N_CTX`/`_N_THREADS`, `RERANKER_CANDIDATE_MULTIPLIER` (default 3, pool clamped 15–50), `MODELS_CACHE_DIR`. Both stages fall back to baseline retrieval when models are disabled, missing, or fail.
 
 ### Running the CLI Classifier
 Process a CSV of gem names and generate YAML output reports:
@@ -163,8 +173,9 @@ CSV files must contain either:
 
 ### Caching Layers
 - **API Cache**: `data/cache/gem_cache.json` - Persistent cache for RubyGems API responses
-- **LLM Cache**: `llm_cache.json` - SHA256-hashed prompt caching for LLM responses (temperature 0)
+- **LLM Cache**: `data/cache/llm_cache.json` - SHA256-hashed prompt caching for LLM responses (temperature 0)
 - **Results Cache**: `data/classified_gems.json` - Persists TUI state between sessions
+- **GGUF Model Cache**: `data/models/` - Query-expansion and reranker weights, lazily downloaded from Hugging Face via `services/model_manager.py`
 
 ## TUI Interface Features
 
@@ -176,7 +187,7 @@ CSV files must contain either:
 
 ### Context7 Integration
 - Generate usage cheatsheets for selected gems
-- Saves to `/home/b08x/Workspace/Tools/cheatsheets/`
+- Saves to `output/cheatsheets/`
 - Requires CONTEXT7_API_KEY environment variable
 - Library IDs are repo-anchored: `verify_library` canonicalizes IDs to `/owner/repo` form derived from the gem's source/homepage repo URL, preferring an exact repo-path match over the first search result
 
@@ -188,8 +199,8 @@ CSV files must contain either:
 - Graceful degradation when APIs are unavailable
 
 ### Rate Limiting
-- `RATE_LIMIT_DELAY = 0.1` seconds between RubyGems requests
-- `LLM_RATE_DELAY = 0.2` seconds between LLM requests  
+- `RATE_LIMIT_DELAY = 0.5` seconds between RubyGems requests
+- `LLM_RATE_DELAY = 0.5` seconds between LLM requests  
 - `LLM_BATCH_SIZE = 10` for efficient bulk processing
 
 ## Output Structure

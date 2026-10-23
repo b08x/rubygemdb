@@ -45,6 +45,67 @@ class Settings(BaseSettings):
     chunk_normalize_whitespace: bool = True
     chunk_strip_urls_emails: bool = False
 
+    # Query Expansion Configuration
+    query_expansion_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("query_expansion_enabled", "expander_enabled"),
+    )
+    query_expander_repo_id: str = Field(
+        default="mradermacher/qmd-query-expansion-1.7B-GGUF",
+        validation_alias=AliasChoices("query_expander_repo_id", "expander_repo_id"),
+    )
+    query_expander_filename: str = Field(
+        default="qmd-query-expansion-1.7B.Q4_K_M.gguf",
+        validation_alias=AliasChoices("query_expander_filename", "expander_filename"),
+    )
+    query_expander_n_ctx: int = Field(
+        default=1024,
+        validation_alias=AliasChoices("query_expander_n_ctx", "expander_n_ctx"),
+    )
+    query_expander_n_threads: Optional[int] = Field(
+        default=None,
+        validation_alias=AliasChoices("query_expander_n_threads", "expander_n_threads"),
+    )
+
+    # Cross-Encoder Reranker Configuration
+    reranker_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("reranker_enabled", "cross_encoder_enabled"),
+    )
+    reranker_repo_id: str = Field(
+        default="ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF",
+        validation_alias=AliasChoices("reranker_repo_id", "cross_encoder_repo_id"),
+    )
+    reranker_filename: str = Field(
+        default="qwen3-reranker-0.6b-q8_0.gguf",
+        validation_alias=AliasChoices("reranker_filename", "cross_encoder_filename"),
+    )
+    reranker_n_ctx: int = Field(
+        default=1024,
+        validation_alias=AliasChoices("reranker_n_ctx", "cross_encoder_n_ctx"),
+    )
+    reranker_n_threads: Optional[int] = Field(
+        default=None,
+        validation_alias=AliasChoices("reranker_n_threads", "cross_encoder_n_threads"),
+    )
+    reranker_candidate_multiplier: int = Field(
+        default=3,
+        validation_alias=AliasChoices("reranker_candidate_multiplier", "candidate_multiplier"),
+    )
+
+    # Models Cache Directory
+    models_cache_dir: Optional[Path] = Field(
+        default=None,
+        validation_alias=AliasChoices("models_cache_dir", "model_cache_dir"),
+    )
+
+    @property
+    def resolved_models_dir(self) -> Path:
+        """Directory for downloaded GGUF models."""
+        if self.models_cache_dir:
+            return Path(self.models_cache_dir)
+        return self.data_dir / "models"
+
     @property
     def active_provider(self) -> str:
         """Normalized LLM provider name ('openrouter', 'mistral', etc.)."""
@@ -152,3 +213,4 @@ settings.data_dir.mkdir(exist_ok=True)
 settings.cache_dir.mkdir(exist_ok=True)
 settings.gem_repos_dir.mkdir(parents=True, exist_ok=True)
 settings.graphrag_dir.mkdir(parents=True, exist_ok=True)
+settings.resolved_models_dir.mkdir(parents=True, exist_ok=True)

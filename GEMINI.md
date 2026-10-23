@@ -14,7 +14,7 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
   - `storage/`: Multi-backend storage (SQLite + JSON) for inventory and results, plus a persistent GraphRAG session store (`storage/session_storage.py`).
 - **Persistent GraphRAG Sessions**: Conversations, retrieved-node citations, and execution traces persist in `data/sessions.sqlite` (`rag_sessions`, `rag_messages`, `rag_traces` tables, auto-created on first use). The TUI chat tab auto-restores the most recent session on open and offers New Session / Delete Session buttons; every turn is indexed into txtai as a `session_turn` document.
 - **Interactive Explorer (TUI)**: A feature-rich Textual-based UI for browsing, filtering, and managing gem classifications.
-- **Contextual GraphRAG (TUI Chat)**: Spins up an ephemeral container (`rubygemdb-indexer:latest`) to extract AST symbol hierarchies (`rubydex`) and structured documentation (`decode`) from shallow-cloned gem repositories (with `.gem` unpack fallback), embedding results into ephemeral `txtai` vector stores with two-stage grounded retrieval, persistent sessions, and markdown/JSON transcript export.
+- **Contextual GraphRAG (TUI Chat)**: Spins up an ephemeral container (`rubygemdb-indexer:latest`) to extract AST symbol hierarchies (`rubydex`) and structured documentation (`decode`) from shallow-cloned gem repositories (with `.gem` unpack fallback), embedding results into ephemeral `txtai` vector stores with two-stage grounded retrieval (optionally local-GGUF query expansion and cross-encoder reranking, both off by default), persistent sessions, and markdown/JSON transcript export.
 
 - **Codebase Memory MCP**: Native integration with the codebase-memory-mcp server to ground LLM-generated integration plans in the actual architectural structure of target projects.
 - **Other Steve Prompt Architect**: A highly aggressive system persona that intercepts raw user queries, strips out conversational slop, and generates concrete, SFL-compliant queries for the txtai vector database.
@@ -38,6 +38,8 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
     MISTRAL_API_KEY="your_mistral_key" # For LLM classification (read by core/config.py)
     CONTEXT7_API_KEY="your_context7_key" # For cheatsheet generation in TUI
     ```
+
+    Optional retrieval-quality stages (both off by default): set `QUERY_EXPANSION_ENABLED` / `RERANKER_ENABLED` to enable local GGUF query expansion and cross-encoder reranking. Models download lazily from Hugging Face into `data/models/`; retrieval degrades to baseline when they are unavailable.
 
 ### Execution Commands
 
@@ -80,10 +82,11 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
 
 ### Caching Strategy
 - `rubygemdb.sqlite`: Central SQLite database for inventory, verified results, and manual metadata updates (Source URIs, Context7 IDs).
-- `gem_cache.json`: Caches raw responses from the RubyGems API.
-- `llm_cache.json`: Caches prompts and responses from the LLM classifier.
+- `data/cache/gem_cache.json`: Caches raw responses from the RubyGems API.
+- `data/cache/llm_cache.json`: Caches prompts and responses from the LLM classifier.
 - `classified_gems.json`: A unified JSON export of all classified gems for TUI consumption.
 - `sessions.sqlite`: Persistent GraphRAG session store (`data/sessions.sqlite`; `rag_sessions`, `rag_messages`, `rag_traces` tables, auto-created on first use).
+- `data/models/`: Local GGUF model cache for query expansion and reranking (lazily downloaded from Hugging Face).
 
 ### Classification Logic
 - **Heuristics First**: Gems are first matched against keyword rules and scored by description text and txtai embedding similarity against category descriptions (e.g., `nokogiri` -> `document_parsing`).

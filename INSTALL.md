@@ -67,6 +67,7 @@ $ rubygemdb-tui gems-inventory.csv
 - Python 3.14+
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
 - Ollama with `embeddinggemma` model (for agent features; the MCP server runs FTS5-first without Ollama and loads embeddings lazily only when keyword search returns nothing)
+- Optional: local GGUF models for query expansion and cross-encoder reranking — no manual setup; when `QUERY_EXPANSION_ENABLED` or `RERANKER_ENABLED` is set, the models (~1.1 GB and ~640 MB) download lazily from Hugging Face into `data/models/`
 
 <details>
 <summary><strong>uv (Recommended)</strong></summary>
@@ -215,7 +216,23 @@ RUBYGEMDB_AGENT_MODEL=mistral/mistral-small-latest
 PROJECT_ROOT=./
 DATA_DIR=./data
 CACHE_DIR=./data/cache
+
+# Query Expansion & Cross-Encoder Reranking (optional, off by default)
+QUERY_EXPANSION_ENABLED=false
+QUERY_EXPANDER_REPO_ID=mradermacher/qmd-query-expansion-1.7B-GGUF
+QUERY_EXPANDER_FILENAME=qmd-query-expansion-1.7B.Q4_K_M.gguf
+QUERY_EXPANDER_N_CTX=1024
+# QUERY_EXPANDER_N_THREADS=      # unset = llama.cpp default
+RERANKER_ENABLED=false
+RERANKER_REPO_ID=ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF
+RERANKER_FILENAME=qwen3-reranker-0.6b-q8_0.gguf
+RERANKER_N_CTX=1024
+# RERANKER_N_THREADS=           # unset = llama.cpp default
+RERANKER_CANDIDATE_MULTIPLIER=3 # candidate pool = top_k × multiplier, clamped 15–50
+# MODELS_CACHE_DIR=             # unset = ./data/models
 ```
+
+Legacy aliases (`EXPANDER_*`, `CROSS_ENCODER_*`, `CANDIDATE_MULTIPLIER`, `MODEL_CACHE_DIR`) are also accepted. Both stages fall back to baseline retrieval when the models are disabled, missing, or fail at runtime.
 
 ---
 
@@ -257,6 +274,8 @@ uv run mypy src/rubygemdb/
 - `sqlite-vec` >= 0.1.9 — SQLite vector extension
 - `pyyaml` >= 6.0.3 — YAML serialization
 - `mcp` >= 1.29.0 — Model Context Protocol server (official SDK; provides `mcp.server.fastmcp`)
+- `huggingface_hub` >= 0.28.0 — Hugging Face Hub GGUF model download (query expansion & reranking)
+- `llama-cpp-python` >= 0.3.0 — Local GGUF inference for query expansion and cross-encoder reranking
 
 ### Development
 
@@ -295,5 +314,6 @@ nokogiri,1.15.0,,HTML/XML parser,...
 | `data/cache/gem_cache.json` | RubyGems API response cache |
 | `data/cache/llm_cache.json` | LLM prompt/response cache |
 | `data/txtai/` | Vector embedding index |
+| `data/models/` | Local GGUF model cache (query expansion & reranker weights, lazily downloaded from Hugging Face) |
 | `data/mcp.pid` | MCP daemon PID file (`data/mcp.json` sidecar records host/port) |
 | `data/mcp.log` | MCP daemon log |

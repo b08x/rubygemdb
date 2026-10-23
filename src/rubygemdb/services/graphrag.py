@@ -16,6 +16,8 @@ from rubygemdb.core.config import settings
 from rubygemdb.services.chunking import ChunkConfig, RecursiveParentChildChunker
 from rubygemdb.services.container_runner import ContainerRunner
 from rubygemdb.services.gem_fetcher import GemFetcher
+from rubygemdb.services.query_expander import QueryExpander, default_query_expander
+from rubygemdb.services.reranker import CrossEncoderReranker, default_reranker
 
 logger = logging.getLogger("rubygemdb.graphrag")
 
@@ -36,12 +38,16 @@ class GraphRAGService:
         container_runner: Optional[ContainerRunner] = None,
         base_dir: Optional[Path] = None,
         embeddings: Optional[Any] = None,
+        query_expander: Optional[QueryExpander] = None,
+        reranker: Optional[CrossEncoderReranker] = None,
     ):
         self.gem_fetcher = gem_fetcher or GemFetcher()
         self.container_runner = container_runner or ContainerRunner()
         self.base_dir = base_dir or settings.graphrag_dir
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self._embeddings = embeddings
+        self.query_expander = query_expander
+        self.reranker = reranker
 
         # In-memory graph structures
         self.active_gems: List[str] = []
@@ -298,45 +304,72 @@ class GraphRAGService:
         query: str,
         top_k: int = 5,
         expand_hops: int = 1,
+        query_expander: Optional[QueryExpander] = None,
+        reranker: Optional[CrossEncoderReranker] = None,
     ) -> Dict[str, Any]:
         """Two-stage GraphRAG retrieval: semantic vector search + 1-hop graph neighborhood."""
         if not self.nodes_by_id:
             return {"primary_nodes": [], "expanded_nodes": [], "edges": []}
 
-        primary_node_ids: List[str] = []
+        active_expander = query_expander or self.query_expander or default_query_expander
+        active_reranker = reranker or self.reranker or default_reranker
+
+        # Dynamic candidate pool size clamped between 15 and 50
+        candidate_k = max(15, min(50, top_k * settings.reranker_candidate_multiplier))
+
+        expansion = None
+        if active_expander.is_enabled:
+            try:
+                expansion = active_expander.expand(query)
+            except Exception as e:
+                logger.warning("GraphRAG query expansion failed: %s", e)
+
+        candidate_node_ids: List[str] = []
 
         # Stage 1: Vector search
         if self._embeddings is not None and hasattr(self._embeddings, "search"):
-            try:
-                hits = self._embeddings.search(query, top_k * 4)
-                for h in hits:
-                    parent_nid = None
-                    raw_id = ""
-                    if isinstance(h, (tuple, list)) and len(h) >= 1:
-                        raw_id = str(h[0])
-                    elif isinstance(h, dict):
-                        parent_nid = h.get("parent_node_id") or h.get("node_id")
-                        raw_id = str(h.get("id") or "")
-                    else:
-                        continue
+            vector_queries = [query]
+            if expansion and expansion.vector:
+                for vq in expansion.vector:
+                    if vq and vq not in vector_queries:
+                        vector_queries.append(vq)
 
-                    nid = parent_nid or raw_id
-                    if nid not in self.nodes_by_id:
-                        for candidate_nid in self.nodes_by_id:
-                            if raw_id.startswith(f"{candidate_nid}_"):
-                                nid = candidate_nid
-                                break
+            for vq in vector_queries:
+                try:
+                    hits = self._embeddings.search(vq, candidate_k)
+                    for h in hits:
+                        parent_nid = None
+                        raw_id = ""
+                        if isinstance(h, (tuple, list)) and len(h) >= 1:
+                            raw_id = str(h[0])
+                        elif isinstance(h, dict):
+                            parent_nid = h.get("parent_node_id") or h.get("node_id")
+                            raw_id = str(h.get("id") or "")
+                        else:
+                            continue
 
-                    if nid in self.nodes_by_id and nid not in primary_node_ids:
-                        primary_node_ids.append(nid)
-                    if len(primary_node_ids) >= top_k:
-                        break
-            except Exception as e:
-                logger.warning("Vector search fallback to keyword scan: %s", e)
+                        nid = parent_nid or raw_id
+                        if nid not in self.nodes_by_id:
+                            for candidate_nid in self.nodes_by_id:
+                                if raw_id.startswith(f"{candidate_nid}_"):
+                                    nid = candidate_nid
+                                    break
+
+                        if nid in self.nodes_by_id and nid not in candidate_node_ids:
+                            candidate_node_ids.append(nid)
+                        if len(candidate_node_ids) >= candidate_k:
+                            break
+                except Exception as e:
+                    logger.warning("Vector search fallback to keyword scan: %s", e)
+                if len(candidate_node_ids) >= candidate_k:
+                    break
 
         # Fallback keyword scan if vector search returns no results or is unavailable
-        if not primary_node_ids:
+        if not candidate_node_ids:
             query_terms = [t.lower() for t in query.split() if len(t) > 2]
+            if expansion and expansion.lexical:
+                for lt in expansion.lexical:
+                    query_terms.extend([t.lower() for t in lt.split() if len(t) > 2])
             scored = []
             for nid, node in self.nodes_by_id.items():
                 text_blob = f"{node.get('name', '')} {json.dumps(node.get('data', {}))}".lower()
@@ -344,11 +377,44 @@ class GraphRAGService:
                 if score > 0:
                     scored.append((score, nid))
             scored.sort(reverse=True)
-            primary_node_ids = [nid for _, nid in scored[:top_k]]
+            candidate_node_ids = [nid for _, nid in scored[:candidate_k]]
 
         # If still empty, take top symbol nodes
-        if not primary_node_ids:
-            primary_node_ids = list(self.nodes_by_id.keys())[:top_k]
+        if not candidate_node_ids:
+            candidate_node_ids = list(self.nodes_by_id.keys())[:candidate_k]
+
+        # Stage 1.5: Cross-Encoder Reranking
+        primary_node_ids: List[str] = []
+        if active_reranker.is_enabled and candidate_node_ids:
+            candidate_nodes = [
+                self.nodes_by_id[nid] for nid in candidate_node_ids if nid in self.nodes_by_id
+            ]
+
+            def _node_to_passage(node: Dict[str, Any]) -> str:
+                name = node.get("name", "")
+                data = node.get("data", {})
+                sig = data.get("signature", "")
+                doc = data.get("docstring", "") or " ".join(data.get("comments", []))
+                qname = data.get("qualified_name", name)
+                gem = node.get("gem", "")
+                return f"{qname} (gem: {gem}) {sig} {doc}".strip()
+
+            try:
+                reranked = active_reranker.rerank(
+                    query=query,
+                    items=candidate_nodes,
+                    text_extractor=_node_to_passage,
+                    top_k=top_k,
+                )
+                primary_node_ids = [item.get("id", "") for item in reranked if item.get("id")]
+                reranked_nodes_by_id = {item["id"]: item for item in reranked if "id" in item}
+            except Exception as e:
+                logger.warning("GraphRAG reranking failed, falling back: %s", e)
+                primary_node_ids = candidate_node_ids[:top_k]
+                reranked_nodes_by_id = {}
+        else:
+            primary_node_ids = candidate_node_ids[:top_k]
+            reranked_nodes_by_id = {}
 
         # Stage 2: 1-hop graph neighborhood expansion
         expanded_node_ids: Set[str] = set()
@@ -372,7 +438,11 @@ class GraphRAGService:
         # Remove primary from expanded set to distinguish tiers
         expanded_node_ids.difference_update(primary_node_ids)
 
-        primary_nodes = [self.nodes_by_id[nid] for nid in primary_node_ids if nid in self.nodes_by_id]
+        primary_nodes = [
+            reranked_nodes_by_id.get(nid, self.nodes_by_id[nid])
+            for nid in primary_node_ids
+            if nid in self.nodes_by_id
+        ]
         expanded_nodes = [self.nodes_by_id[nid] for nid in sorted(expanded_node_ids) if nid in self.nodes_by_id]
 
         return {

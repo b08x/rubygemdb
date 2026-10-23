@@ -73,6 +73,9 @@ src/rubygemdb/
 │   ├── gem_fetcher.py  # Git shallow-cloner with .gem unpack fallback
 │   ├── graphrag.py     # Two-stage GraphRAG retrieval & prompt synthesizer
 │   ├── hybrid_search.py # SQLite FTS5 + txtai vector search, RRF fusion
+│   ├── query_expander.py # Local GGUF query expansion → lexical/vector variations (off by default)
+│   ├── reranker.py     # Local GGUF cross-encoder reranking of candidates (off by default)
+│   ├── model_manager.py # Hugging Face GGUF download + llama.cpp instance cache (data/models/)
 │   ├── classifier.py   # Keyword/description/embedding classification + sub-category faceting
 │   ├── embedding_scorer.py # txtai embedding similarity vs category descriptions
 │   ├── prune.py        # Overlap/stale gem prune reports
@@ -189,6 +192,13 @@ export MISTRAL_API_KEY="your_mistral_key"
 export CONTEXT7_API_KEY="your_context7_key"
 ```
 
+Optional retrieval-quality stages (both off by default; GGUF models download lazily from Hugging Face into `data/models/` on first use):
+```bash
+export QUERY_EXPANSION_ENABLED="true"  # expand queries into lexical/vector variations (mradermacher/qmd-query-expansion-1.7B-GGUF)
+export RERANKER_ENABLED="true"         # cross-encoder rerank of the candidate pool (ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF)
+```
+Further knobs: `QUERY_EXPANDER_REPO_ID` / `QUERY_EXPANDER_FILENAME` / `QUERY_EXPANDER_N_CTX` / `QUERY_EXPANDER_N_THREADS`, `RERANKER_REPO_ID` / `RERANKER_FILENAME` / `RERANKER_N_CTX` / `RERANKER_N_THREADS`, `RERANKER_CANDIDATE_MULTIPLIER` (default 3; candidate pool = top_k × multiplier, clamped 15–50), and `MODELS_CACHE_DIR` (default `data/models/`). Legacy aliases `EXPANDER_*`, `CROSS_ENCODER_*`, `CANDIDATE_MULTIPLIER`, and `MODEL_CACHE_DIR` are also accepted. Both stages degrade to baseline retrieval when disabled, missing, or failing — no exceptions surface to callers.
+
 ---
 
 ## Classification Logic
@@ -197,7 +207,7 @@ export CONTEXT7_API_KEY="your_context7_key"
 ### Dynamic RAG Workflow
 1. User enters a query (optionally selecting a target codebase project from the TUI dropdown).
 2. The query is processed by the "Other Steve" Prompt Architect to generate strict, SFL-compliant semantic variations.
-3. The variations are searched against the `txtai` database (documents carry `category` and `layer` metadata), applying a 30% recency boost for updated gems.
+3. The variations are searched against the `txtai` database (documents carry `category` and `layer` metadata), applying a 30% recency boost for updated gems. When `QUERY_EXPANSION_ENABLED` is on, the local GGUF `QueryExpander` adds lexical/vector variations of its own (multi-pass, RRF-fused over an oversampled candidate pool); when `RERANKER_ENABLED` is on, the fused candidates are re-scored by the local cross-encoder before truncation. Both stages are off by default and fall back to baseline retrieval when their models are unavailable.
 4. For back-end tooling queries, results are presented grouped by layer (substrate first, quality last), and recommendations start from the category `base_gems` seeds before context-specific gems.
 5. If a target project is selected, the agent calls `get_architecture` and `search_graph` via Codebase Memory MCP to inspect the target structure.
 6. The agent synthesizes the Context7 cheatsheets, semantic gem matches, and actual codebase structure to output a strict Pragmatic Implementation Backlog.
@@ -226,8 +236,8 @@ The Mistral LLM API is always consulted to generate the agent description; the h
 ## Caching Strategy
 
 Local cache files:
-1. `gem_cache.json`: Raw RubyGems API responses
-2. `llm_cache.json`: SHA256-hashed LLM prompt/response pairs
+1. `data/cache/gem_cache.json`: Raw RubyGems API responses
+2. `data/cache/llm_cache.json`: SHA256-hashed LLM prompt/response pairs
 3. `classified_gems.json`: Persisted TUI classification results
 4. `data/rubygemdb.sqlite`: Central SQLite database for inventory and classified gems (the `classified_gems` table carries a `sub_categories` column, auto-added by migration on existing databases)
 5. `data/txtai/`: Layer-aware txtai embedding index
@@ -235,6 +245,7 @@ Local cache files:
 7. `data/prune-report.md`: Approval-gated overlap/stale gem report
 8. `data/mcp.pid` + `data/mcp.json` + `data/mcp.log`: MCP daemon PID file, host/port sidecar, and daemon log
 9. `data/sessions.sqlite`: Persistent GraphRAG session store (`rag_sessions`, `rag_messages`, `rag_traces` tables, auto-created on first use via `SessionStorage`; separate from the gem catalog, which stays read-only)
+10. `data/models/`: Local GGUF model cache for query expansion and reranking (lazily downloaded from Hugging Face via `services/model_manager.py`; the directory is auto-created at startup)
 
 ---
 
@@ -285,7 +296,7 @@ Per-category YAML files contain structured gem classification data:
 
 1. **Confidence Thresholds**: Heuristic results <0.7 trigger LLM processing; LLM results must have >0.6 confidence to override heuristics
 2. **Cache Persistence**: Cache files are automatically saved after successful API/LLM calls
-3. **Rate Limiting**: Built-in delays between API requests: 0.1s between RubyGems calls, 0.2s between LLM calls
+3. **Rate Limiting**: Built-in delays between API requests: 0.5s between RubyGems calls, 0.5s between LLM calls
 4. **Batch Size**: Default LLM batch size is 10 for efficient bulk processing
 5. **TUI Requirements**: CSV input only required for first run to populate SQLite database
 
