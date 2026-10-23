@@ -1,3 +1,26 @@
+data/txtai/rubygems_index/documents
+data/txtai/rubygems_index/embeddings
+data/rubygemdb.sqlite
+.env
+.venv/
+
 .codemap/
 **__pycache__**
 
+output/
+
+graphify-out/
+data/cache
+
+.omm
+scratch/
+data/
+
+*.html
+*.json
+.trackboi/
+
+patch_*
+RESEARCH-QUERIES.md
+
+.gemini/

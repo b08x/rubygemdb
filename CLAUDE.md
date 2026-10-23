@@ -9,32 +9,59 @@ RubyGemDB is a Ruby gem analysis and classification tool that categorizes gems i
 ## Architecture
 
 ### Core Classification System
-- **8 Architectural Categories**: runtime_substrate, framework_integration, boundary_interface, application_capability, policy_enforcement, observability, developer_experience, build_delivery
-- **Heuristic Analysis**: Pattern-based classification using gem names, dependencies, and metadata
-- **LLM Fallback**: Devstral LLM integration for ambiguous cases (confidence < 0.7)
+- **21 Functional Categories** (defined in `src/rubygemdb/models/categories.py`, each with a stack layer): web_frameworks, http_networking, servers_concurrency, background_jobs, persistence, document_parsing, document_generation, static_site_generation, cli_libraries, testing_qa, code_quality_typing, runtime_validation, developer_tools, ai_llm, mcp_tooling, text_search, security_auth, media_processing, gui_desktop, native_bindings, core_extensions
+- **Stack Layers**: every category is tagged substrate / plumbing / composition / quality so results can be presented as a layered stack for back-end tooling design
+- **Scoring Pipeline**: keyword rules (name + dependencies) + RubyGems description-text scoring + txtai embedding similarity against category descriptions; best score wins. After the primary category is chosen, a taxonomy-driven pass (`GemClassifier.detect_sub_categories`) matches the category's `sub_categories` vocabulary against the gem's name, description, and dependencies
+- **LLM Refinement**: the Mistral/Devstral LLM is always consulted for the agent description; heuristic confidence < 0.7 is what lets its category (confidence > 0.6) override the heuristic pick
 - **Confidence Scoring**: Risk assessment based on invasiveness, coupling, and abstraction leak potential
 
 ### Data Flow
-1. CSV input → RubyGems API → Heuristic classification → LLM enhancement → YAML output
-2. Caching layers for both API responses (`gem_cache.json`) and LLM responses (`llm_cache.json`)
-3. Results cached in `classified_gems.json` for TUI persistence
+1. CSV input → RubyGems API → Heuristic classification → LLM enhancement → SQLite/YAML output
+2. Caching layers for both API responses (`data/cache/gem_cache.json`) and LLM responses (`llm_cache.json`)
+3. Results cached in `data/classified_gems.json` and SQLite database for TUI persistence
 
 ### Key Components
-- `gem_classifier.py`: CLI batch processor with progress tracking
-- `gem_classifier_tui.py`: Interactive Textual-based TUI with gem explorer
-- Robust API helpers with exponential backoff and retry logic
-- Context7 integration for generating gem usage cheatsheets
+```
+src/rubygemdb/
+├── cli.py              # Command-line interface entry point
+├── agent.py            # Advisor wiring: card/intent/reason LLMs + tool-calling agent
+├── ui/tui.py          # Interactive Textual-based TUI with gem explorer + advisor chat
+├── core/config.py     # Settings and environment variable handling  
+├── models/gem.py      # Pydantic data models for gem data
+├── models/phases.py   # skeleton/input/processing/output phase mapping (search filters)
+├── services/          # Core business logic
+│   ├── advisor.py     # Card-driven advisor session state machine
+│   ├── advisor_export.py # Markdown + JSON export of advisor sessions
+│   ├── hybrid_search.py # SQLite FTS5 + txtai vector search, RRF fusion
+│   ├── classifier.py  # Heuristic and LLM classification logic
+│   ├── rubygems.py    # RubyGems API client with caching
+│   ├── llm.py         # Devstral LLM client for fallback classification
+│   └── context7.py    # Context7 API client for cheatsheet generation
+└── storage/           # Data persistence layer
+    ├── base.py        # Storage interface
+    ├── json_storage.py# JSON file storage implementation
+    └── sqlite_storage.py # SQLite storage implementation (primary)
+```
+
+### Advisor Chat (TUI chat tab)
+The chat tab is a card-driven project-brief advisor, not a general chatbot:
+1. User submits a project brief; the advisor extracts a structured requirement card — deliverable, inputs, transforms, outputs, constraints, open questions — (may ask one clarifying question when the brief is too vague) and shows it for review
+2. On `go`, each searchable slot runs its own hybrid search restricted to its build phase's categories (deliverable → skeleton, inputs → input, transforms → processing, outputs → output; `models/phases.py` is now purely a search-filter taxonomy). Every card item is searched separately and merged by best score
+3. The whole stack is proposed at once, grouped by slot, with one-line reasons. Retrieval is hybrid (txtai vectors + SQLite FTS5, RRF K=60): the FTS match is AND-joined before falling back to OR, and the phase's category bucket is narrowed to the categories the query's tokens target (`hybrid_search.narrow_categories`)
+4. Stack actions: `accept` (confirm the whole stack), `remove <gem>`, `add <gem>` (manually include an inventoried gem that was never offered), `swap <gem> for <gem>` (within a slot), `retry <slot> <focus>` (re-search a slot; without a named slot the focus infers it from targeted categories), `edit <slot> ...` (change the card; only affected slots re-search), `ask <gem> <question>`, `start over`. Any other message is answered conversationally by the intent LLM, which also suggests the next action
+5. Export writes `output/chat_exports/chat_<timestamp>.md` and `.json` with brief, card, stack by slot, and transcript; Clear resets the session
+
+State lives in `services/advisor.py` (`AdvisorSession`, stages brief → card → stack → done); `agent.py` supplies the LLM-backed card extractor, intent parser, reason generator, and the tool-calling agent that answers `ask` questions.
 
 ## Common Development Tasks
 
-### Running the CLI Classifier
+### Installation and Setup
 ```bash
-python gem_classifier.py <gems.csv> [--out output_directory]
-```
+# Install dependencies with uv (recommended)
+uv sync --dev
 
-### Running the TUI Explorer
-```bash
-python gem_classifier_tui.py <gems.csv>
+# Or with pip
+pip install -e .
 ```
 
 ### Environment Setup
@@ -44,25 +71,77 @@ export DEVSTRAL_API_KEY="your_key"        # For LLM classification
 export CONTEXT7_API_KEY="your_key"        # For cheatsheet generation
 ```
 
-### Input Data Format
-CSV files must contain either:
-- `name` column (primary) or `gem` column  
-- Optional `group` column for development/test context
+### Running the CLI Classifier
+Process a CSV of gem names and generate YAML output reports:
+```bash
+# As installed package
+rubygemdb gems-inventory.csv --out output/
+
+# Direct module execution
+python -m rubygemdb gems-inventory.csv --out output/
+
+# With uv
+uv run rubygemdb gems-inventory.csv --out output/
+```
+
+### Running the TUI Explorer
+Launch interactive terminal UI for browsing and managing classified gems:
+```bash
+# As installed package
+rubygemdb-tui [optional-gems-inventory.csv]
+
+# Direct module execution  
+python -m rubygemdb.ui.tui [optional-gems-inventory.csv]
+
+# With uv
+uv run rubygemdb-tui [optional-gems-inventory.csv]
+```
+
+### Development Workflow
+```bash
+# Lint code
+uv run ruff check src/rubygemdb/
+
+# Type checking
+uv run mypy src/rubygemdb/
+
+# Run formatter
+uv run ruff format src/rubygemdb/
+
+# Test with sample data
+uv run rubygemdb data/gems-inventory.csv --out test-output/
+```
 
 ## Classification Logic
 
-### Heuristic Patterns
-- **Runtime Substrate**: Core libraries (active_support, dry-*, core_ext)
-- **Framework Integration**: Rails ecosystem (railties, sidekiq, engines)
-- **Boundary Interface**: External service connectors (http, faraday, aws, stripe)
-- **Policy Enforcement**: Authentication/authorization (pundit, jwt, auth)
-- **Observability**: Monitoring/logging (sentry, datadog, newrelic)
-- **Developer Experience**: Development tools (rspec, rubocop, pry, tty-)
+### Heuristic Signals
+- **Keyword rules** (from `models/categories.py`): gem-name token matches score 0.8; dependency substring matches score 0.65
+- **Description scoring**: RubyGems `info` term hits against category keywords/descriptions (≤ 0.6)
+- **Embedding similarity**: txtai vectors vs category description vectors (≤ 0.6)
+- **Sub-category faceting**: `detect_sub_categories` scores the winning category's facet vocabulary (example gems and sub-slug tokens) against name, description, and dependencies; kept facets persist in `classified_gems.sub_categories`
+- **Defaults**: unmatched gems fall to `core_extensions` at 0.4 confidence
 
 ### Confidence Thresholds
-- High confidence (>0.7): Use heuristic classification
-- Low confidence (<0.7): Queue for LLM batch processing
+- High confidence (>0.7): Keep heuristic classification (the LLM still generates the agent description)
+- Low confidence (<0.7): The LLM's category may override the heuristic pick
 - LLM confidence threshold: 0.6 to override heuristics
+
+## Input Data Format
+
+CSV files must contain either:
+- `name` column (primary) or `gem` column  
+- Optional columns: `group`, `category`, `description`, `homepage`, `source_code_uri`, `context7_id`
+
+## Storage and Caching Strategy
+
+### Primary Storage
+- **SQLite Database**: `data/rubygemdb.sqlite` - Central storage for inventory and classified gems; the `classified_gems` table carries a `sub_categories` column (auto-added by migration on existing databases)
+- **YAML Output**: Per-category files in output directory for batch processing results
+
+### Caching Layers
+- **API Cache**: `data/cache/gem_cache.json` - Persistent cache for RubyGems API responses
+- **LLM Cache**: `llm_cache.json` - SHA256-hashed prompt caching for LLM responses (temperature 0)
+- **Results Cache**: `data/classified_gems.json` - Persists TUI state between sessions
 
 ## TUI Interface Features
 
@@ -76,23 +155,7 @@ CSV files must contain either:
 - Generate usage cheatsheets for selected gems
 - Saves to `/home/b08x/Workspace/Tools/cheatsheets/`
 - Requires CONTEXT7_API_KEY environment variable
-
-## Caching Strategy
-
-### API Caching (`gem_cache.json`)
-- Persistent cache for RubyGems API responses
-- Automatic cache saving after successful requests
-- Handles cache loading/saving with absolute paths
-
-### LLM Caching (`llm_cache.json`) 
-- SHA256-hashed prompt caching for LLM responses
-- Prevents redundant API calls for identical classification prompts
-- Temperature 0 ensures deterministic results
-
-### Results Caching (`classified_gems.json`)
-- Persists TUI state between sessions
-- Enables incremental classification updates
-- Supports bulk operations without re-processing
+- Library IDs are repo-anchored: `verify_library` canonicalizes IDs to `/owner/repo` form derived from the gem's source/homepage repo URL, preferring an exact repo-path match over the first search result
 
 ## Error Handling Patterns
 
@@ -106,14 +169,6 @@ CSV files must contain either:
 - `LLM_RATE_DELAY = 0.2` seconds between LLM requests  
 - `LLM_BATCH_SIZE = 10` for efficient bulk processing
 
-## Development Dependencies
-
-Python packages (install via pip):
-- `requests` - HTTP client for RubyGems/LLM APIs
-- `rich` - Terminal formatting and progress bars
-- `textual` - TUI framework for gem_classifier_tui.py
-- `pyyaml` - YAML output generation
-
 ## Output Structure
 
 ### YAML Files
@@ -122,7 +177,8 @@ Classification results saved as `{category}.yaml` in output directory:
 - name: gem_name
   classification:
     primary: category_name
-    secondary: null
+    confidence: 0.85
+    sub_categories: [terminal_styling]
   role:
     description: "Gem description from RubyGems"
     attaches_to: "category_prefix"
@@ -139,7 +195,7 @@ Classification results saved as `{category}.yaml` in output directory:
 ## Debugging Tips
 
 ### API Issues
-- Check `gem_cache.json` for cached responses
+- Check `data/cache/gem_cache.json` for cached responses
 - Verify RubyGems API connectivity: `curl "https://rubygems.org/api/v1/gems/{name}.json"`
 - Monitor rate limiting with request delays
 

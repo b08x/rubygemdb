@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict
 
 class GemSignals(BaseModel):
     rails: bool = False
@@ -9,6 +9,7 @@ class GemSignals(BaseModel):
 class GemClassification(BaseModel):
     primary: str
     secondary: Optional[str] = None
+    sub_categories: List[str] = Field(default_factory=list)
     confidence: float = 0.0
 
 class GemRisks(BaseModel):
@@ -25,6 +26,10 @@ class GemEntry(BaseModel):
     signals: GemSignals = Field(default_factory=GemSignals)
     dependencies: List[str] = Field(default_factory=list)
     description: Optional[str] = None
+    homepage: Optional[str] = None
+    source_code_uri: Optional[str] = None
+    context7_id: Optional[str] = None
+    preferred: bool = False
 
 class GemInventoryItem(BaseModel):
     name: str
@@ -32,4 +37,5 @@ class GemInventoryItem(BaseModel):
     category: Optional[str] = None
     description: Optional[str] = None
     homepage: Optional[str] = None
+    source_code_uri: Optional[str] = None
     context7_id: Optional[str] = None

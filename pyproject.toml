@@ -1,6 +1,6 @@
 [project]
 name = "rubygemdb"
-version = "0.1.0"
+version = "0.5.0"
 description = "Ruby gem analysis and classification tool"
 readme = "README.md"
 authors = [
@@ -14,7 +14,26 @@ dependencies = [
     "pyyaml>=6.0.3",
     "requests>=2.33.1",
     "rich>=14.3.3",
-    "textual>=8.2.3",
+    "sqlite-vec>=0.1.9",
+    "textual==8.2.3",
+    "txtai[agent,pipeline,similarity]>=9.13.0",
+]
+
+[project.optional-dependencies]
+cpu = [
+    "torch",
+    "torchvision",
+    "torchaudio",
+]
+cuda = [
+    "torch",
+    "torchvision",
+    "torchaudio",
+]
+cu126 = [
+    "torch",
+    "torchvision",
+    "torchaudio",
 ]
 
 [project.scripts]
@@ -22,7 +41,7 @@ rubygemdb = "rubygemdb.cli:run_cli"
 rubygemdb-tui = "rubygemdb.ui.tui:run_tui"
 
 [build-system]
-requires = ["uv_build>=0.9.28,<0.10.0"]
+requires = ["uv_build>=0.9.28,<0.13.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
@@ -33,6 +52,48 @@ dev = [
     "pytest-mock>=3.15.1",
     "ruff>=0.15.10",
 ]
-
 [tool.hatch.build.targets.wheel]
 packages = ["src/rubygemdb"]
+
+[tool.uv]
+conflicts = [
+    [
+        { extra = "cpu" },
+        { extra = "cuda" },
+    ],
+    [
+        { extra = "cpu" },
+        { extra = "cu126" },
+    ],
+    [
+        { extra = "cuda" },
+        { extra = "cu126" },
+    ],
+]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu126", extra = "cuda" },
+    { index = "pytorch-cu126", extra = "cu126" },
+]
+torchvision = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu126", extra = "cuda" },
+    { index = "pytorch-cu126", extra = "cu126" },
+]
+torchaudio = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu126", extra = "cuda" },
+    { index = "pytorch-cu126", extra = "cu126" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
