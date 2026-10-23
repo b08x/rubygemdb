@@ -123,7 +123,7 @@ def search_gems(
     Args:
         query: Free-text search query (e.g. 'html parser', 'terminal ui', 'jwt auth').
         category: Optional category slug (e.g. 'document_parsing', 'cli_libraries', 'ai_llm').
-        phase: Optional build phase (e.g. 'substrate', 'plumbing', 'composition', 'quality', etc.).
+        phase: Optional build phase filter ('skeleton', 'input', 'processing', 'output').
         limit: Maximum number of results to return (default: 10).
     """
     db_uri = f"file:{Path(settings.sqlite_db_file).resolve()}?mode=ro"

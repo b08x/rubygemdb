@@ -1,3 +1,24 @@
+## [0.6.0] - 2026-10-23
+
+### 🚀 Features
+
+- Add native Model Context Protocol (MCP) server support with `rubygemdb-mcp` executable CLI entrypoint
+- Support standard input/output (stdio) transport by default for host agent child-process spawning
+- Add background SSE daemon lifecycle management (`--daemon start|status|stop`, `--sse`, `--foreground`)
+- Expose read-only MCP tools: `search_gems` (instant FTS5 + lazy vector fallback), `get_gem`, `compose_stack`, and `list_categories`
+- Expose static MCP resources: `rubygemdb://taxonomy` and `rubygemdb://stack-seeds`
+- Expose MCP prompt template: `design-ruby-stack` for structured layered architecture design
+- Enforce strictly read-only SQLite storage connections and guards across MCP operations
+
+### 📚 Documentation
+
+- Document MCP server usage, CLI flags, daemon artifacts, and read-only storage contract in README.md, GEMINI.md, and AGENTS.md
+- Add ready-to-copy MCP configuration snippets for Claude Code, Antigravity, Cursor, and SSE clients
+
+### 🧪 Testing
+
+- Add automated test suite in `tests/test_mcp.py` covering tool calls, resources, prompts, and daemon lifecycle routines
+
 ## [0.5.0] - 2026-10-23
 
 ### 🚀 Features

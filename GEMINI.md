@@ -69,7 +69,9 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
   uv run rubygemdb-mcp --daemon start --port 8011
   uv run rubygemdb-mcp --daemon status
   uv run rubygemdb-mcp --daemon stop
+  uv run rubygemdb-mcp --sse                 # shortcut for --daemon start
   ```
+  Other flags: `--transport stdio|sse` (default `stdio`), `--host` (default `127.0.0.1`), `--port` (default `8000`), `--foreground`, `--pid-file` (default `data/mcp.pid`), `--log-file` (default `data/mcp.log`). All tools are strictly read-only: SQLite `mode=ro` connections; mutating storage methods raise `PermissionError`.
 
 ## Development Conventions
 
