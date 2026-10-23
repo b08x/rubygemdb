@@ -48,22 +48,26 @@ Return JSON only:
 """
 
     def call_llm(self, prompt: str) -> Optional[dict]:
-        if not settings.mistral_api_key:
+        api_key = settings.llm_api_key
+        if not api_key:
             return None
             
         key = self._prompt_hash(prompt)
         if key in self.cache:
             return self.cache[key]
 
-        headers = {"Authorization": f"Bearer {settings.mistral_api_key}"}
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
         payload: dict[str, Any] = {
-            "model": settings.rubygemdb_model,
+            "model": settings.active_model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0
         }
 
         try:
-            r = requests.post(settings.llm_endpoint, json=payload, headers=headers, timeout=10)
+            r = requests.post(settings.active_llm_endpoint, json=payload, headers=headers, timeout=15)
             if r.status_code == 200:
                 text = r.json()["choices"][0]["message"]["content"]
                 # Handle possible markdown backticks in LLM response

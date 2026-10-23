@@ -62,7 +62,7 @@ class StackService:
         if not index_path.exists():
             return None
         try:
-            embeddings = Embeddings(path="ollama/embeddinggemma", backend="sqlite", content=True, gpu=settings.txtai_gpu)
+            embeddings = Embeddings(path=settings.embedding_model_path, backend="sqlite", content=True, gpu=settings.txtai_gpu)
             embeddings.load(str(index_path))
             return embeddings
         except Exception:

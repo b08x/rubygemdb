@@ -1,3 +1,5 @@
+import os
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
 from typing import Optional, Union
@@ -5,14 +7,97 @@ from typing import Optional, Union
 class Settings(BaseSettings):
     # API Keys
     mistral_api_key: Optional[str] = None
+    openrouter_api_key: Optional[str] = None
     context7_api_key: Optional[str] = None
     
-    # Endpoints
-    llm_endpoint: str = "https://api.mistral.ai/v1/chat/completions"
-    rubygemdb_model: str = "mistral-medium-latest"
-    rubygemdb_agent_model: str = "mistral/mistral-small-latest"
+    # Endpoints & Models
+    rubygemdb_provider: str = Field(
+        default="openrouter",
+        validation_alias=AliasChoices("rubygemdb_provider", "provider"),
+    )
+    llm_endpoint: Optional[str] = None
+    rubygemdb_model: str = Field(
+        default="upstage/solar-mini4",
+        validation_alias=AliasChoices("rubygemdb_model", "model"),
+    )
+    rubygemdb_agent_model: str = Field(
+        default="openrouter/z-ai/glm-5.3-flash",
+        validation_alias=AliasChoices("rubygemdb_agent_model", "agent_model"),
+    )
+
+    rubygemdb_embedding_provider: Optional[str] = Field(
+        default="ollama",
+        validation_alias=AliasChoices("rubygemdb_embedding_provider", "embedding_provider"),
+    )
+    rubygemdb_embedding_model: str = Field(
+        default="embeddinggemma-2:440m",
+        validation_alias=AliasChoices("rubygemdb_embedding_model", "embedding_model"),
+    )
+    embedding_chunk_size: int = 500
     rubygems_api_url: str = "https://rubygems.org/api/v1/gems/{name}.json"
     rubygems_search_url: str = "https://rubygems.org/api/v1/search.json?query={query}"
+
+    # Chunking Configuration
+    chunk_parent_mode: str = "paragraph"
+    chunk_parent_max_chars: int = 4000
+    chunk_child_max_chars: int = 512
+    chunk_child_overlap_chars: int = 50
+    chunk_normalize_whitespace: bool = True
+    chunk_strip_urls_emails: bool = False
+
+    @property
+    def active_provider(self) -> str:
+        """Normalized LLM provider name ('openrouter', 'mistral', etc.)."""
+        return self.rubygemdb_provider.strip().lower()
+
+    @property
+    def active_model(self) -> str:
+        """Active primary LLM model for classification and generation."""
+        return self.rubygemdb_model.strip()
+
+    @property
+    def active_agent_model(self) -> str:
+        """Active agent model configured for LiteLLM (with provider prefix if needed)."""
+        m = self.rubygemdb_agent_model.strip()
+        if self.active_provider == "openrouter" and not m.startswith("openrouter/"):
+            return f"openrouter/{m}"
+        return m
+
+    @property
+    def llm_api_key(self) -> Optional[str]:
+        """Resolves the active API key according to the configured provider."""
+        if self.active_provider == "openrouter":
+            return self.openrouter_api_key or os.environ.get("OPENROUTER_API_KEY")
+        if self.active_provider == "mistral":
+            return self.mistral_api_key or os.environ.get("MISTRAL_API_KEY")
+        return (
+            self.openrouter_api_key
+            or os.environ.get("OPENROUTER_API_KEY")
+            or self.mistral_api_key
+            or os.environ.get("MISTRAL_API_KEY")
+        )
+
+    @property
+    def active_llm_endpoint(self) -> str:
+        """Resolves the chat completion endpoint for LLMService."""
+        if self.llm_endpoint:
+            return self.llm_endpoint
+        if self.active_provider == "openrouter":
+            return "https://openrouter.ai/api/v1/chat/completions"
+        return "https://api.mistral.ai/v1/chat/completions"
+
+    @property
+    def embedding_model_path(self) -> str:
+        """Derives the full model path for txtai Embeddings from .env (e.g. 'ollama/embeddinggemma-2:440m')."""
+        model = (self.rubygemdb_embedding_model or "").strip()
+        provider = (self.rubygemdb_embedding_provider or "").strip()
+        if not model:
+            return "ollama/embeddinggemma-2:440m"
+        if "/" in model:
+            return model
+        if provider:
+            return f"{provider}/{model}"
+        return model
     
     # Delays & Batches
     rate_limit_delay: float = 0.5

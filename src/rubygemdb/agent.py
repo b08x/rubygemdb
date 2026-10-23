@@ -1,4 +1,3 @@
-import re
 import os
 import json
 import sqlite3
@@ -13,6 +12,7 @@ from rubygemdb.services.rubygems import RubyGemsService
 from rubygemdb.services.stack import guess_category
 from rubygemdb.services.hybrid_search import build_fts_index, ensure_fts_index, hybrid_search
 from rubygemdb.services.graphrag import GraphRAGService
+from rubygemdb.services.chunking import RecursiveParentChildChunker, ChunkConfig
 from rubygemdb.models.categories import CATEGORY_BY_SLUG
 from rubygemdb.core.config import settings
 
@@ -20,39 +20,21 @@ from rubygemdb.core.config import settings
 rubygems_service = RubyGemsService()
 
 def create_child_chunks(text: str, max_chars: int = 512) -> list[str]:
-    """Splits a parent text into child chunks based on paragraphs and sentences."""
+    """Splits a parent text into child chunks using RecursiveParentChildChunker."""
     if not text:
         return []
-    
-    # Split by paragraphs (double newlines)
-    paragraphs = re.split(r'\n\s*\n', text)
-    chunks = []
-    
-    for p in paragraphs:
-        p = p.strip()
-        if not p:
-            continue
-            
-        if len(p) <= max_chars:
-            chunks.append(p)
-            continue
-            
-        # If paragraph is too long, split by sentence boundaries (.!?)
-        sentences = re.split(r'(?<=[.!?])\s+', p)
-        current_chunk = ""
-        
-        for sentence in sentences:
-            if len(current_chunk) + len(sentence) + 1 <= max_chars:
-                current_chunk += (sentence + " ") if current_chunk else sentence
-            else:
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
-                current_chunk = sentence
-                
-        if current_chunk:
-            chunks.append(current_chunk.strip())
-            
-    return chunks
+    overlap = min(settings.chunk_child_overlap_chars, max(0, max_chars - 1))
+    config = ChunkConfig(
+        child_max_chars=max_chars,
+        child_overlap_chars=overlap,
+        parent_mode="full_doc",
+        normalize_whitespace=settings.chunk_normalize_whitespace,
+        strip_urls_emails=settings.chunk_strip_urls_emails,
+    )
+    chunker = RecursiveParentChildChunker(config=config)
+    preview = chunker.preview_chunks(text)
+    chunks = [c.text for p in preview.parent_chunks for c in p.children]
+    return chunks or [text]
 
 
 
@@ -97,7 +79,7 @@ class TxtaiAgent:
         # - Reciprocal Rank Fusion (rrf) configured
         
         self.embeddings = Embeddings(
-            path="ollama/embeddinggemma",
+            path=settings.embedding_model_path,
             backend="sqlite",
             content=True,
             hybrid=True,
@@ -130,7 +112,7 @@ class TxtaiAgent:
             ensure_fts_index(self.db_path)
             return
 
-        print("Building txtai index from SQLite...")
+        print(f"Building txtai index from SQLite using {settings.embedding_model_path}...")
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
@@ -144,6 +126,9 @@ class TxtaiAgent:
                 LEFT JOIN classified_gems c ON i.name = c.name
             """)
             rows = cursor.fetchall()
+            total_rows = len(rows)
+            chunk_size = settings.embedding_chunk_size or 500
+            total_chunks = (total_rows + chunk_size - 1) // chunk_size if total_rows else 1
             
             # Load gem_cache.json for last updated date
             import json
@@ -152,12 +137,27 @@ class TxtaiAgent:
                 with open("data/cache/gem_cache.json", "r") as f:
                     gem_cache = json.load(f)
             
+            # Initialize chunker for recursive parent-child indexing
+            chunk_config = ChunkConfig(
+                parent_mode=settings.chunk_parent_mode,
+                parent_max_chars=settings.chunk_parent_max_chars,
+                child_max_chars=settings.chunk_child_max_chars,
+                child_overlap_chars=settings.chunk_child_overlap_chars,
+                normalize_whitespace=settings.chunk_normalize_whitespace,
+                strip_urls_emails=settings.chunk_strip_urls_emails,
+            )
+            chunker = RecursiveParentChildChunker(config=chunk_config)
+
             def stream_data():
                 for i, row in enumerate(rows):
+                    if i % chunk_size == 0:
+                        chunk_idx = (i // chunk_size) + 1
+                        chunk_end = min(i + chunk_size, total_rows)
+                        print(f"Vectorizing inventory chunk {chunk_idx}/{total_chunks} (gems {i + 1}-{chunk_end} of {total_rows})...")
                     gem_name = row["name"]
                     gem_info = gem_cache.get(gem_name, {})
                     updated_at = gem_info.get("version_created_at", "2000-01-01T00:00:00.000Z")
-                    # Parent chunk is the full description
+                    # Parent text is the description or gem name
                     parent_text = row["description"] or f"Ruby gem {gem_name}"
 
                     # Stack layer metadata from the classified category
@@ -172,26 +172,43 @@ class TxtaiAgent:
                     cat = CATEGORY_BY_SLUG[category]
                     layer = cat.layer
 
-                    # Split into child chunks for fine-grained retrieval
-                    child_chunks = create_child_chunks(parent_text, max_chars=512)
-                    if not child_chunks:
-                        child_chunks = [parent_text]
+                    preview = chunker.preview_chunks(parent_text, doc_id=gem_name)
+                    has_children = False
+                    for p_idx, parent_chunk in enumerate(preview.parent_chunks):
+                        for c_idx, child_chunk in enumerate(parent_chunk.children):
+                            has_children = True
+                            searchable_text = f"Gem Name: {gem_name}\nDescription: {child_chunk.text}"
+                            document = {
+                                "id": f"{gem_name}_{p_idx}_{c_idx}",
+                                "text": searchable_text,  # Used for vector retrieval
+                                "name": gem_name,
+                                "source_code_uri": row["source_code_uri"],
+                                "context7_id": row["context7_id"],
+                                "parent_id": parent_chunk.parent_id,
+                                "child_id": child_chunk.chunk_id,
+                                "parent_text": parent_chunk.text,  # Parent chunk stored for context recall
+                                "type": "gem",
+                                "category": category,
+                                "layer": layer,
+                                "updated_at": updated_at,
+                            }
+                            yield document
 
-                    for chunk_idx, child_text in enumerate(child_chunks):
-                        # Prepend the gem name to the chunk so the embedding captures both
-                        searchable_text = f"Gem Name: {gem_name}\nDescription: {child_text}"
-
+                    if not has_children:
+                        searchable_text = f"Gem Name: {gem_name}\nDescription: {parent_text}"
                         document = {
-                            "id": f"{gem_name}_{chunk_idx}",
-                            "text": searchable_text, # Used for vector retrieval
+                            "id": f"{gem_name}_0_0",
+                            "text": searchable_text,
                             "name": gem_name,
                             "source_code_uri": row["source_code_uri"],
                             "context7_id": row["context7_id"],
-                            "parent_text": parent_text, # Parent chunk stored for context recall
+                            "parent_id": f"{gem_name}_p0",
+                            "child_id": f"{gem_name}_p0_c0",
+                            "parent_text": parent_text,
                             "type": "gem",
                             "category": category,
                             "layer": layer,
-                            "updated_at": updated_at
+                            "updated_at": updated_at,
                         }
                         yield document
             
@@ -211,31 +228,55 @@ class TxtaiAgent:
         """Chunks and dynamically indexes new text into the embedding database."""
         if not text or not self.embeddings:
             return
-            
+
         import time
         import uuid
-        
-        child_chunks = create_child_chunks(text, max_chars=512)
-        if not child_chunks:
-            child_chunks = [text]
-            
-        docs = []
+
+        chunk_config = ChunkConfig(
+            parent_mode=settings.chunk_parent_mode,
+            parent_max_chars=settings.chunk_parent_max_chars,
+            child_max_chars=settings.chunk_child_max_chars,
+            child_overlap_chars=settings.chunk_child_overlap_chars,
+            normalize_whitespace=settings.chunk_normalize_whitespace,
+            strip_urls_emails=settings.chunk_strip_urls_emails,
+        )
+        chunker = RecursiveParentChildChunker(config=chunk_config)
         base_id = str(uuid.uuid4())
-        
-        for idx, child_text in enumerate(child_chunks):
+        preview = chunker.preview_chunks(text, doc_id=base_id)
+
+        docs = []
+        for p_idx, parent_chunk in enumerate(preview.parent_chunks):
+            for c_idx, child_chunk in enumerate(parent_chunk.children):
+                doc = {
+                    "id": f"{doc_type}_{base_id}_{p_idx}_{c_idx}",
+                    "text": child_chunk.text,
+                    "parent_id": parent_chunk.parent_id,
+                    "child_id": child_chunk.chunk_id,
+                    "parent_text": parent_chunk.text,
+                    "type": doc_type,
+                    "timestamp": time.time(),
+                }
+                if metadata:
+                    doc.update(metadata)
+                docs.append(doc)
+
+        if not docs and text:
             doc = {
-                "id": f"{doc_type}_{base_id}_{idx}",
-                "text": child_text,
+                "id": f"{doc_type}_{base_id}_0_0",
+                "text": text,
+                "parent_id": f"{base_id}_p0",
+                "child_id": f"{base_id}_p0_c0",
                 "parent_text": text,
                 "type": doc_type,
-                "timestamp": time.time()
+                "timestamp": time.time(),
             }
             if metadata:
                 doc.update(metadata)
             docs.append(doc)
-            
-        self.embeddings.upsert(docs)
-        self.embeddings.save(self.index_path)
+
+        if docs:
+            self.embeddings.upsert(docs)
+            self.embeddings.save(self.index_path)
 
     def build_index(self):
         """Forces a rebuild of the txtai index."""
@@ -245,10 +286,10 @@ class TxtaiAgent:
     def agent(self) -> ToolCallingAgent:
         """Lazy-initialize the Agent LLM on first use."""
         if self._agent is None:
-            model_id = settings.rubygemdb_agent_model
+            model_id = settings.active_agent_model
             
             # Instantiate native LiteLLMModel for proper tool-calling support
-            self.model = LiteLLMModel(model_id=model_id)
+            self.model = LiteLLMModel(model_id=model_id, api_key=settings.llm_api_key)
 
             c7_mcp = MCPClient(
                 StdioServerParameters(command="npx", args=["-y", "@upstash/context7-mcp"]),
@@ -322,7 +363,7 @@ Rules:
     def _ensure_model(self) -> LiteLLMModel:
         """Lazily create the LiteLLM model shared by the agent."""
         if self.model is None:
-            self.model = LiteLLMModel(model_id=settings.rubygemdb_agent_model)
+            self.model = LiteLLMModel(model_id=settings.active_agent_model, api_key=settings.llm_api_key)
         return self.model
 
     def _llm_json(self, system_prompt: str, user_prompt: str) -> dict | None:
@@ -345,30 +386,46 @@ Rules:
             return None
 
     def _vector_search(self, query: str, categories: list[str] | None, limit: int) -> list[dict]:
-        """txtai similarity search restricted to gem documents (and optionally categories)."""
+        """txtai similarity search over child chunks, deduplicated by parent gem."""
         safe_query = query.replace("'", "''")
+        req_limit = max(1, int(limit))
+        candidate_limit = max(req_limit * 4, 20)
         sql = (
-            "SELECT name, category, layer, parent_text, source_code_uri, context7_id, score "
+            "SELECT id, name, category, layer, parent_text, source_code_uri, context7_id, score "
             "FROM txtai WHERE similar('" + safe_query + "')"
         )
         if categories:
             cat_list = ", ".join("'" + c.replace("'", "''") + "'" for c in categories)
             sql += f" AND category IN ({cat_list})"
-        sql += f" LIMIT {max(1, int(limit))}"
-        hits = []
+        sql += f" LIMIT {candidate_limit}"
+
+        seen_gems: dict[str, dict] = {}
         for res in self.embeddings.search(sql):
-            if res.get("type") != "gem":
+            if res.get("type") and res.get("type") != "gem":
                 continue
-            hits.append({
-                "name": res.get("name"),
-                "description": res.get("parent_text", ""),
-                "category": res.get("category"),
-                "layer": res.get("layer"),
-                "source_code_uri": res.get("source_code_uri"),
-                "context7_id": res.get("context7_id"),
-                "score": res.get("score", 0.0),
-            })
-        return hits
+            gem_name = res.get("name")
+            if not gem_name:
+                continue
+            score = float(res.get("score", 0.0))
+            if gem_name not in seen_gems:
+                seen_gems[gem_name] = {
+                    "name": gem_name,
+                    "description": res.get("parent_text", ""),
+                    "category": res.get("category"),
+                    "layer": res.get("layer"),
+                    "source_code_uri": res.get("source_code_uri"),
+                    "context7_id": res.get("context7_id"),
+                    "score": score,
+                }
+            elif score > seen_gems[gem_name]["score"]:
+                seen_gems[gem_name]["score"] = score
+                if res.get("parent_text"):
+                    seen_gems[gem_name]["description"] = res.get("parent_text")
+
+            if len(seen_gems) >= req_limit:
+                break
+
+        return list(seen_gems.values())[:req_limit]
 
     def _fetch_gem(self, name: str) -> dict | None:
         """Case-insensitive inventory lookup for named gems."""

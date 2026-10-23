@@ -63,7 +63,7 @@ def _get_lazy_vector_search() -> Optional[SearchCallable]:
                 from txtai import Embeddings  # type: ignore
 
                 embeddings = Embeddings(
-                    path="ollama/embeddinggemma",
+                    path=settings.embedding_model_path,
                     backend="sqlite",
                     content=True,
                     gpu=settings.txtai_gpu,

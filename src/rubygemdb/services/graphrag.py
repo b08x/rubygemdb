@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from rubygemdb.core.config import settings
+from rubygemdb.services.chunking import ChunkConfig, RecursiveParentChildChunker
 from rubygemdb.services.container_runner import ContainerRunner
 from rubygemdb.services.gem_fetcher import GemFetcher
 
@@ -58,7 +59,7 @@ class GraphRAGService:
         from txtai import Embeddings  # type: ignore
 
         embeddings = Embeddings(
-            path="ollama/embeddinggemma",
+            path=settings.embedding_model_path,
             backend="sqlite",
             content=True,
             gpu=settings.txtai_gpu,
@@ -138,12 +139,15 @@ class GraphRAGService:
         self._index_graph_memory()
 
         # 3. Build ephemeral vector index in txtai
-        msg = f"Building txtai semantic vector index for {len(self.nodes_by_id)} symbols and doc tags..."
+        msg = (
+            f"Building txtai semantic vector index for {len(self.nodes_by_id)} symbols and doc tags "
+            f"(model: {settings.embedding_model_path})..."
+        )
         logger.info(msg)
         if progress_callback:
             progress_callback(msg)
 
-        self._build_vector_index(txtai_dir)
+        self._build_vector_index(txtai_dir, progress_callback=progress_callback)
 
         if progress_callback:
             progress_callback(
@@ -170,11 +174,26 @@ class GraphRAGService:
             if tgt:
                 self.edges_by_target.setdefault(tgt, []).append(edge)
 
-    def _build_vector_index(self, txtai_dir: Path) -> None:
-        """Create txtai vector embeddings for indexable nodes."""
+    def _build_vector_index(
+        self,
+        txtai_dir: Path,
+        progress_callback: Optional[Callable[[str], None]] = None,
+        chunk_size: Optional[int] = None,
+    ) -> None:
+        """Create txtai vector embeddings for indexable nodes with chunk progress."""
         txtai_dir.mkdir(parents=True, exist_ok=True)
         embeddings = self._get_or_create_embeddings(txtai_dir)
         self._embeddings = embeddings
+
+        chunk_config = ChunkConfig(
+            parent_mode="full_doc",
+            parent_max_chars=settings.chunk_parent_max_chars,
+            child_max_chars=settings.chunk_child_max_chars,
+            child_overlap_chars=settings.chunk_child_overlap_chars,
+            normalize_whitespace=settings.chunk_normalize_whitespace,
+            strip_urls_emails=settings.chunk_strip_urls_emails,
+        )
+        chunker = RecursiveParentChildChunker(config=chunk_config)
 
         documents = []
         for nid, node in self.nodes_by_id.items():
@@ -208,16 +227,66 @@ class GraphRAGService:
             else:
                 continue
 
-            documents.append({
-                "id": nid,
-                "text": searchable_text,
-                "type": ntype,
-                "gem": gem,
-                "node_id": nid,
-            })
+            # If searchable_text exceeds child_max_chars, chunk into child chunks referencing parent node_id
+            if len(searchable_text) > settings.chunk_child_max_chars:
+                preview = chunker.preview_chunks(searchable_text, doc_id=nid)
+                has_children = False
+                for p_idx, parent_chunk in enumerate(preview.parent_chunks):
+                    for c_idx, child_chunk in enumerate(parent_chunk.children):
+                        has_children = True
+                        documents.append({
+                            "id": f"{nid}_{p_idx}_{c_idx}",
+                            "text": child_chunk.text,
+                            "type": ntype,
+                            "gem": gem,
+                            "node_id": nid,
+                            "parent_node_id": nid,
+                            "parent_text": parent_chunk.text,
+                        })
+                if not has_children:
+                    documents.append({
+                        "id": nid,
+                        "text": searchable_text,
+                        "type": ntype,
+                        "gem": gem,
+                        "node_id": nid,
+                        "parent_node_id": nid,
+                    })
+            else:
+                documents.append({
+                    "id": nid,
+                    "text": searchable_text,
+                    "type": ntype,
+                    "gem": gem,
+                    "node_id": nid,
+                    "parent_node_id": nid,
+                })
 
-        if documents and hasattr(embeddings, "index"):
-            embeddings.index(documents)
+        total_docs = len(documents)
+        if not total_docs:
+            return
+
+        batch_size = chunk_size or settings.embedding_chunk_size or 500
+        total_chunks = (total_docs + batch_size - 1) // batch_size
+
+        def document_stream():
+            for i in range(0, total_docs, batch_size):
+                chunk_num = (i // batch_size) + 1
+                chunk_slice = documents[i : i + batch_size]
+                chunk_start = i + 1
+                chunk_end = min(i + batch_size, total_docs)
+                chunk_msg = (
+                    f"Vectorizing chunk {chunk_num}/{total_chunks} "
+                    f"({chunk_start}-{chunk_end} of {total_docs} symbols & doc tags)..."
+                )
+                logger.info(chunk_msg)
+                if progress_callback:
+                    progress_callback(chunk_msg)
+                for doc in chunk_slice:
+                    yield doc
+
+        if hasattr(embeddings, "index"):
+            embeddings.index(document_stream())
             if hasattr(embeddings, "save"):
                 try:
                     embeddings.save(str(txtai_dir))
@@ -239,14 +308,25 @@ class GraphRAGService:
         # Stage 1: Vector search
         if self._embeddings is not None and hasattr(self._embeddings, "search"):
             try:
-                hits = self._embeddings.search(query, top_k * 2)
+                hits = self._embeddings.search(query, top_k * 4)
                 for h in hits:
+                    parent_nid = None
+                    raw_id = ""
                     if isinstance(h, (tuple, list)) and len(h) >= 1:
-                        nid = str(h[0])
+                        raw_id = str(h[0])
                     elif isinstance(h, dict):
-                        nid = str(h.get("id") or h.get("node_id"))
+                        parent_nid = h.get("parent_node_id") or h.get("node_id")
+                        raw_id = str(h.get("id") or "")
                     else:
                         continue
+
+                    nid = parent_nid or raw_id
+                    if nid not in self.nodes_by_id:
+                        for candidate_nid in self.nodes_by_id:
+                            if raw_id.startswith(f"{candidate_nid}_"):
+                                nid = candidate_nid
+                                break
+
                     if nid in self.nodes_by_id and nid not in primary_node_ids:
                         primary_node_ids.append(nid)
                     if len(primary_node_ids) >= top_k:

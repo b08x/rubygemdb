@@ -1,0 +1,15 @@
+- A ChunkConfig data model defines parent mode ('paragraph' or 'full_doc'), parent_max_chars (default 4000), child_max_chars (default 512), child_overlap_chars (default 50), delimiter cascade hierarchy, and pre-processing flags.
+- Text pre-processing normalizes consecutive whitespace and excessive newlines into clean paragraph breaks while preserving document structure.
+- Text pre-processing supports stripping URLs and email addresses with an automatic bypass for code blocks and code examples to preserve valid code syntax.
+- In 'paragraph' parent mode, documents are partitioned into parent chunks up to parent_max_chars, and each parent chunk is recursively split into child chunks.
+- In 'full_doc' parent mode, the entire document is used as a single parent chunk (up to a configured safety limit) and split directly into child chunks.
+- Recursive child splitting cascades through delimiters from paragraphs down to terminal character splits, guaranteeing no child chunk exceeds child_max_chars even on unbroken strings.
+- Child chunks maintain configurable character overlap without duplicating text indefinitely or looping on edge cases.
+- Markdown fenced code blocks are treated as atomic units where possible and only split internally if the code block itself exceeds child_max_chars.
+- A preview_chunks hook returns a hierarchical ChunkPreviewResult containing summary statistics, parent chunks, nested child chunks, and exact character offsets (parent_text[start:end] == child_text).
+- TxtaiAgent._initialize_index and TxtaiAgent.index_memory use RecursiveParentChildChunker to index child chunks with parent context linkage.
+- TxtaiAgent._vector_search queries child chunk embeddings, deduplicates hits by parent gem to the best-scoring child match, and recalls the full parent_text for context.
+- GraphRAGService._build_vector_index chunks long docstrings and code examples into child chunks referencing their parent AST node_id.
+- GraphRAGService.retrieve resolves child vector hits back to their parent AST node_id before executing 1-hop graph neighborhood expansion.
+- Application settings in core/config.py include configurable defaults for chunking parameters.
+- An automated test suite in tests/test_chunking.py verifies recursive splitting, overlap, dual parent modes, preprocessing safeguards, preview hook hierarchy, and vector search deduplication.

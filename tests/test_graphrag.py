@@ -189,3 +189,24 @@ def test_format_grounded_context(tmp_path: Path, sample_graph_data):
     assert "def start(given_args = ARGV, config = {})" in context
     assert "@parameter` `given_args` [Array(String)]" in context
     assert "MyCLI.start(ARGV)" in context
+
+
+def test_build_vector_index_chunk_progress(tmp_path: Path, sample_graph_data):
+    mock_embeddings = MagicMock()
+    # Ensure generator is consumed when index() is called
+    mock_embeddings.index.side_effect = lambda gen: list(gen)
+
+    service = GraphRAGService(base_dir=tmp_path, embeddings=mock_embeddings)
+    service.graph_data = sample_graph_data
+    service._index_graph_memory()
+
+    progress_messages = []
+    service._build_vector_index(
+        tmp_path / "txtai",
+        progress_callback=progress_messages.append,
+        chunk_size=2,
+    )
+
+    # 4 indexable nodes with chunk_size=2 -> 2 chunks
+    assert any("Vectorizing chunk 1/2" in m for m in progress_messages)
+    assert any("Vectorizing chunk 2/2" in m for m in progress_messages)
