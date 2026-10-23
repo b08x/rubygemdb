@@ -9,14 +9,24 @@
 - Exceptions raised inside a traced operation are recorded with `level=ERROR` and a status message before being re-raised
 - The CLI flushes buffered traces via `flush_tracing()` when `process`, `reclassify`, `stack`, or `build-indexer` finish, on success or failure
 - Add `langfuse>=5.0.4` runtime dependency (pulls in the OpenTelemetry SDK family)
+- Add universal embedding cache (`services/embedding_cache.py`): a content-addressable SQLite vector cache at `data/cache/embeddings_cache.sqlite`, keyed by SHA-256 of model path + text, shared across GraphRAG indexing, classifier embedding scoring, and agent sessions via `wrap_embeddings()` wrapping txtai `Embeddings` instances
+- Repeat vectorization of previously-seen texts skips the embedding model entirely — only missed texts are encoded and written through, in the original order; GraphRAG vectorization progress messages now report cache hits/misses per chunk
+- Add settings field `embeddings_cache_file` (default `data/cache/embeddings_cache.sqlite`); currently declarative only — the cache defaults to the same path independently and does not read this setting
+
+### 🐛 Bug Fixes
+
+- Fix GraphRAG "ghost cache" loading: index cache validity now requires the saved txtai `embeddings` file, not merely an existing `txtai/` directory — a partially-written cache (graph.json present, vector index missing) previously reported a successful cached load while serving an empty vector index (searches returned nothing); the same state now triggers a full rebuild
 
 ### 🧪 Testing
 
 - Add test suite `tests/test_tracing.py` covering the no-op fallback contract, span/generation creation, error capture, session-id propagation, and flush behavior
+- Add test suite `tests/test_embedding_cache.py` covering cache-key hashing, single/batch put/get roundtrips, stats and clear, the wrap lifecycle (an all-hit turn performs zero calls to the underlying model), and idempotent double-wrapping
+- Add `test_build_or_load_index_ghost_cache_rebuilds` to `tests/test_graphrag.py`: a ghost cache state (graph.json and `txtai/` present, `embeddings` file missing) must trigger a rebuild
 
 ### 📚 Documentation
 
 - Document Langfuse configuration and tracing behavior in README.md, CLAUDE.md, and INSTALL.md (AGENTS.md and GEMINI.md were updated alongside the code in the same commit)
+- Document the universal embedding cache and the GraphRAG cache-validity fix in README.md, AGENTS.md, CLAUDE.md, GEMINI.md, and INSTALL.md
 
 ## [0.8.0] - 2026-10-23
 

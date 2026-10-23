@@ -321,6 +321,7 @@ nokogiri,1.15.0,,HTML/XML parser,...
 | `output/cheatsheets/*.md` | Context7 documentation cheatsheets |
 | `data/cache/gem_cache.json` | RubyGems API response cache |
 | `data/cache/llm_cache.json` | LLM prompt/response cache |
+| `data/cache/embeddings_cache.sqlite` | Universal embedding vector cache (shared across GraphRAG, classification, and sessions; grows unbounded — no TTL) |
 | `data/txtai/` | Vector embedding index |
 | `data/models/` | Local GGUF model cache (query expansion & reranker weights, lazily downloaded from Hugging Face) |
 | `data/mcp.pid` | MCP daemon PID file (`data/mcp.json` sidecar records host/port) |

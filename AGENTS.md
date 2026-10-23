@@ -50,7 +50,7 @@ Each category also carries curated `base_gems` stack seeds (e.g. dotenv, drydock
 
 ### Data Flow
 1. Read gem inventory from CSV → Fetch RubyGems API data → Heuristic classification → LLM enhancement (optional) → Save results to YAML/SQLite
-2. Caching layers to minimize redundant API/LLM calls
+2. Caching layers to minimize redundant API/LLM/embedding calls
 3. Persistent storage for classified gem results
 
 ### Core Component Directory Structure
@@ -78,6 +78,7 @@ src/rubygemdb/
 │   ├── model_manager.py # Hugging Face GGUF download + llama.cpp instance cache (data/models/)
 │   ├── classifier.py   # Keyword/description/embedding classification + sub-category faceting
 │   ├── embedding_scorer.py # txtai embedding similarity vs category descriptions
+│   ├── embedding_cache.py # SQLite-backed universal embedding cache (wrap_embeddings)
 │   ├── prune.py        # Overlap/stale gem prune reports
 │   ├── stack.py        # Layered gem-stack composition
 │   ├── rubygems.py     # RubyGems API client with caching
@@ -253,6 +254,7 @@ Local cache files:
 8. `data/mcp.pid` + `data/mcp.json` + `data/mcp.log`: MCP daemon PID file, host/port sidecar, and daemon log
 9. `data/sessions.sqlite`: Persistent GraphRAG session store (`rag_sessions`, `rag_messages`, `rag_traces` tables, auto-created on first use via `SessionStorage`; separate from the gem catalog, which stays read-only)
 10. `data/models/`: Local GGUF model cache for query expansion and reranking (lazily downloaded from Hugging Face via `services/model_manager.py`; the directory is auto-created at startup)
+11. `data/cache/embeddings_cache.sqlite`: Universal content-addressable vector cache keyed by SHA-256 of model path + text, shared by GraphRAG indexing, classifier embedding scoring, and agent sessions (`services/embedding_cache.py`). Repeat vectorization of known texts skips the embedding model entirely. No TTL or size cap — the file grows until `EmbeddingCache.clear()` is called
 
 ---
 

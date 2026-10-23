@@ -41,6 +41,7 @@ src/rubygemdb/
 │   ├── model_manager.py # Hugging Face GGUF download + llama.cpp instance cache (data/models/)
 │   ├── classifier.py  # Heuristic and LLM classification logic
 │   ├── embedding_scorer.py # txtai embedding similarity vs category descriptions
+│   ├── embedding_cache.py # SQLite-backed universal embedding cache (wrap_embeddings)
 │   ├── stack.py       # Layered gem-stack composition (read_only mode for MCP)
 │   ├── prune.py       # Overlap/stale gem prune reports
 │   ├── rubygems.py    # RubyGems API client with caching
@@ -59,7 +60,7 @@ The chat tab provides on-demand, containerized GraphRAG for grounded Ruby gem ar
 1. Active gems sync dynamically from selections in the Explorer tab, displayed as badges in the Chat tab
 2. User enters an optional project intention and clicks `Build GraphRAG Context`
 3. Ephemeral container runner (`rubygemdb-indexer:latest`, Podman priority with Docker fallback) shallow-clones repositories (with `.gem` archive unpack fallback) and runs `rubydex` (AST symbols, hierarchy, calls) and `decode` (structured docstrings, `@parameter`, `@returns`, and `@example` usage blocks), outputting `graph.json`
-4. Host Python ingests `graph.json` into an ephemeral `txtai` index, cached by a deterministic SHA-256 hash of the selected gem set
+4. Host Python ingests `graph.json` into an ephemeral `txtai` index, cached by a deterministic SHA-256 hash of the selected gem set — a cache hit requires both `graph.json` and the saved txtai `embeddings` file; a partially-written cache (directory present, embeddings missing) triggers a rebuild instead of loading an empty index
 5. Queries execute two-stage retrieval: semantic vector search for top-K nodes followed by 1-hop graph neighborhood expansion across inheritance, calls, parameters, and code examples — with query expansion enabled, vector search covers the original query plus generated variations, and with the reranker enabled, candidates are re-scored by the local cross-encoder first (both off by default, degrading to baseline retrieval when models are unavailable)
 6. Conversations persist as sessions in `data/sessions.sqlite` — every turn is saved with its retrieved-node citations, indexed into txtai as a `session_turn` document, and the chat tab auto-restores the most recent session (gems, intention, history, last 200 traces) on open
 7. Answers are grounded in actual signatures and verified examples; Export writes the session transcript to `output/chat_exports/graphrag_chat_<timestamp>.md` and `.json` containing intention, gems, and conversation history
@@ -185,6 +186,7 @@ CSV files must contain either:
 - **API Cache**: `data/cache/gem_cache.json` - Persistent cache for RubyGems API responses
 - **LLM Cache**: `data/cache/llm_cache.json` - SHA256-hashed prompt caching for LLM responses (temperature 0)
 - **Results Cache**: `data/classified_gems.json` - Persists TUI state between sessions
+- **Embedding Cache**: `data/cache/embeddings_cache.sqlite` - Universal content-addressable vector cache (SHA-256 of model path + text, `services/embedding_cache.py`) shared by GraphRAG indexing, classifier embedding scoring, and agent sessions via `wrap_embeddings()`; repeat vectorization of known texts skips the embedding model. No TTL or size cap — grows until `EmbeddingCache.clear()` is called
 - **GGUF Model Cache**: `data/models/` - Query-expansion and reranker weights, lazily downloaded from Hugging Face via `services/model_manager.py`
 
 ## TUI Interface Features

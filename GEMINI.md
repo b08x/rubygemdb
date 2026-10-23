@@ -10,7 +10,7 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
   - `core/config.py`: Centralized settings using `pydantic-settings` and `.env` support.
   - `models/gem.py`: Robust data models for gem entries, classifications, and risks.
   - `models/session.py`: GraphRAG session models (`RAGSession`, `RAGMessage`, `RAGTrace`).
-  - `services/`: Specialized services for RubyGems API, LLM classification, Context7 integration, and Langfuse tracing (`services/tracing.py`).
+  - `services/`: Specialized services for RubyGems API, LLM classification, Context7 integration, Langfuse tracing (`services/tracing.py`), and a universal SQLite embedding cache (`services/embedding_cache.py`).
   - `storage/`: Multi-backend storage (SQLite + JSON) for inventory and results, plus a persistent GraphRAG session store (`storage/session_storage.py`).
 - **Persistent GraphRAG Sessions**: Conversations, retrieved-node citations, and execution traces persist in `data/sessions.sqlite` (`rag_sessions`, `rag_messages`, `rag_traces` tables, auto-created on first use). The TUI chat tab auto-restores the most recent session on open and offers New Session / Delete Session buttons; every turn is indexed into txtai as a `session_turn` document.
 - **Interactive Explorer (TUI)**: A feature-rich Textual-based UI for browsing, filtering, and managing gem classifications.
@@ -88,6 +88,7 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
 - `rubygemdb.sqlite`: Central SQLite database for inventory, verified results, and manual metadata updates (Source URIs, Context7 IDs).
 - `data/cache/gem_cache.json`: Caches raw responses from the RubyGems API.
 - `data/cache/llm_cache.json`: Caches prompts and responses from the LLM classifier.
+- `data/cache/embeddings_cache.sqlite`: Universal content-addressable vector cache (SHA-256 of model path + text) shared by GraphRAG indexing, classifier embedding scoring, and agent sessions — repeat vectorization of known texts skips the embedding model entirely. No TTL or size cap; the file grows until `EmbeddingCache.clear()` is called.
 - `classified_gems.json`: A unified JSON export of all classified gems for TUI consumption.
 - `sessions.sqlite`: Persistent GraphRAG session store (`data/sessions.sqlite`; `rag_sessions`, `rag_messages`, `rag_traces` tables, auto-created on first use).
 - `data/models/`: Local GGUF model cache for query expansion and reranking (lazily downloaded from Hugging Face).

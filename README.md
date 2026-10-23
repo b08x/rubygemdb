@@ -149,7 +149,7 @@ The chat tab provides an on-demand, containerized GraphRAG pipeline for deep Rub
 1. **Gem Selection & Sync** — Gems selected in the Explorer tab sync dynamically into the Chat tab, displaying interactive badges.
 2. **Project Intention** — Define your architectural requirements or project context in the intention input field.
 3. **Containerized Extraction** — Clicking `Build GraphRAG Context` spins up the ephemeral `rubygemdb-indexer:latest` container (prioritizing Podman, fallback to Docker), running `Rubydex::Graph` (AST, class hierarchy, method calls) and `Decode::Index` (docstrings, `@parameter`, `@returns`, and `@example` code snippets) over mounted shallow-cloned gem repositories. If git cloning fails, the system automatically falls back to unpacking released `.gem` archives.
-4. **Ephemeral Vector Store** — Host Python ingests the normalized `graph.json` artifact into an ephemeral `txtai` index, caching the graph and vector embeddings by a deterministic hash of the selected gem set.
+4. **Ephemeral Vector Store** — Host Python ingests the normalized `graph.json` artifact into an ephemeral `txtai` index, caching the graph and vector embeddings by a deterministic hash of the selected gem set. A cache hit requires the saved txtai `embeddings` file — a partially-written cache rebuilds instead of loading empty — and vectorization itself draws on a universal embedding cache (`data/cache/embeddings_cache.sqlite`), so re-embedding known texts skips the embedding model.
 5. **Two-Stage Grounded Retrieval** — Queries execute semantic vector search for top-K symbol and example nodes, followed by 1-hop graph neighborhood expansion across inheritance, call relations, parameter types, and attached code examples. With query expansion enabled, vector search runs over the original query plus its generated variations; with the reranker enabled, the candidate nodes are re-scored by the local cross-encoder before the neighborhood expansion. Both stages are off by default and fall back to baseline retrieval when their models are unavailable.
 6. **Session Persistence** — Each conversation lives in a persistent session in `data/sessions.sqlite`: every turn is saved as it happens and indexed into txtai as a `session_turn` document, and the chat tab auto-restores the most recent session — active gems, intention, chat history, and the last 200 execution traces — on startup. New Session and Delete Session buttons manage the session list.
 7. **Transcript Export** — Export writes the session transcript to `output/chat_exports/graphrag_chat_<timestamp>.md` and `.json` containing active intention, indexed gems, full conversation history, and grounded symbol summaries.
@@ -323,6 +323,7 @@ rubygemdb/
 │   │   ├── model_manager.py # Hugging Face GGUF download & llama.cpp instance cache
 │   │   ├── classifier.py   # Heuristic + LLM classification with sub-category faceting
 │   │   ├── embedding_scorer.py # txtai embedding similarity vs category descriptions
+│   │   ├── embedding_cache.py # SQLite-backed universal embedding cache (wrap_embeddings)
 │   │   ├── stack.py        # Layered gem-stack composition
 │   │   ├── prune.py        # Overlap/stale gem prune reports
 │   │   ├── rubygems.py     # RubyGems API client
