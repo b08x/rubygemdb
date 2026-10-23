@@ -1,8 +1,8 @@
-"""Build phase taxonomy for the advisor chat.
+"""Build phase taxonomy for category classification and search filtering.
 
 Four ordered phases — skeleton, input, processing, output — with a single
 table mapping each of the 21 functional categories to exactly one phase.
-The advisor session walks phases in this order, one at a time.
+Used as an independent search filter and categorization facet.
 """
 
 PHASES = ["skeleton", "input", "processing", "output"]

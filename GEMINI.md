@@ -9,9 +9,12 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
 - **Modular Engine**: Structured under `src/rubygemdb/` for scalability:
   - `core/config.py`: Centralized settings using `pydantic-settings` and `.env` support.
   - `models/gem.py`: Robust data models for gem entries, classifications, and risks.
+  - `models/session.py`: GraphRAG session models (`RAGSession`, `RAGMessage`, `RAGTrace`).
   - `services/`: Specialized services for RubyGems API, LLM classification, and Context7 integration.
-  - `storage/`: Multi-backend storage (SQLite + JSON) for inventory and results.
+  - `storage/`: Multi-backend storage (SQLite + JSON) for inventory and results, plus a persistent GraphRAG session store (`storage/session_storage.py`).
+- **Persistent GraphRAG Sessions**: Conversations, retrieved-node citations, and execution traces persist in `data/sessions.sqlite` (`rag_sessions`, `rag_messages`, `rag_traces` tables, auto-created on first use). The TUI chat tab auto-restores the most recent session on open and offers New Session / Delete Session buttons; every turn is indexed into txtai as a `session_turn` document.
 - **Interactive Explorer (TUI)**: A feature-rich Textual-based UI for browsing, filtering, and managing gem classifications.
+- **Contextual GraphRAG (TUI Chat)**: Spins up an ephemeral container (`rubygemdb-indexer:latest`) to extract AST symbol hierarchies (`rubydex`) and structured documentation (`decode`) from shallow-cloned gem repositories (with `.gem` unpack fallback), embedding results into ephemeral `txtai` vector stores with two-stage grounded retrieval, persistent sessions, and markdown/JSON transcript export.
 
 - **Codebase Memory MCP**: Native integration with the codebase-memory-mcp server to ground LLM-generated integration plans in the actual architectural structure of target projects.
 - **Other Steve Prompt Architect**: A highly aggressive system persona that intercepts raw user queries, strips out conversational slop, and generates concrete, SFL-compliant queries for the txtai vector database.
@@ -32,7 +35,7 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
 2.  **API Keys (Required for full functionality)**:
     Create a `.env` file or export the following variables:
     ```bash
-    DEVSTRAL_API_KEY="your_mistral_key" # For LLM classification
+    MISTRAL_API_KEY="your_mistral_key" # For LLM classification (read by core/config.py)
     CONTEXT7_API_KEY="your_context7_key" # For cheatsheet generation in TUI
     ```
 
@@ -60,7 +63,7 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
   uv run rubygemdb stack "CLI data pipeline tool" --out stacks/
   ```
 - **Model Context Protocol (MCP) Server**:
-  Native MCP server running over stdio by default, or as a detached SSE daemon in the background. Exposes read-only tools (`search_gems`, `get_gem`, `compose_stack`, `list_categories`), resources (`rubygemdb://taxonomy`, `rubygemdb://stack-seeds`), and prompt (`design-ruby-stack`).
+  Native MCP server running over stdio by default, or as a detached SSE daemon in the background. Exposes catalog tools (`search_gems`, `get_gem`, `compose_stack`, `list_categories`, `build_gem_graphrag`, `query_gem_graphrag`), session tools (`list_rag_sessions`, `get_rag_session`, `resume_rag_session`, `export_rag_session_transcript`, `delete_rag_session`), resources (`rubygemdb://taxonomy`, `rubygemdb://stack-seeds`), and prompts (`design-ruby-stack`, `gem-architect-rag`).
   ```bash
   # Stdio mode (default, for host agents)
   uv run rubygemdb-mcp
@@ -71,7 +74,7 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
   uv run rubygemdb-mcp --daemon stop
   uv run rubygemdb-mcp --sse                 # shortcut for --daemon start
   ```
-  Other flags: `--transport stdio|sse` (default `stdio`), `--host` (default `127.0.0.1`), `--port` (default `8000`), `--foreground`, `--pid-file` (default `data/mcp.pid`), `--log-file` (default `data/mcp.log`). All tools are strictly read-only: SQLite `mode=ro` connections; mutating storage methods raise `PermissionError`.
+  Other flags: `--transport stdio|sse` (default `stdio`), `--host` (default `127.0.0.1`), `--port` (default `8000`), `--foreground`, `--pid-file` (default `data/mcp.pid`), `--log-file` (default `data/mcp.log`). Catalog tools are strictly read-only: SQLite `mode=ro` connections; mutating storage methods raise `PermissionError`. Session tools write only to the separate `data/sessions.sqlite` store. `build_gem_graphrag` and `query_gem_graphrag` accept an optional `session_id` (auto-generated when omitted) and return the `session_id` they recorded the turn in.
 
 ## Development Conventions
 
@@ -80,6 +83,7 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
 - `gem_cache.json`: Caches raw responses from the RubyGems API.
 - `llm_cache.json`: Caches prompts and responses from the LLM classifier.
 - `classified_gems.json`: A unified JSON export of all classified gems for TUI consumption.
+- `sessions.sqlite`: Persistent GraphRAG session store (`data/sessions.sqlite`; `rag_sessions`, `rag_messages`, `rag_traces` tables, auto-created on first use).
 
 ### Classification Logic
 - **Heuristics First**: Gems are first matched against keyword rules and scored by description text and txtai embedding similarity against category descriptions (e.g., `nokogiri` -> `document_parsing`).
@@ -91,4 +95,5 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
 ### Key Data Files
 - `data/gems-inventory.csv`: The primary input format for populating the database.
 - `data/rubygemdb.sqlite`: Persistent storage for the verified gem inventory.
+- `data/sessions.sqlite`: Persistent GraphRAG sessions, chat messages, and execution traces (separate from the gem catalog).
 - `output/cheatsheets/`: Directory for generated Context7 cheatsheets.

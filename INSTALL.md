@@ -165,6 +165,8 @@ response = agent.run("Find gems for building a REST API with rate limiting")
 print(response)
 ```
 
+Chat sessions persist across restarts: every turn is saved to `data/sessions.sqlite` and indexed for semantic search as a `session_turn` document. The TUI chat tab auto-restores the most recent session on open.
+
 ---
 
 ## Keyboard Shortcuts
@@ -287,6 +289,7 @@ nokogiri,1.15.0,,HTML/XML parser,...
 | File | Description |
 |------|-------------|
 | `data/rubygemdb.sqlite` | Primary SQLite database |
+| `data/sessions.sqlite` | Persistent GraphRAG session store (chat history, citations, traces) |
 | `output/{category}.yaml` | Classification reports by category |
 | `output/cheatsheets/*.md` | Context7 documentation cheatsheets |
 | `data/cache/gem_cache.json` | RubyGems API response cache |

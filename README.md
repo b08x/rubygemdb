@@ -18,8 +18,9 @@
 - **Heuristic + LLM Hybrid** — Fast pattern matching for obvious cases, with a Mistral-powered LLM pass that can override the heuristic category when confidence drops below 0.7
 - **Semantic Vector Search** — txtai-powered embeddings with multi-query expansion and recency boosting for finding gems by natural language description
 - **AI Agent with MCP Tools** — Context7 documentation retrieval and Codebase Memory integration via Model Context Protocol
-- **Native MCP Server** — `rubygemdb-mcp` serves the taxonomy, gem metadata, and stack composition to coding agents (Claude Code, Antigravity, Cursor) over stdio or a background SSE daemon — strictly read-only
-- **Card-Driven Advisor** — Conversational project-brief chat that extracts a structured requirement card (deliverable, inputs, transforms, outputs), proposes a layered gem stack per slot, and lets you accept, swap, remove, retry, or edit picks — exportable as markdown and JSON
+- **Native MCP Server** — `rubygemdb-mcp` serves the taxonomy, gem metadata, stack composition, and GraphRAG sessions to coding agents (Claude Code, Antigravity, Cursor) over stdio or a background SSE daemon — the gem catalog is strictly read-only
+- **Contextual GraphRAG Pipeline** — On-demand containerized extraction of AST symbol hierarchies (`rubydex`) and structured documentation (`decode`) from gem source repositories, embedded into ephemeral `txtai` vector stores with 2-stage retrieval for deeply grounded coding agent chat and MCP queries
+- **Persistent GraphRAG Sessions** — Conversations, retrieved-node citations, and execution traces persist in a dedicated `data/sessions.sqlite` store; the TUI auto-restores the most recent session on open, and MCP clients can list, inspect, resume, export, and delete sessions
 - **Interactive TUI** — Textual-based terminal UI for browsing, filtering, editing, and exporting classified gems with real-time classification
 - **Batch CLI Pipeline** — Headless processing of gem inventories with metadata verification, classification, and YAML report generation
 - **Risk Assessment** — Invasiveness, coupling, and abstraction leak scoring for architectural impact analysis
@@ -46,8 +47,8 @@ graph LR
     tui -->|"launches agent queries"| agent
     agent -->|"semantic search"| services
     agent -->|"indexes/retrieves"| storage
-    mcp -->|"serves read-only tools"| services
-    mcp -->|"reads (mode=ro)"| storage
+    mcp -->|"serves catalog (read-only) & sessions"| services
+    mcp -->|"catalog: mode=ro / sessions: rw"| storage
     services -->|"uses"| core
     services -->|"returns"| models
     storage -->|"persists"| models
@@ -134,37 +135,34 @@ Gem retrieval combines two signals fused with Reciprocal Rank Fusion (K=60):
 3. **RRF Fusion** — `services/hybrid_search.py` merges both rankings into one candidate list; degrades gracefully to whichever signal is available
 4. **Category Narrowing** — an explicit `category` slug restricts results directly; otherwise, when a phase filter is active, query tokens restrict results to the categories they actually target (stem-matched against category keywords), so a "chunk text" query no longer pulls in persistence or media gems
 
-### Advisor Conversation Flow
+### Contextual GraphRAG Flow
 
-The chat tab (`services/advisor.py`) is card-driven, not a phase walk:
+The chat tab provides an on-demand, containerized GraphRAG pipeline for deep Ruby architecture and API exploration:
 
-1. **Card** — the brief is extracted into a structured requirement card (deliverable, inputs, transforms, outputs, constraints, open questions) and shown for review. Reply `go` to propose, or edit any slot in plain English ("inputs are DOCX files, not PDFs").
-2. **Proposal** — each searchable slot runs its own hybrid search, restricted to the categories of its build phase (deliverable → skeleton, inputs → input, transforms → processing, outputs → output). Every card item is searched separately and merged by best score, so one item's keywords cannot drown out another's. The whole stack is presented at once, grouped by slot, with one-line reasons.
-3. **Iteration** — you steer the whole proposal with actions or free-form feedback:
-   - `accept` — confirm the proposed stack as the final pick
-   - `remove <gem>` — drop a gem from the proposal
-   - `add <gem> [<gem> ...]` — manually include inventoried gems that were never offered
-   - `swap <gem> for <gem>` — replace one gem with another candidate from the same slot
-   - `retry <slot> <focus>` — re-search a slot with your focus words folded into the query; if no slot is named, the focus infers the slot from the categories it targets
-   - `edit <slot> ...` — change the card; only the affected slots are re-searched
-   - `ask <gem> <question>` — LLM answer about a specific gem
-   - `start over` — reset with a new brief
-   - anything else reads as conversational feedback — the intent LLM answers it and suggests the next action
-
-Export writes `output/chat_exports/chat_<timestamp>.md` and `.json` containing the brief, the requirement card, the confirmed stack by slot, and the transcript.
+1. **Gem Selection & Sync** — Gems selected in the Explorer tab sync dynamically into the Chat tab, displaying interactive badges.
+2. **Project Intention** — Define your architectural requirements or project context in the intention input field.
+3. **Containerized Extraction** — Clicking `Build GraphRAG Context` spins up the ephemeral `rubygemdb-indexer:latest` container (prioritizing Podman, fallback to Docker), running `Rubydex::Graph` (AST, class hierarchy, method calls) and `Decode::Index` (docstrings, `@parameter`, `@returns`, and `@example` code snippets) over mounted shallow-cloned gem repositories. If git cloning fails, the system automatically falls back to unpacking released `.gem` archives.
+4. **Ephemeral Vector Store** — Host Python ingests the normalized `graph.json` artifact into an ephemeral `txtai` index, caching the graph and vector embeddings by a deterministic hash of the selected gem set.
+5. **Two-Stage Grounded Retrieval** — Queries execute semantic vector search for top-K symbol and example nodes, followed by 1-hop graph neighborhood expansion across inheritance, call relations, parameter types, and attached code examples.
+6. **Session Persistence** — Each conversation lives in a persistent session in `data/sessions.sqlite`: every turn is saved as it happens and indexed into txtai as a `session_turn` document, and the chat tab auto-restores the most recent session — active gems, intention, chat history, and the last 200 execution traces — on startup. New Session and Delete Session buttons manage the session list.
+7. **Transcript Export** — Export writes the session transcript to `output/chat_exports/graphrag_chat_<timestamp>.md` and `.json` containing active intention, indexed gems, full conversation history, and grounded symbol summaries.
 
 ### MCP Tool Integration
 
 | Tool | Purpose |
 |------|---------|
-| `search_memory_tool` | Hybrid (vector + FTS5) gem search backing the advisor's slot candidates |
+| `search_memory_tool` | Hybrid (vector + FTS5) gem search over the database |
 | `fetch_rubygems_info` | Fetch detailed gem metadata from RubyGems API |
+| `query_gem_graphrag` | 2-stage GraphRAG retrieval over indexed gem graphs |
+| `build_gem_graphrag` | Pre-warm and index AST symbols and documentation for gems |
 | Context7 MCP | Retrieve library documentation and cheatsheets |
 | Codebase Memory MCP | Search target project architecture |
 
+Chat turns made through these tools persist to the session store — `build_gem_graphrag` and `query_gem_graphrag` accept an optional `session_id` and return the id of the session they recorded the turn in.
+
 ### Agent Prompt Structure
 
-The tool-calling agent behind `ask <gem> <question>` answers gem questions only — what a gem does, whether it fits the project, how two gems compare, its risks. It does not design implementation backlogs or scaffold code; advisor state, card and stack progression, and exports are handled deterministically by `services/advisor.py`.
+The assistant grounds its answers in the exact method signatures, decode parameter types, verified code examples, and call relationships retrieved from the gem's source code graph. Answers cite exact symbol names, module nesting, and integration patterns rather than hallucinating APIs.
 
 ---
 
@@ -203,18 +201,26 @@ Daemon artifacts land in `data/`: `mcp.pid`, the `mcp.json` host/port sidecar, a
 
 ### Exposed Capabilities
 
-- **Tools (Read-Only)**:
+- **Tools**:
   - `search_gems(query, category=None, phase=None, limit=10)`: Sub-millisecond SQLite FTS5 search. `category` takes one of the 21 category slugs; `phase` takes `skeleton`, `input`, `processing`, or `output`. The txtai vector index is consulted only when FTS5 returns zero hits.
   - `get_gem(name)`: Complete architectural metadata, layer, sub-categories, agent description, dependencies, signals, and risks. Gems present in the inventory but not yet classified return the same shape with `classified: false` and zero confidence; unknown names return an `error` object.
   - `compose_stack(query)`: Composes layered gem stack manifest (substrate -> quality) and Gemfile snippet. Runs in read-only mode — curated seed gems are not written back to the inventory.
   - `list_categories()`: Lists 21 architectural categories, stack layers, descriptions, and curated base gems.
+  - `build_gem_graphrag(gems, intention="", session_id=None)`: Pre-warms and builds the containerized AST symbol and decode graph index for a set of gems; records the build in a session and returns its `session_id`.
+  - `query_gem_graphrag(gems, query, intention=None, session_id=None)`: Executes 2-stage GraphRAG retrieval over indexed gem graphs, returning exact AST signatures, decode parameter types, and code examples. Each turn is persisted with its retrieved-node citations to the session store; the response carries the `session_id`.
+  - `list_rag_sessions(limit=20)`: Lists sessions, most recently updated first.
+  - `get_rag_session(session_id)`: Full session metadata plus its messages and execution traces.
+  - `resume_rag_session(session_id)`: Resumes a session — pre-warms its gems' GraphRAG index and returns the last 5 messages. Full context restore happens in the TUI; this tool is a pre-warm plus summary.
+  - `export_rag_session_transcript(session_id, format="markdown")`: Exports a session transcript as markdown or JSON.
+  - `delete_rag_session(session_id)`: Deletes a session along with its messages and traces.
 
-Every tool opens the SQLite database read-only (`mode=ro`), and in that mode all mutating storage methods raise `PermissionError` — read-only by construction, not by convention.
+Catalog tools (`search_gems`, `get_gem`, `compose_stack`, `list_categories`) open the gem database read-only (`mode=ro`), and in that mode all mutating storage methods raise `PermissionError` — read-only by construction, not by convention. Session tools write only to the separate `data/sessions.sqlite` store; the gem catalog is never modified.
 - **Resources**:
   - `rubygemdb://taxonomy`: Markdown guide of all 21 categories, layers, and sub-category vocabularies.
   - `rubygemdb://stack-seeds`: Markdown guide of curated base gems grouped by layer.
 - **Prompts**:
   - `design-ruby-stack(project_description)`: Guided prompt for formulating queries and layering architectures.
+  - `gem-architect-rag(gems, intention, task)`: Grounded architecture prompt using containerized gem AST and decode graphs.
 
 ### Client Configuration Snippets
 
@@ -287,17 +293,19 @@ Alternatively, set `CUDA_ENABLED=true` / `CUDA_ENABLED=false` or `DEVICE=cuda` i
 rubygemdb/
 ├── src/rubygemdb/
 │   ├── cli.py              # CLI batch processor
-│   ├── agent.py            # Card-driven advisor with tool-calling agent
+│   ├── agent.py            # Contextual GraphRAG chat & tool-calling agent
 │   ├── mcp_server.py       # Native MCP server & daemon lifecycle (FastMCP)
 │   ├── core/
 │   │   └── config.py       # Pydantic Settings configuration
 │   ├── models/
 │   │   ├── gem.py          # Pydantic data models
 │   │   ├── categories.py   # Single source of truth: 21 categories, layers, sub-category facets
-│   │   └── phases.py       # skeleton/input/processing/output phase mapping
+│   │   ├── phases.py       # skeleton/input/processing/output phase mapping
+│   │   └── session.py      # RAGSession/RAGMessage/RAGTrace session models
 │   ├── services/
-│   │   ├── advisor.py      # Advisor conversation state machine
-│   │   ├── advisor_export.py # Markdown/JSON chat export
+│   │   ├── container_runner.py # Podman/Docker runner for indexer container
+│   │   ├── gem_fetcher.py  # Git shallow-cloner with .gem unpack fallback
+│   │   ├── graphrag.py     # Two-stage GraphRAG retrieval & prompt synthesizer
 │   │   ├── hybrid_search.py # FTS5 + vector search with RRF fusion
 │   │   ├── classifier.py   # Heuristic + LLM classification with sub-category faceting
 │   │   ├── embedding_scorer.py # txtai embedding similarity vs category descriptions
@@ -309,11 +317,15 @@ rubygemdb/
 │   ├── storage/
 │   │   ├── base.py         # Storage interface
 │   │   ├── json_storage.py # JSON file storage
-│   │   └── sqlite_storage.py # SQLite storage
+│   │   ├── sqlite_storage.py # SQLite storage
+│   │   └── session_storage.py # Persistent GraphRAG session store (data/sessions.sqlite)
 │   └── ui/
 │       └── tui.py          # Textual TUI application
+├── docker/
+│   ├── indexer.Dockerfile  # Ruby 4.0.4 runtime packaging rubydex, decode, bake
+│   └── extract_graph.rb    # AST symbol and documentation extraction script
 ├── tests/
-│   └── (litmus suite)      # Taxonomy + facets, classification, migration, stack, search, MCP server & daemon lifecycle
+│   └── (litmus suite)      # Taxonomy + facets, classification, GraphRAG, MCP, daemon lifecycle
 └── pyproject.toml
 ```
 

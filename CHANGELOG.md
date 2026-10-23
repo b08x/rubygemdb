@@ -1,3 +1,20 @@
+## [0.7.0] - 2026-10-23
+
+### 🚀 Features
+
+- Add persistent GraphRAG session tracking across the TUI, agent, and MCP server — sessions, chat messages, and execution traces survive restarts
+- Add dedicated session store `data/sessions.sqlite` (`rag_sessions`, `rag_messages`, `rag_traces` tables, auto-created on first use), keeping the gem catalog database strictly read-only
+- Add session models `RAGSession`, `RAGMessage`, and `RAGTrace` (`models/session.py`) and the `SessionStorage` SQLite backend (`storage/session_storage.py`)
+- Expose five session MCP tools: `list_rag_sessions`, `get_rag_session`, `resume_rag_session`, `export_rag_session_transcript`, and `delete_rag_session`
+- Add optional `session_id` parameter to `build_gem_graphrag` and `query_gem_graphrag`; both persist turns to the session store and return the `session_id`
+- Add TUI session picker with New Session / Delete Session buttons; the chat tab auto-restores the most recent session (active gems, intention, history, last 200 traces) on open
+- Index every chat turn into txtai embedding memory as a `session_turn` document tagged with its session id
+- Export session transcripts in markdown and JSON from the persistent session store
+
+### 🧪 Testing
+
+- Add test suite `tests/test_session_tracking.py` covering session storage CRUD, transcript export, agent session binding, MCP session tools, and TUI session restore
+
 ## [0.6.0] - 2026-10-23
 
 ### 🚀 Features

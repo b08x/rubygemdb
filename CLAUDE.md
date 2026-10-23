@@ -24,38 +24,41 @@ RubyGemDB is a Ruby gem analysis and classification tool that categorizes gems i
 ```
 src/rubygemdb/
 ├── cli.py              # Command-line interface entry point
-├── agent.py            # Advisor wiring: card/intent/reason LLMs + tool-calling agent
+├── agent.py            # Contextual GraphRAG chat & tool-calling agent with persistent sessions
 ├── mcp_server.py       # Native MCP server & daemon lifecycle (FastMCP)
-├── ui/tui.py          # Interactive Textual-based TUI with gem explorer + advisor chat
+├── ui/tui.py          # Interactive Textual-based TUI with gem explorer + GraphRAG chat
 ├── core/config.py     # Settings and environment variable handling  
 ├── models/gem.py      # Pydantic data models for gem data
 ├── models/phases.py   # skeleton/input/processing/output phase mapping (search filters)
+├── models/session.py  # GraphRAG session models (RAGSession, RAGMessage, RAGTrace)
 ├── services/          # Core business logic
-│   ├── advisor.py     # Card-driven advisor session state machine
-│   ├── advisor_export.py # Markdown + JSON export of advisor sessions
+│   ├── container_runner.py # Podman/Docker runner for indexer container
+│   ├── gem_fetcher.py  # Git shallow-cloner with .gem unpack fallback
+│   ├── graphrag.py     # Two-stage GraphRAG retrieval & prompt synthesizer
 │   ├── hybrid_search.py # SQLite FTS5 + txtai vector search, RRF fusion (explicit `category` filter; `phase` narrows via category keywords)
 │   ├── classifier.py  # Heuristic and LLM classification logic
 │   ├── embedding_scorer.py # txtai embedding similarity vs category descriptions
 │   ├── stack.py       # Layered gem-stack composition (read_only mode for MCP)
 │   ├── prune.py       # Overlap/stale gem prune reports
 │   ├── rubygems.py    # RubyGems API client with caching
-│   ├── llm.py         # Devstral LLM client for fallback classification
+│   ├── llm.py         # Mistral LLM client for fallback classification
 │   └── context7.py    # Context7 API client for cheatsheet generation
 └── storage/           # Data persistence layer
     ├── base.py        # Storage interface
     ├── json_storage.py# JSON file storage implementation
-    └── sqlite_storage.py # SQLite storage implementation (primary)
+    ├── sqlite_storage.py # SQLite storage implementation (primary)
+    └── session_storage.py # Persistent GraphRAG session store (data/sessions.sqlite)
 ```
 
-### Advisor Chat (TUI chat tab)
-The chat tab is a card-driven project-brief advisor, not a general chatbot:
-1. User submits a project brief; the advisor extracts a structured requirement card — deliverable, inputs, transforms, outputs, constraints, open questions — (may ask one clarifying question when the brief is too vague) and shows it for review
-2. On `go`, each searchable slot runs its own hybrid search restricted to its build phase's categories (deliverable → skeleton, inputs → input, transforms → processing, outputs → output; `models/phases.py` is now purely a search-filter taxonomy). Every card item is searched separately and merged by best score
-3. The whole stack is proposed at once, grouped by slot, with one-line reasons. Retrieval is hybrid (txtai vectors + SQLite FTS5, RRF K=60): the FTS match is AND-joined before falling back to OR, and the phase's category bucket is narrowed to the categories the query's tokens target (`hybrid_search.narrow_categories`)
-4. Stack actions: `accept` (confirm the whole stack), `remove <gem>`, `add <gem>` (manually include an inventoried gem that was never offered), `swap <gem> for <gem>` (within a slot), `retry <slot> <focus>` (re-search a slot; without a named slot the focus infers it from targeted categories), `edit <slot> ...` (change the card; only affected slots re-search), `ask <gem> <question>`, `start over`. Any other message is answered conversationally by the intent LLM, which also suggests the next action
-5. Export writes `output/chat_exports/chat_<timestamp>.md` and `.json` with brief, card, stack by slot, and transcript; Clear resets the session
-
-State lives in `services/advisor.py` (`AdvisorSession`, stages brief → card → stack → done); `agent.py` supplies the LLM-backed card extractor, intent parser, reason generator, and the tool-calling agent that answers `ask` questions.
+### Contextual GraphRAG (TUI chat tab)
+The chat tab provides on-demand, containerized GraphRAG for grounded Ruby gem architectural inquiry:
+1. Active gems sync dynamically from selections in the Explorer tab, displayed as badges in the Chat tab
+2. User enters an optional project intention and clicks `Build GraphRAG Context`
+3. Ephemeral container runner (`rubygemdb-indexer:latest`, Podman priority with Docker fallback) shallow-clones repositories (with `.gem` archive unpack fallback) and runs `rubydex` (AST symbols, hierarchy, calls) and `decode` (structured docstrings, `@parameter`, `@returns`, and `@example` usage blocks), outputting `graph.json`
+4. Host Python ingests `graph.json` into an ephemeral `txtai` index, cached by a deterministic SHA-256 hash of the selected gem set
+5. Queries execute two-stage retrieval: semantic vector search for top-K nodes followed by 1-hop graph neighborhood expansion across inheritance, calls, parameters, and code examples
+6. Conversations persist as sessions in `data/sessions.sqlite` — every turn is saved with its retrieved-node citations, indexed into txtai as a `session_turn` document, and the chat tab auto-restores the most recent session (gems, intention, history, last 200 traces) on open
+7. Answers are grounded in actual signatures and verified examples; Export writes the session transcript to `output/chat_exports/graphrag_chat_<timestamp>.md` and `.json` containing intention, gems, and conversation history
 
 ## Common Development Tasks
 
@@ -71,7 +74,7 @@ pip install -e .
 ### Environment Setup
 Required environment variables for full functionality:
 ```bash
-export DEVSTRAL_API_KEY="your_key"        # For LLM classification
+export MISTRAL_API_KEY="your_key"          # For LLM classification
 export CONTEXT7_API_KEY="your_key"        # For cheatsheet generation
 ```
 
@@ -113,7 +116,7 @@ uv run rubygemdb-mcp --daemon status
 uv run rubygemdb-mcp --daemon stop
 ```
 
-Tools (`search_gems`, `get_gem`, `compose_stack`, `list_categories`), resources (`rubygemdb://taxonomy`, `rubygemdb://stack-seeds`), and prompt (`design-ruby-stack`) are strictly read-only: SQLite connections open `mode=ro` and every mutating `SQLiteStorage` method raises `PermissionError`. The daemon writes `data/mcp.pid`, a `data/mcp.json` host/port sidecar, and `data/mcp.log`.
+Catalog tools (`search_gems`, `get_gem`, `compose_stack`, `list_categories`, `build_gem_graphrag`, `query_gem_graphrag`), resources (`rubygemdb://taxonomy`, `rubygemdb://stack-seeds`), and prompts (`design-ruby-stack`, `gem-architect-rag`) are strictly read-only against the gem database: SQLite connections open `mode=ro` and every mutating `SQLiteStorage` method raises `PermissionError`. Session tools (`list_rag_sessions`, `get_rag_session`, `resume_rag_session`, `export_rag_session_transcript`, `delete_rag_session`) write only to the separate `data/sessions.sqlite` store. `build_gem_graphrag` and `query_gem_graphrag` accept an optional `session_id` (auto-generated when omitted) and return the `session_id` they recorded the turn in. The daemon writes `data/mcp.pid`, a `data/mcp.json` host/port sidecar, and `data/mcp.log`.
 
 ### Development Workflow
 ```bash
@@ -154,7 +157,8 @@ CSV files must contain either:
 
 ### Primary Storage
 - **SQLite Database**: `data/rubygemdb.sqlite` - Central storage for inventory and classified gems; the `classified_gems` table carries a `sub_categories` column (auto-added by migration on existing databases)
-- **Read-Only Mode**: `SQLiteStorage(read_only=True, db_path=...)` opens `file:...?mode=ro` URI connections, skips schema init, and raises `PermissionError` on every mutating method — this is what the MCP server uses; `get_classified_gem(name)` / `get_inventory_gem(name)` back the `get_gem` MCP tool
+- **Session Store**: `data/sessions.sqlite` - Separate SQLite database for persistent GraphRAG sessions (`rag_sessions`, `rag_messages`, `rag_traces` tables, auto-created on first use by `storage/session_storage.py`)
+- **Read-Only Mode**: `SQLiteStorage(read_only=True, db_path=...)` opens `file:...?mode=ro` URI connections, skips schema init, and raises `PermissionError` on every mutating method — this is what the MCP server uses for the gem catalog; `get_classified_gem(name)` / `get_inventory_gem(name)` back the `get_gem` MCP tool
 - **YAML Output**: Per-category files in output directory for batch processing results
 
 ### Caching Layers
@@ -220,7 +224,7 @@ Classification results saved as `{category}.yaml` in output directory:
 
 ### LLM Classification Problems  
 - Review prompts in `llm_cache.json` using prompt hash
-- Check Devstral endpoint configuration and API key
+- Check Mistral endpoint configuration and API key (`MISTRAL_API_KEY`)
 - Validate JSON parsing of LLM responses
 
 ### TUI Navigation Issues

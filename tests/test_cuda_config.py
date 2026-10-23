@@ -84,3 +84,15 @@ def test_cli_cuda_cpu_flags():
         with patch("rubygemdb.cli.run_stack"):
             run_cli()
             assert settings.cuda_enabled is False
+
+
+def test_settings_embedding_model_derivation():
+    """Verify embedding model is properly derived from provider and model config."""
+    s1 = Settings(rubygemdb_embedding_model="embeddinggemma-2:440m", rubygemdb_embedding_provider="ollama")
+    assert s1.embedding_model_path == "ollama/embeddinggemma-2:440m"
+
+    s2 = Settings(rubygemdb_embedding_model="ollama/custom-model")
+    assert s2.embedding_model_path == "ollama/custom-model"
+
+    s3 = Settings(embedding_model="sentence-transformers/all-MiniLM-L6-v2")
+    assert s3.embedding_model_path == "sentence-transformers/all-MiniLM-L6-v2"

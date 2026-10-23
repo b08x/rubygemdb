@@ -1,6 +1,6 @@
 [project]
 name = "rubygemdb"
-version = "0.6.0"
+version = "0.7.0"
 description = "Ruby gem analysis and classification tool"
 readme = "README.md"
 authors = [
@@ -54,6 +54,9 @@ dev = [
     "pytest-mock>=3.15.1",
     "ruff>=0.15.10",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 [tool.hatch.build.targets.wheel]
 packages = ["src/rubygemdb"]
 

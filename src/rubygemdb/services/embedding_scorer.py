@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 class EmbeddingScorer:
     """Computes slug -> similarity score (0..1) for a gem text."""
 
-    def __init__(self, model_path: str = "ollama/embeddinggemma", cache_dir: Optional[str] = None):
-        self.model_path = model_path
+    def __init__(self, model_path: Optional[str] = None, cache_dir: Optional[str] = None):
+        self.model_path = model_path or settings.embedding_model_path
         self.cache_dir = cache_dir or str(settings.cache_dir / "category_vectors")
         self._embeddings = None
         self._failed = False

@@ -383,6 +383,15 @@ def run_reclassify(args):
             console.print(f"[red]Error rebuilding txtai index (is ollama up?): {e}[/red]")
 
 
+def run_build_indexer(args):
+    """Build or rebuild the GraphRAG container indexer image."""
+    from rubygemdb.services.container_runner import ContainerRunner
+    runner = ContainerRunner()
+    console.print(f"[bold cyan]Building indexer container image using {runner.runtime}...[/bold cyan]")
+    runner.build_image(progress_callback=lambda msg: console.print(f"[dim]{msg}[/dim]"))
+    console.print("[bold green]Successfully built rubygemdb-indexer:latest container image![/bold green]")
+
+
 def run_stack(args):
     """Turn a context query into a layered gem-stack manifest plus a Gemfile snippet."""
     storage = SQLiteStorage(rubygems_service=RubyGemsService(), context7_service=Context7Service())
@@ -432,6 +441,9 @@ def run_cli():
     stack_parser.add_argument("query", help="Context query, e.g. 'CLI data pipeline tool'")
     stack_parser.add_argument("--out", default=None, help="Optional directory to write stack-manifest.yaml and Gemfile")
 
+    # Build Indexer Subcommand
+    subparsers.add_parser("build-indexer", parents=[parent_parser], help="Build or rebuild the GraphRAG container indexer image")
+
     args = parser.parse_args()
 
     if getattr(args, "cuda", False):
@@ -445,6 +457,8 @@ def run_cli():
         run_reclassify(args)
     elif args.command == "stack":
         run_stack(args)
+    elif args.command == "build-indexer":
+        run_build_indexer(args)
 
 if __name__ == "__main__":
     run_cli()

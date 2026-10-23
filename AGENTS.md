@@ -56,17 +56,23 @@ Each category also carries curated `base_gems` stack seeds (e.g. dotenv, drydock
 ### Core Component Directory Structure
 ```
 src/rubygemdb/
-├── agent.py            # Layer-aware txtai RAG agent (smolagents)
+├── agent.py            # Contextual GraphRAG chat & tool-calling agent with persistent sessions
 ├── cli.py              # Command-line interface (process / reclassify / stack)
 ├── mcp_server.py       # Native MCP server & daemon lifecycle (FastMCP)
 ├── ui/
-│   └── tui.py          # Interactive Textual TUI explorer
+│   └── tui.py          # Interactive Textual TUI explorer & GraphRAG chat
 ├── core/
 │   └── config.py       # Settings and environment variable handling
 ├── models/
 │   ├── gem.py          # Pydantic data models for gem data
-│   └── categories.py   # Single source of truth: 21 categories, layers, sub-category facets
+│   ├── phases.py       # Build phase taxonomy & search filters
+│   ├── categories.py   # Single source of truth: 21 categories, layers, sub-category facets
+│   └── session.py      # GraphRAG session models (RAGSession, RAGMessage, RAGTrace)
 ├── services/
+│   ├── container_runner.py # Podman/Docker runner for indexer container
+│   ├── gem_fetcher.py  # Git shallow-cloner with .gem unpack fallback
+│   ├── graphrag.py     # Two-stage GraphRAG retrieval & prompt synthesizer
+│   ├── hybrid_search.py # SQLite FTS5 + txtai vector search, RRF fusion
 │   ├── classifier.py   # Keyword/description/embedding classification + sub-category faceting
 │   ├── embedding_scorer.py # txtai embedding similarity vs category descriptions
 │   ├── prune.py        # Overlap/stale gem prune reports
@@ -77,7 +83,11 @@ src/rubygemdb/
 └── storage/
     ├── base.py         # Storage interface
     ├── json_storage.py # JSON file storage implementation
-    └── sqlite_storage.py # SQLite storage implementation
+    ├── sqlite_storage.py # SQLite storage implementation
+    └── session_storage.py # Persistent GraphRAG session store (data/sessions.sqlite)
+docker/
+├── indexer.Dockerfile  # Ruby 4.0.4 runtime packaging rubydex, decode, bake
+└── extract_graph.rb    # Container script extracting AST symbols & structured decode docs
 ```
 
 ---
@@ -142,7 +152,7 @@ uv run rubygemdb stack "CLI data pipeline tool" --out stacks/  # also write file
 Output is advisory, not a dependency resolver. Deeper Rubysmith project generation from a stack manifest is a follow-up goal.
 
 ### MCP Server (`rubygemdb-mcp`)
-Native Model Context Protocol server exposing read-only tools (`search_gems`, `get_gem`, `compose_stack`, `list_categories`), resources (`rubygemdb://taxonomy`, `rubygemdb://stack-seeds`), and prompt template (`design-ruby-stack`):
+Native Model Context Protocol server exposing catalog tools (`search_gems`, `get_gem`, `compose_stack`, `list_categories`, `build_gem_graphrag`, `query_gem_graphrag`), session tools (`list_rag_sessions`, `get_rag_session`, `resume_rag_session`, `export_rag_session_transcript`, `delete_rag_session`), resources (`rubygemdb://taxonomy`, `rubygemdb://stack-seeds`), and prompt templates (`design-ruby-stack`, `gem-architect-rag`):
 ```bash
 # Stdio transport (default, for host agents)
 uv run rubygemdb-mcp
@@ -155,7 +165,7 @@ uv run rubygemdb-mcp --sse          # shortcut for --daemon start
 ```
 Other flags: `--transport stdio|sse` (default `stdio`), `--host` (default `127.0.0.1`), `--port` (default `8000`), `--foreground` (SSE in the foreground; used by the daemon worker), `--pid-file` (default `data/mcp.pid`), `--log-file` (default `data/mcp.log`). Daemon artifacts: `data/mcp.pid`, `data/mcp.json` (host/port sidecar), `data/mcp.log`.
 
-`search_gems` filters: `category` — one of the 21 slugs; `phase` — `skeleton`/`input`/`processing`/`output`. FTS5 first; the txtai vector index loads lazily and only when FTS returns zero hits. All tools open SQLite read-only (`mode=ro`); mutating storage methods raise `PermissionError` in that mode.
+`search_gems` filters: `category` — one of the 21 slugs; `phase` — `skeleton`/`input`/`processing`/`output`. FTS5 first; the txtai vector index loads lazily and only when FTS returns zero hits. Catalog tools open the gem database read-only (`mode=ro`); mutating storage methods raise `PermissionError` in that mode. Session tools write only to the separate `data/sessions.sqlite` store — the gem catalog is never modified. `build_gem_graphrag` and `query_gem_graphrag` accept an optional `session_id` (auto-generated when omitted) and return the `session_id` they recorded the turn in; `resume_rag_session` pre-warms the session's gem index and returns the last 5 messages (full context restore happens in the TUI).
 
 ### Linting & Type Checking
 ```bash
@@ -172,8 +182,8 @@ uv run mypy src/rubygemdb/
 
 Required for full functionality:
 ```bash
-# Devstral API key for LLM fallback classification
-export DEVSTRAL_API_KEY="your_devstral_key"
+# Mistral API key for LLM fallback classification
+export MISTRAL_API_KEY="your_mistral_key"
 
 # Context7 API key for generating gem usage cheatsheets
 export CONTEXT7_API_KEY="your_context7_key"
@@ -191,6 +201,7 @@ export CONTEXT7_API_KEY="your_context7_key"
 4. For back-end tooling queries, results are presented grouped by layer (substrate first, quality last), and recommendations start from the category `base_gems` seeds before context-specific gems.
 5. If a target project is selected, the agent calls `get_architecture` and `search_graph` via Codebase Memory MCP to inspect the target structure.
 6. The agent synthesizes the Context7 cheatsheets, semantic gem matches, and actual codebase structure to output a strict Pragmatic Implementation Backlog.
+7. Chat sessions persist across restarts: every turn is saved to `data/sessions.sqlite` and indexed into txtai as a `session_turn` document tagged with its session id; the TUI restores the most recent session (active gems, intention, chat history, last 200 execution traces) on open.
 
 ### Classification Pipeline
 Classification combines three scoring signals; the best-scoring category wins:
@@ -208,7 +219,7 @@ After the primary category is chosen, `GemClassifier.detect_sub_categories` scor
 Facets scoring ≥ 2.0 are kept, best-first; if none clears the bar, the best description-token sub-slug is used as a fallback. Detection re-runs after an LLM category override, so facets always match the final primary category.
 
 ### LLM Fallback
-The Devstral API is always consulted to generate the agent description; the heuristic-confidence gate (< 0.7) only decides whether the LLM's category (itself requiring > 0.6 confidence) may override the heuristic pick.
+The Mistral LLM API is always consulted to generate the agent description; the heuristic-confidence gate (< 0.7) only decides whether the LLM's category (itself requiring > 0.6 confidence) may override the heuristic pick.
 
 ---
 
@@ -223,6 +234,7 @@ Local cache files:
 6. `data/cache/category_vectors/`: Cached category-description vectors for embedding scoring
 7. `data/prune-report.md`: Approval-gated overlap/stale gem report
 8. `data/mcp.pid` + `data/mcp.json` + `data/mcp.log`: MCP daemon PID file, host/port sidecar, and daemon log
+9. `data/sessions.sqlite`: Persistent GraphRAG session store (`rag_sessions`, `rag_messages`, `rag_traces` tables, auto-created on first use via `SessionStorage`; separate from the gem catalog, which stays read-only)
 
 ---
 
