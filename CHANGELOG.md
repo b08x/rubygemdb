@@ -1,3 +1,24 @@
+## [0.8.0] - 2026-10-23
+
+### 🚀 Features
+
+- Add optional local query expansion and cross-encoder reranking to both retrieval pipelines (hybrid gem search and GraphRAG) — off by default, enabled via `QUERY_EXPANSION_ENABLED` / `RERANKER_ENABLED`
+- Add `services/query_expander.py`: expands a query into lexical and vector variations using `mradermacher/qmd-query-expansion-1.7B-GGUF` (Qwen3 1.7B, `/no_think` prompt template) via `llama_cpp`
+- Add `services/reranker.py`: cross-encoder reranking using `ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF`, scoring each query-passage pair as the logit probability of the "yes" token
+- Add `services/model_manager.py`: lazy Hugging Face Hub download and in-memory `llama_cpp` instance caching of GGUF models under `data/models/`
+- Run multi-pass retrieval over the original query plus its expansions and fuse all passes with Reciprocal Rank Fusion; oversample the candidate pool to `top_k × RERANKER_CANDIDATE_MULTIPLIER` (default 3, clamped 15–50) before reranking truncates to the requested limit
+- Degrade transparently to baseline unexpanded/un-reranked retrieval when the models are disabled, not yet downloaded, or fail at runtime — no exceptions surface to callers
+- Attach a `rerank_score` to results when reranking is active
+
+### 🧪 Testing
+
+- Add test suite `tests/test_query_expansion_reranking.py` covering settings defaults and legacy env aliases, model-manager download/caching/fallback, expansion prompt and parsing, reranker prompt and scoring, hybrid-search multi-pass and pool sizing, and GraphRAG expansion/rerank fallbacks
+
+### 📚 Documentation
+
+- Document query expansion and reranking configuration, the `data/models/` GGUF cache, and the new `huggingface_hub` / `llama-cpp-python` dependencies in README.md, AGENTS.md, CLAUDE.md, GEMINI.md, and INSTALL.md
+- Correct pre-existing factual errors: rate-limit delays (0.5s, not 0.1s/0.2s), the cheatsheets output path in CLAUDE.md, and unqualified `llm_cache.json` paths
+
 ## [0.7.0] - 2026-10-23
 
 ### 🚀 Features

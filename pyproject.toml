@@ -1,6 +1,6 @@
 [project]
 name = "rubygemdb"
-version = "0.7.0"
+version = "0.8.0"
 description = "Ruby gem analysis and classification tool"
 readme = "README.md"
 authors = [
