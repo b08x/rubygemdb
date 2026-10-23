@@ -71,7 +71,7 @@ src/rubygemdb/
 ├── services/
 │   ├── container_runner.py # Podman/Docker runner for indexer container
 │   ├── gem_fetcher.py  # Git shallow-cloner with .gem unpack fallback
-│   ├── graphrag.py     # Two-stage GraphRAG retrieval & prompt synthesizer
+│   ├── graphrag.py     # Two-stage GraphRAG retrieval & grounded-citation prompt synthesizer
 │   ├── hybrid_search.py # SQLite FTS5 + txtai vector search, RRF fusion
 │   ├── query_expander.py # Local GGUF query expansion → lexical/vector variations (off by default)
 │   ├── reranker.py     # Local GGUF cross-encoder reranking of candidates (off by default)
@@ -182,7 +182,7 @@ uv run rubygemdb-mcp --sse          # shortcut for --daemon start
 ```
 Other flags: `--transport stdio|sse` (default `stdio`), `--host` (default `127.0.0.1`), `--port` (default `8000`), `--foreground` (SSE in the foreground; used by the daemon worker), `--pid-file` (default `data/mcp.pid`), `--log-file` (default `data/mcp.log`). Daemon artifacts: `data/mcp.pid`, `data/mcp.json` (host/port sidecar), `data/mcp.log`.
 
-`search_gems` filters: `category` — one of the 21 slugs; `phase` — `skeleton`/`input`/`processing`/`output`. FTS5 first; the txtai vector index loads lazily and only when FTS returns zero hits. Catalog tools open the gem database read-only (`mode=ro`); mutating storage methods raise `PermissionError` in that mode. Session tools write only to the separate `data/sessions.sqlite` store — the gem catalog is never modified. `build_gem_graphrag` and `query_gem_graphrag` accept an optional `session_id` (auto-generated when omitted) and return the `session_id` they recorded the turn in; `resume_rag_session` pre-warms the session's gem index and returns the last 5 messages (full context restore happens in the TUI).
+`search_gems` filters: `category` — one of the 21 slugs; `phase` — `skeleton`/`input`/`processing`/`output`. FTS5 first; the txtai vector index loads lazily and only when FTS returns zero hits. Catalog tools open the gem database read-only (`mode=ro`); mutating storage methods raise `PermissionError` in that mode. Session tools write only to the separate `data/sessions.sqlite` store — the gem catalog is never modified. `build_gem_graphrag` and `query_gem_graphrag` accept an optional `session_id` (auto-generated when omitted) and return the `session_id` they recorded the turn in; `query_gem_graphrag` results also carry a top-level `citations` list (id, gem, file, node_id, node_type, symbol, signature, summary) for every retrieved symbol and code example. `resume_rag_session` pre-warms the session's gem index and returns the last 5 messages (full context restore happens in the TUI).
 
 ### Linting & Type Checking
 ```bash
@@ -225,6 +225,12 @@ export EMBEDDINGS_CACHE_MAX_ENTRIES="100000"  # maximum cached vectors before ol
 export EMBEDDINGS_CACHE_TTL_DAYS="180"         # vector time-to-live in days (default: 180)
 ```
 
+Agent output cap:
+```bash
+export AGENT_MAX_TOKENS="4096"                 # max tokens for GraphRAG agent responses (default: 4096)
+```
+Responses were previously uncapped; raise the setting when long, citation-tagged implementations truncate.
+
 ---
 
 ## Classification Logic
@@ -238,6 +244,8 @@ export EMBEDDINGS_CACHE_TTL_DAYS="180"         # vector time-to-live in days (de
 5. If a target project is selected, the agent calls `get_architecture` and `search_graph` via Codebase Memory MCP to inspect the target structure.
 6. The agent synthesizes the Context7 cheatsheets, semantic gem matches, and actual codebase structure to output a strict Pragmatic Implementation Backlog.
 7. Chat sessions persist across restarts: every turn is saved to `data/sessions.sqlite` and indexed into txtai as a `session_turn` document tagged with its session id; the TUI restores the most recent session (active gems, intention, chat history, last 200 execution traces) on open.
+
+Grounded chat-tab turns are citation-tagged and prompt-constrained: every retrieved method, class, module, and code example carries a sequential `[C1]`-style tag with its source file, replies must cite those tags inline and close with a `### Citations` summary, and only APIs present in the citations may be used — unsupported capabilities are stated explicitly, with missing logic supplied as clearly-distinguished custom application Ruby. Turns without a grounded context (no gems selected) run as ordinary ungrounded chat; the contract binds grounded answers, it does not refuse ungrounded ones. `query_gem_graphrag` returns the same citation-tagged context and `citations` list raw — the calling agent consumes them under its own prompt discipline.
 
 ### Classification Pipeline
 Classification combines three scoring signals; the best-scoring category wins:
@@ -270,7 +278,7 @@ Local cache files:
 6. `data/cache/category_vectors/`: Cached category-description vectors for embedding scoring
 7. `data/prune-report.md`: Approval-gated overlap/stale gem report
 8. `data/mcp.pid` + `data/mcp.json` + `data/mcp.log`: MCP daemon PID file, host/port sidecar, and daemon log
-9. `data/sessions.sqlite`: Persistent GraphRAG session store (`rag_sessions`, `rag_messages`, `rag_traces` tables, auto-created on first use via `SessionStorage`; separate from the gem catalog, which stays read-only)
+9. `data/sessions.sqlite`: Persistent GraphRAG session store (`rag_sessions`, `rag_messages`, `rag_traces` tables, auto-created on first use via `SessionStorage`; separate from the gem catalog, which stays read-only). `rag_messages` carries a `citations` column, auto-added by `ALTER TABLE` migration on existing stores; turns persist their citation records alongside the message text
 10. `data/models/`: Local GGUF model cache for query expansion and reranking (lazily downloaded from Hugging Face via `services/model_manager.py`; the directory is auto-created at startup)
 11. `data/cache/embeddings_cache.sqlite`: Universal content-addressable vector cache keyed by SHA-256 of model path + text, shared by GraphRAG indexing, classifier embedding scoring, and agent sessions (`services/embedding_cache.py`). Repeat vectorization of known texts skips the embedding model entirely. Configurable capacity and TTL retention policies (`settings.embeddings_cache_max_entries` default 100,000; `settings.embeddings_cache_ttl_days` default 180), opportunistic inline eviction during `put_many`, auto-vacuum on >10% prune, and operator management via `rubygemdb cache {stats, clear, prune}` and `rubygemdb reclassify --clear-embeddings-cache`
 
@@ -322,10 +330,11 @@ Per-category YAML files contain structured gem classification data:
 ## Gotchas & Non-Obvious Patterns
 
 1. **Confidence Thresholds**: Heuristic results <0.7 trigger LLM processing; LLM results must have >0.6 confidence to override heuristics
-2. **Cache Persistence**: Cache files are automatically saved after successful API/LLM calls
-3. **Rate Limiting**: Built-in delays between API requests: 0.5s between RubyGems calls, 0.5s between LLM calls
-4. **Batch Size**: Default LLM batch size is 10 for efficient bulk processing
-5. **TUI Requirements**: CSV input only required for first run to populate SQLite database
+2. **Agent Output Cap**: `agent_max_tokens` (env `AGENT_MAX_TOKENS`, default 4096) caps GraphRAG agent responses — previously uncapped; long grounded implementations may truncate mid-answer, which sits in tension with the prompt contract's completeness rule, so raise the setting when answers cut off
+3. **Cache Persistence**: Cache files are automatically saved after successful API/LLM calls
+4. **Rate Limiting**: Built-in delays between API requests: 0.5s between RubyGems calls, 0.5s between LLM calls
+5. **Batch Size**: Default LLM batch size is 10 for efficient bulk processing
+6. **TUI Requirements**: CSV input only required for first run to populate SQLite database
 
 ---
 

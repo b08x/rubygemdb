@@ -14,7 +14,7 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
   - `storage/`: Multi-backend storage (SQLite + JSON) for inventory and results, plus a persistent GraphRAG session store (`storage/session_storage.py`).
 - **Persistent GraphRAG Sessions**: Conversations, retrieved-node citations, and execution traces persist in `data/sessions.sqlite` (`rag_sessions`, `rag_messages`, `rag_traces` tables, auto-created on first use). The TUI chat tab auto-restores the most recent session on open and offers New Session / Delete Session buttons; every turn is indexed into txtai as a `session_turn` document.
 - **Interactive Explorer (TUI)**: A feature-rich Textual-based UI for browsing, filtering, and managing gem classifications.
-- **Contextual GraphRAG (TUI Chat)**: Spins up an ephemeral container (`rubygemdb-indexer:latest`) to extract AST symbol hierarchies (`rubydex`) and structured documentation (`decode`) from shallow-cloned gem repositories (with `.gem` unpack fallback), embedding results into ephemeral `txtai` vector stores with two-stage grounded retrieval (optionally local-GGUF query expansion and cross-encoder reranking, both off by default), persistent sessions, and markdown/JSON transcript export.
+- **Contextual GraphRAG (TUI Chat)**: Spins up an ephemeral container (`rubygemdb-indexer:latest`) to extract AST symbol hierarchies (`rubydex`) and structured documentation (`decode`) from shallow-cloned gem repositories (with `.gem` unpack fallback), embedding results into ephemeral `txtai` vector stores with two-stage grounded retrieval (optionally local-GGUF query expansion and cross-encoder reranking, both off by default), persistent sessions, and markdown/JSON transcript export. Grounded answers are citation-tagged (`[C1]`-style, source file included) and prompt-constrained to the APIs the citations contain — unsupported capabilities are stated explicitly and missing logic is supplied as clearly-distinguished custom Ruby; turns without a grounded context run as ordinary ungrounded chat. Agent output is capped by `AGENT_MAX_TOKENS` (default 4096).
 
 - **Codebase Memory MCP**: Native integration with the codebase-memory-mcp server to ground LLM-generated integration plans in the actual architectural structure of target projects.
 - **Other Steve Prompt Architect**: A highly aggressive system persona that intercepts raw user queries, strips out conversational slop, and generates concrete, SFL-compliant queries for the txtai vector database.
@@ -46,6 +46,8 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
     Optional retrieval-quality stages (both off by default): set `QUERY_EXPANSION_ENABLED` / `RERANKER_ENABLED` to enable local GGUF query expansion and cross-encoder reranking. Models download lazily from Hugging Face into `data/models/`; retrieval degrades to baseline when they are unavailable.
 
     Optional embedding cache retention: configure `EMBEDDINGS_CACHE_MAX_ENTRIES` (default: 100,000) and `EMBEDDINGS_CACHE_TTL_DAYS` (default: 180) to govern universal vector cache retention.
+
+    Optional agent output cap: `AGENT_MAX_TOKENS` (default: 4096) limits GraphRAG agent response length — raise it when long, citation-tagged implementations truncate.
 
 ### Execution Commands
 
@@ -92,7 +94,7 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
   uv run rubygemdb-mcp --daemon stop
   uv run rubygemdb-mcp --sse                 # shortcut for --daemon start
   ```
-  Other flags: `--transport stdio|sse` (default `stdio`), `--host` (default `127.0.0.1`), `--port` (default `8000`), `--foreground`, `--pid-file` (default `data/mcp.pid`), `--log-file` (default `data/mcp.log`). Catalog tools are strictly read-only: SQLite `mode=ro` connections; mutating storage methods raise `PermissionError`. Session tools write only to the separate `data/sessions.sqlite` store. `build_gem_graphrag` and `query_gem_graphrag` accept an optional `session_id` (auto-generated when omitted) and return the `session_id` they recorded the turn in.
+  Other flags: `--transport stdio|sse` (default `stdio`), `--host` (default `127.0.0.1`), `--port` (default `8000`), `--foreground`, `--pid-file` (default `data/mcp.pid`), `--log-file` (default `data/mcp.log`). Catalog tools are strictly read-only: SQLite `mode=ro` connections; mutating storage methods raise `PermissionError`. Session tools write only to the separate `data/sessions.sqlite` store. `build_gem_graphrag` and `query_gem_graphrag` accept an optional `session_id` (auto-generated when omitted) and return the `session_id` they recorded the turn in; `query_gem_graphrag` results also carry a top-level `citations` list for every retrieved symbol and example.
 
 ## Development Conventions
 

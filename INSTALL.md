@@ -169,6 +169,8 @@ print(response)
 
 Chat sessions persist across restarts: every turn is saved to `data/sessions.sqlite` and indexed for semantic search as a `session_turn` document. The TUI chat tab auto-restores the most recent session on open.
 
+GraphRAG-grounded turns are citation-tagged: each retrieved symbol and code example carries a `[C1]`-style tag with its source file, replies close with a `### Citations` summary, and the answer is prompt-constrained to the APIs the citations contain — unsupported capabilities are stated explicitly and missing logic is supplied as clearly-distinguished custom Ruby. Turns without a grounded context run as ordinary ungrounded chat. Citations persist with each turn (the `rag_messages` table gains its `citations` column automatically on existing stores) and render in markdown/JSON transcript exports. Agent response length is capped by `AGENT_MAX_TOKENS` (default: 4096).
+
 ### Embedding Cache Management
 
 Inspect, prune, and clear the shared vector embedding cache (`data/cache/embeddings_cache.sqlite`):
@@ -226,6 +228,7 @@ RATE_LIMIT_DELAY=0.5
 
 # Agent Configuration
 RUBYGEMDB_AGENT_MODEL=mistral/mistral-small-latest
+AGENT_MAX_TOKENS=4096               # cap on agent response tokens; raise if long grounded answers truncate
 
 # Storage Paths
 PROJECT_ROOT=./

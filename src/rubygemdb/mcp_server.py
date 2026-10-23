@@ -459,7 +459,7 @@ def query_gem_graphrag(
         session_id: Optional session UUID to track conversation turns.
 
     Returns:
-        Dictionary with session_id, retrieval results (primary nodes, expanded nodes, matched edges, and formatted markdown context).
+        Dictionary with session_id, retrieval results (primary nodes, expanded nodes, matched edges, and formatted markdown context), and a top-level `citations` list — one record (id, gem, file, node_id, node_type, symbol, signature, summary) per retrieved symbol and code example, matching the [Cn] tags in the grounded context.
     """
     sid = session_id or str(uuid.uuid4())
     with trace_span(

@@ -62,8 +62,9 @@ The chat tab provides on-demand, containerized GraphRAG for grounded Ruby gem ar
 3. Ephemeral container runner (`rubygemdb-indexer:latest`, Podman priority with Docker fallback) shallow-clones repositories (with `.gem` archive unpack fallback) and runs `rubydex` (AST symbols, hierarchy, calls) and `decode` (structured docstrings, `@parameter`, `@returns`, and `@example` usage blocks), outputting `graph.json`
 4. Host Python ingests `graph.json` into an ephemeral `txtai` index, cached by a deterministic SHA-256 hash of the selected gem set — a cache hit requires both `graph.json` and the saved txtai `embeddings` file; a partially-written cache (directory present, embeddings missing) triggers a rebuild instead of loading an empty index
 5. Queries execute two-stage retrieval: semantic vector search for top-K nodes followed by 1-hop graph neighborhood expansion across inheritance, calls, parameters, and code examples — with query expansion enabled, vector search covers the original query plus generated variations, and with the reranker enabled, candidates are re-scored by the local cross-encoder first (both off by default, degrading to baseline retrieval when models are unavailable)
-6. Conversations persist as sessions in `data/sessions.sqlite` — every turn is saved with its retrieved-node citations, indexed into txtai as a `session_turn` document, and the chat tab auto-restores the most recent session (gems, intention, history, last 200 traces) on open
-7. Answers are grounded in actual signatures and verified examples; Export writes the session transcript to `output/chat_exports/graphrag_chat_<timestamp>.md` and `.json` containing intention, gems, and conversation history
+6. Conversations persist as sessions in `data/sessions.sqlite` — every turn is saved with its retrieved-node citations, indexed into txtai as a `session_turn` document, and the chat tab auto-restores the most recent session (gems, intention, history, last 200 traces) on open. Existing stores migrate in place: `rag_messages` gains its `citations` column automatically on next launch
+7. Answers are grounded in actual signatures and verified examples. Grounded turns run under a strict anti-hallucination prompt contract: every method, class, module, and code example in the retrieved context carries a sequential `[C1]`-style citation tag (source file included), replies must cite those tags inline and close with a `### Citations` summary, and only APIs present in the citations may be used — unsupported capabilities are stated explicitly, with missing logic supplied as clearly-distinguished custom application Ruby. Turns without a grounded context (no gems selected) run as ordinary ungrounded chat; the contract binds grounded answers, it does not refuse ungrounded ones
+8. Export writes the session transcript to `output/chat_exports/graphrag_chat_<timestamp>.md` and `.json` containing intention, gems, conversation history, and per-turn grounded citations (a `> **Grounded Citations:**` list in markdown, a `citations` array in JSON)
 
 ## Common Development Tasks
 
@@ -104,6 +105,12 @@ Optional embedding cache retention:
 export EMBEDDINGS_CACHE_MAX_ENTRIES="100000"  # max entries before oldest evicted (default: 100,000)
 export EMBEDDINGS_CACHE_TTL_DAYS="180"         # TTL in days for vector records (default: 180)
 ```
+
+Optional agent output cap:
+```bash
+export AGENT_MAX_TOKENS="4096"                 # max tokens for GraphRAG agent responses (default: 4096)
+```
+Raise `AGENT_MAX_TOKENS` when long, citation-tagged implementations truncate — the default cap was introduced with the citations feature (responses were previously uncapped).
 
 ### Running the CLI Classifier
 Process a CSV of gem names and generate YAML output reports:
@@ -156,7 +163,7 @@ uv run rubygemdb-mcp --daemon status
 uv run rubygemdb-mcp --daemon stop
 ```
 
-Catalog tools (`search_gems`, `get_gem`, `compose_stack`, `list_categories`, `build_gem_graphrag`, `query_gem_graphrag`), resources (`rubygemdb://taxonomy`, `rubygemdb://stack-seeds`), and prompts (`design-ruby-stack`, `gem-architect-rag`) are strictly read-only against the gem database: SQLite connections open `mode=ro` and every mutating `SQLiteStorage` method raises `PermissionError`. Session tools (`list_rag_sessions`, `get_rag_session`, `resume_rag_session`, `export_rag_session_transcript`, `delete_rag_session`) write only to the separate `data/sessions.sqlite` store. `build_gem_graphrag` and `query_gem_graphrag` accept an optional `session_id` (auto-generated when omitted) and return the `session_id` they recorded the turn in. The daemon writes `data/mcp.pid`, a `data/mcp.json` host/port sidecar, and `data/mcp.log`.
+Catalog tools (`search_gems`, `get_gem`, `compose_stack`, `list_categories`, `build_gem_graphrag`, `query_gem_graphrag`), resources (`rubygemdb://taxonomy`, `rubygemdb://stack-seeds`), and prompts (`design-ruby-stack`, `gem-architect-rag`) are strictly read-only against the gem database: SQLite connections open `mode=ro` and every mutating `SQLiteStorage` method raises `PermissionError`. Session tools (`list_rag_sessions`, `get_rag_session`, `resume_rag_session`, `export_rag_session_transcript`, `delete_rag_session`) write only to the separate `data/sessions.sqlite` store. `build_gem_graphrag` and `query_gem_graphrag` accept an optional `session_id` (auto-generated when omitted) and return the `session_id` they recorded the turn in; `query_gem_graphrag` results also carry a top-level `citations` list (id, gem, file, node_id, node_type, symbol, signature, summary) for every retrieved symbol and example. The daemon writes `data/mcp.pid`, a `data/mcp.json` host/port sidecar, and `data/mcp.log`.
 
 ### Development Workflow
 ```bash
@@ -197,7 +204,7 @@ CSV files must contain either:
 
 ### Primary Storage
 - **SQLite Database**: `data/rubygemdb.sqlite` - Central storage for inventory and classified gems; the `classified_gems` table carries a `sub_categories` column (auto-added by migration on existing databases)
-- **Session Store**: `data/sessions.sqlite` - Separate SQLite database for persistent GraphRAG sessions (`rag_sessions`, `rag_messages`, `rag_traces` tables, auto-created on first use by `storage/session_storage.py`)
+- **Session Store**: `data/sessions.sqlite` - Separate SQLite database for persistent GraphRAG sessions (`rag_sessions`, `rag_messages`, `rag_traces` tables, auto-created on first use by `storage/session_storage.py`); `rag_messages` carries a `citations` column, auto-added by `ALTER TABLE` migration on existing stores
 - **Read-Only Mode**: `SQLiteStorage(read_only=True, db_path=...)` opens `file:...?mode=ro` URI connections, skips schema init, and raises `PermissionError` on every mutating method — this is what the MCP server uses for the gem catalog; `get_classified_gem(name)` / `get_inventory_gem(name)` back the `get_gem` MCP tool
 - **YAML Output**: Per-category files in output directory for batch processing results
 

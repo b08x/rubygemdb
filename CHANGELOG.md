@@ -16,10 +16,16 @@
 - Add `rubygemdb cache {stats, clear, prune}` CLI group: `stats` renders a Rich table of vector counts, models, and disk footprint (db/WAL/total bytes); `clear` wipes all or `--model`-scoped vectors (vacuum by default, `--no-vacuum` to skip); `prune` applies TTL/capacity limits with `--max-age-days` / `--max-entries` overrides and a prune-summary table
 - Add `reclassify --clear-embeddings-cache` to wipe and vacuum the embedding cache during fresh-start reclassification
 - Add retention settings `embeddings_cache_max_entries` (default 100,000) and `embeddings_cache_ttl_days` (default 180); wire `embeddings_cache_file` into `EmbeddingCache`'s default path (the setting was previously declarative only)
+- Add structured GraphRAG citations (`services/graphrag.py`): every rendered method, class, module, and code example in the grounded context carries a sequential `[C1]`-style citation tag with its source file, plus an appended `### Grounded Citations Index` table; citation records (`id`, `gem`, `file`, `node_id`, `node_type`, `symbol`, `signature`, `summary`) ride along on the retrieval result
+- Add an anti-hallucination prompt contract for GraphRAG-grounded agent turns (`agent.py`): the model may only use APIs that appear in the citations, unsupported capabilities are stated explicitly (existing methods cited, missing logic supplied as clearly-distinguished custom Ruby code), replies carry inline `[Cn]` tags, and each answer closes with a `### Citations` summary section — the contract binds grounded turns; turns without an indexed gem context (no gems selected) run as ordinary ungrounded chat rather than refusing
+- Add a `citations` column to `rag_messages` (auto-migrated via `ALTER TABLE` on existing `data/sessions.sqlite` stores — no recreation needed) and a `citations` field to `RAGMessage`; agent and MCP turns persist their citations, and unparseable stored citations degrade to an empty list on load
+- `query_gem_graphrag` MCP results gain a top-level `citations` list; markdown transcript exports render a `> **Grounded Citations:**` block per cited message (JSON exports carry `citations` per message), replacing the raw retrieved-node line on cited turns
+- Add setting `agent_max_tokens` (env `AGENT_MAX_TOKENS`, default 4096) capping agent model output — agent responses were previously uncapped
 
 ### 🐛 Bug Fixes
 
 - Fix GraphRAG "ghost cache" loading: index cache validity now requires the saved txtai `embeddings` file, not merely an existing `txtai/` directory — a partially-written cache (graph.json present, vector index missing) previously reported a successful cached load while serving an empty vector index (searches returned nothing); the same state now triggers a full rebuild
+- Fix `@returns` tag descriptions in the grounded GraphRAG context: they previously rendered only when a parameter description also existed (a copy-paste guard bug in `services/graphrag.py`), so documented return values could be silently dropped from retrieval output
 
 ### 🧪 Testing
 
@@ -28,12 +34,14 @@
 - Add `test_build_or_load_index_ghost_cache_rebuilds` to `tests/test_graphrag.py`: a ghost cache state (graph.json and `txtai/` present, `embeddings` file missing) must trigger a rebuild
 - Add test suite `tests/test_cli.py` covering `cache stats` / `cache clear` (with `--model` and `--no-vacuum`) / `cache prune` output and `reclassify --clear-embeddings-cache`
 - Extend `tests/test_embedding_cache.py` with retention coverage: TTL pruning of backdated rows, oldest-first capacity trimming, opportunistic inline pruning during `put_many`, the settings-driven db path, `stats()` disk-size fields, and the >10% auto-vacuum threshold
+- Extend the GraphRAG test suites: `tests/test_graphrag.py` asserts sequential `[Cn]` citation tags in the rendered context and the Grounded Citations Index table; `tests/test_agent_graphrag.py` pins the anti-hallucination prompt contract; `tests/test_mcp_graphrag.py` asserts the `citations` key in `query_gem_graphrag` results; `tests/test_session_tracking.py` covers citation persistence in the session store
 
 ### 📚 Documentation
 
 - Document Langfuse configuration and tracing behavior in README.md, CLAUDE.md, and INSTALL.md (AGENTS.md and GEMINI.md were updated alongside the code in the same commit)
 - Document the universal embedding cache and the GraphRAG cache-validity fix in README.md, AGENTS.md, CLAUDE.md, GEMINI.md, and INSTALL.md
 - Document embedding cache retention, the `rubygemdb cache` CLI group, and `--clear-embeddings-cache` in AGENTS.md, CLAUDE.md, GEMINI.md, and README.md (updated alongside the code); correct the stale cache description in INSTALL.md and record the feature in CHANGELOG.md
+- Document GraphRAG structured citations, the anti-hallucination prompt contract, the `AGENT_MAX_TOKENS` setting, and the `rag_messages.citations` column in README.md, AGENTS.md, CLAUDE.md, GEMINI.md, and INSTALL.md; note the `citations` return of `query_gem_graphrag` in the MCP tool docstring
 
 ## [0.8.0] - 2026-10-23
 
