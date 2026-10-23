@@ -1,0 +1,22 @@
+# Facts
+
+- The advisor service files (src/rubygemdb/services/advisor.py, src/rubygemdb/services/advisor_export.py, tests/test_advisor.py) are completely removed from the codebase.
+- TxtaiAgent in src/rubygemdb/agent.py has all advisor state machine logic, brief card extraction, and slot search logic removed, replacing advise() and reset_advisor() with GraphRAG-aware chat methods.
+- models/phases.py is retained as an independent category search filter for hybrid_search without any remaining references to advisor card slots.
+- A container definition file (docker/indexer.Dockerfile) packages a Ruby runtime with git, rubydex, decode, and bake gems pre-installed.
+- A Python container runner detects Podman first, falls back to Docker, checks for the rubygemdb-indexer:latest image, and builds it automatically if missing.
+- Selected gems have their source Git repositories resolved from database metadata/RubyGems API and shallow-cloned (--depth 1) into a host cache directory (data/cache/gem_repos/<gem_name>).
+- If a gem's git repository cannot be resolved or cloned, the system falls back to downloading and unpacking the released .gem archive via gem unpack so indexing continues.
+- The indexer container runs a Ruby script executing Rubydex::Graph for AST/call hierarchies and Decode::Index for structured documentation and code examples across all mounted gem paths.
+- The container writes a normalized JSON graph artifact containing nodes (gems, modules, classes, methods, doc tags, examples) and edges (defines, calls, inherits_from, references, documents) to a mounted host directory.
+- Host Python ingests the graph artifact and builds an ephemeral txtai vector index embedding docstrings, method signatures, and decode code examples.
+- Extracted graphs and vector indices are cached by a hash of the selected gem set, allowing repeated queries without re-running the container.
+- GraphRAG queries execute a two-stage retrieval: semantic vector search in txtai for top-K symbol/example nodes, followed by 1-hop graph neighborhood expansion across rubydex and decode edges.
+- Retrieved signatures, parameter types from decode, code examples, and call relations are synthesized into the LLM prompt together with the project intention to generate grounded answers.
+- The TUI Chat tab replaces the advisor UI with a Contextual GraphRAG panel showing synced selected gem badges from the Explorer tab, an editable Project Intention input, and a Build GraphRAG Context button.
+- The TUI trace log displays live step-by-step progress during repo caching, container execution, AST extraction, documentation parsing, and vector indexing.
+- The TUI Export to Markdown button exports the GraphRAG chat conversation, including active project intention, indexed gems, and cited symbols/examples.
+- src/rubygemdb/mcp_server.py exposes a query_gem_graphrag tool that accepts a list of gems, a query, and an optional intention, auto-indexing if needed and returning GraphRAG results.
+- src/rubygemdb/mcp_server.py exposes a build_gem_graphrag tool that explicitly pre-warms the graph index for a given gem set and intention, returning node and edge statistics.
+- src/rubygemdb/mcp_server.py exposes a gem-architect-rag prompt template for coding agents to design architecture grounded in indexed gem graphs.
+- uv run ruff check src/rubygemdb/, uv run mypy src/rubygemdb/, and uv run pytest tests/ pass cleanly with all new and updated tests.

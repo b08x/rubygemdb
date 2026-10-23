@@ -255,6 +255,71 @@ def list_categories() -> List[Dict[str, Any]]:
     ]
 
 
+_graphrag_service: Optional[Any] = None
+
+
+def _get_graphrag_service() -> Any:
+    """Lazily load GraphRAGService to avoid heavy initial imports."""
+    global _graphrag_service
+    if _graphrag_service is None:
+        from rubygemdb.services.graphrag import GraphRAGService
+
+        _graphrag_service = GraphRAGService()
+    return _graphrag_service
+
+
+@mcp.tool()
+def build_gem_graphrag(gems: List[str], intention: str = "") -> Dict[str, Any]:
+    """Pre-warm and index the AST symbol hierarchy and decode documentation for a set of gems.
+
+    Args:
+        gems: List of Ruby gem names to clone/unpack and index.
+        intention: Optional project intention or architectural context.
+
+    Returns:
+        Dictionary with active gems, hash, node counts, and edge statistics.
+    """
+    service = _get_graphrag_service()
+    data = service.build_or_load_index(gems)
+    return {
+        "gems": service.active_gems,
+        "hash": service.active_hash,
+        "intention": intention,
+        "nodes_count": len(service.nodes_by_id),
+        "edges_count": len(data.get("edges", [])),
+        "status": "ready",
+    }
+
+
+@mcp.tool()
+def query_gem_graphrag(
+    gems: List[str], query: str, intention: Optional[str] = None
+) -> Dict[str, Any]:
+    """Execute a 2-stage GraphRAG query over selected gems, returning grounded AST signatures, decode parameter types, and code examples.
+
+    Args:
+        gems: List of Ruby gem names to query (will auto-index if not already cached).
+        query: Natural language query about gem capabilities, methods, or classes.
+        intention: Optional project intention for grounding context.
+
+    Returns:
+        Dictionary with retrieval results (primary nodes, expanded nodes, matched edges, and formatted markdown context).
+    """
+    service = _get_graphrag_service()
+    service.build_or_load_index(gems)
+    retrieval = service.retrieve(query, top_k=5)
+    grounded_context = service.format_grounded_context(retrieval, intention=intention)
+    return {
+        "gems": service.active_gems,
+        "query": query,
+        "intention": intention,
+        "primary_nodes": retrieval.get("primary_nodes", []),
+        "expanded_nodes": retrieval.get("expanded_nodes", []),
+        "edges": retrieval.get("edges", []),
+        "grounded_context": grounded_context,
+    }
+
+
 # --- MCP Resources ---
 
 
@@ -328,6 +393,26 @@ Follow this disciplined step-by-step procedure:
 3. **Compose & Validate Stack**:
    - Call `compose_stack(query="{project_description}")` to generate a candidate manifest and Gemfile snippet.
    - Refine the selection to ensure clean abstraction boundaries and minimal dependency bloat.
+"""
+
+
+@mcp.prompt("gem-architect-rag")
+def gem_architect_rag(gems: List[str], intention: str, task: str) -> str:
+    """Prompt template for designing Ruby software architecture grounded in containerized gem AST and decode graphs."""
+    gem_str = ", ".join(f"`{g}`" for g in gems)
+    return f"""You are a Principal Ruby Systems Architect designing software grounded in the actual codebase AST and documentation of {gem_str}.
+
+### Project Intention
+{intention}
+
+### Target Task
+{task}
+
+### Instructions for Grounded Architecture:
+1. Call `query_gem_graphrag(gems={gems!r}, query="{task}", intention="{intention}")` to retrieve exact AST method signatures, decode parameter types, and verified code examples.
+2. Ground your architecture strictly in the returned signatures and examples. Do not hallucinate gem APIs or method names.
+3. Show concrete code snippets utilizing the verified `@parameter` and `@returns` types.
+4. Highlight architectural relationships: module nesting, class inheritance, and call paths.
 """
 
 

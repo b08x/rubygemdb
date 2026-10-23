@@ -2,6 +2,8 @@ import re
 import os
 import json
 import sqlite3
+from pathlib import Path
+from typing import Any, Callable, Optional
 
 from txtai import Embeddings  # type: ignore
 from smolagents import LiteLLMModel, ToolCallingAgent, tool  # type: ignore
@@ -10,7 +12,7 @@ from mcp import StdioServerParameters
 from rubygemdb.services.rubygems import RubyGemsService
 from rubygemdb.services.stack import guess_category
 from rubygemdb.services.hybrid_search import build_fts_index, ensure_fts_index, hybrid_search
-from rubygemdb.services.advisor import AdvisorSession
+from rubygemdb.services.graphrag import GraphRAGService
 from rubygemdb.models.categories import CATEGORY_BY_SLUG
 from rubygemdb.core.config import settings
 
@@ -114,8 +116,10 @@ class TxtaiAgent:
         # the LLM during --embed (index-only) operations.
         self._agent = None
         self.model: LiteLLMModel | None = None
-        # Phase-walking advisor session, created on first advise() call.
-        self._advisor: AdvisorSession | None = None
+        self._graphrag_service: Optional[GraphRAGService] = None
+        self._graphrag_gems: list[str] = []
+        self._graphrag_intention: str = ""
+        self._chat_history: list[dict] = []
         
     def _initialize_index(self, force_rebuild: bool = False):
         """Loads data from the original sqlite table and indexes into txtai."""
@@ -291,7 +295,7 @@ class TxtaiAgent:
                 results = hybrid_search(query, phase=None, limit=limit, vector_search=self._vector_search, db_path=self.db_path)
                 return json.dumps(results, indent=2)
 
-            agent_prompt = """You are the RubyGemDB Gem Advisor. You answer follow-up questions about Ruby gems: what a gem does, whether it fits the user's project, how two gems compare, or what its risks are. You do NOT design implementation backlogs or scaffold code.
+            agent_prompt = """You are the RubyGemDB Gem Assistant and Architect. You answer questions about Ruby gems: what a gem does, whether it fits the user's project, how two gems compare, or what its risks are. You do NOT design implementation backlogs or scaffold code.
 
 Rules:
 - Call `search_memory_tool` first to find relevant gems; results carry category, layer, and build phase metadata.
@@ -313,10 +317,10 @@ Rules:
             )
         return self._agent
 
-    # -- phase-walking advisor -----------------------------------------------
+    # -- LLM & retrieval helpers --------------------------------------------
 
     def _ensure_model(self) -> LiteLLMModel:
-        """Lazily create the LiteLLM model shared by the agent and the advisor."""
+        """Lazily create the LiteLLM model shared by the agent."""
         if self.model is None:
             self.model = LiteLLMModel(model_id=settings.rubygemdb_agent_model)
         return self.model
@@ -337,7 +341,7 @@ Rules:
             parsed = json.loads(text)
             return parsed if isinstance(parsed, dict) else None
         except Exception as e:
-            print(f"Advisor LLM call failed: {e}")
+            print(f"Agent LLM call failed: {e}")
             return None
 
     def _vector_search(self, query: str, categories: list[str] | None, limit: int) -> list[dict]:
@@ -366,73 +370,8 @@ Rules:
             })
         return hits
 
-    def _card_llm(self, brief: str) -> dict | None:
-        system = (
-            "You extract a structured requirement card from a Ruby project brief.\n"
-            "- deliverable: one line, the shape of the thing being built (CLI tool, "
-            "web service, library, GUI app)\n"
-            "- inputs: data formats and sources the tool takes in (e.g. PDF "
-            "documents, CSV files, HTTP APIs)\n"
-            "- transforms: processing steps applied to that data (e.g. chunk text "
-            "with context, extract tables, embed passages)\n"
-            "- outputs: artifacts the tool produces (e.g. markdown report, JSON "
-            "manifest, PDF)\n"
-            "- constraints: hard requirements (e.g. no native extensions, must run "
-            "offline)\n"
-            "Also return open_questions: up to 3 short questions for anything "
-            "genuinely ambiguous or missing. Do not invent requirements.\n"
-            "If the brief is too vague to fill deliverable plus at least one other "
-            'slot, return {"clarify": "<one clarifying question>"} instead.\n'
-            'Return JSON only: {"card": {"deliverable": "...", "inputs": [...], '
-            '"transforms": [...], "outputs": [...], "constraints": [...]}, '
-            '"open_questions": [...]}'
-        )
-        return self._llm_json(system, f"Brief:\n{brief}")
-
-    def _intent_llm(self, text: str, context: str) -> dict | None:
-        system = (
-            "You steer a gem-stack advisor conversation. Classify the user's "
-            "message into exactly one action:\n"
-            "- go: (card stage only) accept the requirement card and propose a stack\n"
-            '- edit: change the requirement card (include "card" with any of '
-            '"deliverable", "inputs", "transforms", "outputs", "constraints" — '
-            "lists or strings)\n"
-            "- accept: confirm the proposed stack as the final pick\n"
-            '- add: include a named gem that was never offered (include "gem")\n'
-            '- remove: drop a gem from the proposal (include "gem")\n'
-            '- swap: replace one gem with another (include "gem" and "with")\n'
-            "- retry: the proposed gems for a slot are off target; re-search with "
-            'adjusted focus (include "slot" — deliverable/inputs/transforms/outputs '
-            '- and "hint" with the words to focus on)\n'
-            '- ask: a follow-up question about a gem (include "gem" and "question")\n'
-            "- restart: start over with a new brief\n"
-            "- chat: anything conversational — feedback, preferences, concerns. "
-            "Answer it in one or two sentences that acknowledge the current card "
-            'and stack, and suggest the next action (include "reply")\n'
-            "The context line carries the stage, the current card, and the proposed "
-            "stack. Return JSON only, with only the fields the action needs."
-        )
-        return self._llm_json(system, f"Context: {context}\nUser message: {text}")
-
-    def _reason_llm(self, card_text: str, gems: list[dict]) -> dict | None:
-        system = (
-            "Given a project requirement summary and candidate gems, write a "
-            "one-line reason per gem tying it to the requirements. If a gem "
-            "ignores a stated constraint, say so in its reason.\n"
-            'Return JSON only: {"<gem name>": "<one-line reason>", ...}'
-        )
-        gem_lines = "\n".join(f"- {g.get('name')}: {g.get('description', '')}" for g in gems)
-        return self._llm_json(system, f"Requirements:\n{card_text}\nCandidate gems:\n{gem_lines}")
-
-    def _ask_gem(self, gem: str, question: str) -> str:
-        """Delegate a follow-up question to the tool-calling agent."""
-        brief = self._advisor.brief if self._advisor else ""
-        context = f"Project brief: {brief}\n\n" if brief else ""
-        prompt = f"{context}Follow-up question about the Ruby gem '{gem}': {question}"
-        return str(self.agent(prompt))
-
     def _fetch_gem(self, name: str) -> dict | None:
-        """Case-insensitive inventory lookup for manually named gems."""
+        """Case-insensitive inventory lookup for named gems."""
         try:
             conn = sqlite3.connect(self.db_path)
         except sqlite3.Error:
@@ -467,39 +406,149 @@ Rules:
             "context7_id": row["context7_id"],
         }
 
-    def _build_advisor(self) -> AdvisorSession:
-        def search(query: str, phase: str | None, limit: int) -> list[dict]:
-            return hybrid_search(
-                query,
-                phase=phase,
-                limit=limit,
-                vector_search=self._vector_search,
-                db_path=self.db_path,
-            )
+    @property
+    def graphrag_service(self) -> GraphRAGService:
+        if self._graphrag_service is None:
+            self._graphrag_service = GraphRAGService()
+        return self._graphrag_service
 
-        return AdvisorSession(
-            card_llm=self._card_llm,
-            intent_llm=self._intent_llm,
-            reason_llm=self._reason_llm,
-            search=search,
-            ask=self._ask_gem,
-            fetch_gem=self._fetch_gem,
+    @graphrag_service.setter
+    def graphrag_service(self, service: GraphRAGService) -> None:
+        self._graphrag_service = service
+
+    def set_graphrag_context(
+        self,
+        gems: list[str],
+        intention: str = "",
+        progress_callback: Optional[Callable[[str], None]] = None,
+    ) -> dict[str, Any]:
+        """Pre-warm and build GraphRAG index for the selected gems and intention."""
+        self._graphrag_gems = sorted(list({g.strip() for g in gems if g.strip()}))
+        self._graphrag_intention = intention.strip()
+        if not self._graphrag_gems:
+            return {"gems": [], "intention": self._graphrag_intention, "nodes": 0, "edges": 0}
+
+        data = self.graphrag_service.build_or_load_index(
+            self._graphrag_gems, progress_callback=progress_callback
+        )
+        return {
+            "gems": self._graphrag_gems,
+            "intention": self._graphrag_intention,
+            "nodes": len(self.graphrag_service.nodes_by_id),
+            "edges": len(data.get("edges", [])),
+        }
+
+    def chat(self, query: str, project_context: Optional[str] = None) -> str:
+        """Grounded conversational query using contextual GraphRAG when gems are selected."""
+        if not self._graphrag_gems:
+            full_query = f"[Target Project Context: {project_context}]\n{query}" if project_context else query
+            ans = self.run(full_query)
+            self._chat_history.append({"role": "user", "content": query})
+            self._chat_history.append({"role": "agent", "content": ans})
+            return ans
+
+        # Retrieve 2-stage GraphRAG context
+        retrieval = self.graphrag_service.retrieve(query, top_k=5)
+        grounded_context = self.graphrag_service.format_grounded_context(
+            retrieval, intention=self._graphrag_intention
         )
 
-    def advise(self, message: str) -> str:
-        """Run the card-driven advisor over one chat message."""
-        if self._advisor is None:
-            self._advisor = self._build_advisor()
-        return self._advisor.respond(message)
+        system_prompt = (
+            "You are the RubyGemDB Gem Architect and Assistant. You provide concrete, highly grounded "
+            "architectural and implementation advice for Ruby gems.\n"
+            "When GraphRAG context is provided, ground your answers in the exact method signatures, "
+            "parameter types from decode, code examples, and call relationships.\n"
+            "Always cite the gem and method/class names accurately. Include practical code snippets "
+            "based on the verified examples where helpful."
+        )
 
-    @property
-    def advisor_session(self) -> AdvisorSession | None:
-        """The active advisor session, if one has been started."""
-        return self._advisor
+        user_content_parts = []
+        if project_context:
+            user_content_parts.append(f"[Target Project Context: {project_context}]")
+        if grounded_context:
+            user_content_parts.append(f"Grounded Gem Knowledge:\n{grounded_context}")
+        user_content_parts.append(f"User Query:\n{query}")
 
-    def reset_advisor(self) -> None:
-        """Drop the advisor session (Clear Chat)."""
-        self._advisor = None
+        user_prompt = "\n\n".join(user_content_parts)
+
+        model = self._ensure_model()
+        messages = [{"role": "system", "content": system_prompt}]
+
+        for turn in self._chat_history[-4:]:
+            messages.append({"role": turn["role"], "content": turn["content"]})
+
+        messages.append({"role": "user", "content": user_prompt})
+
+        try:
+            response = str(model(messages).content).strip()
+        except Exception as e:
+            response = f"LLM generation failed: {e}"
+
+        self._chat_history.append({"role": "user", "content": query})
+        self._chat_history.append({"role": "agent", "content": response})
+        return response
+
+    def export_transcript(self, out_dir: Optional[Path] = None) -> tuple[Path, Path]:
+        """Export the active GraphRAG chat conversation as markdown and JSON."""
+        from datetime import datetime
+
+        target_dir = out_dir or (settings.project_root / "output" / "chat_exports")
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        prefix = f"graphrag_chat_{stamp}"
+        md_path = target_dir / f"{prefix}.md"
+        json_path = target_dir / f"{prefix}.json"
+
+        # 1. Build Markdown
+        md_lines = [
+            "# RubyGemDB Contextual GraphRAG Transcript",
+            "",
+            f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"**Project Intention:** {self._graphrag_intention or 'None specified'}",
+            f"**Indexed Gems:** {', '.join(self._graphrag_gems) or 'None'}",
+            "",
+            "---",
+            "",
+            "## Conversation",
+            "",
+        ]
+
+        for msg in self._chat_history:
+            role_title = "User" if msg["role"] == "user" else "Agent"
+            md_lines.append(f"### {role_title}")
+            md_lines.append(msg["content"])
+            md_lines.append("")
+
+        md_lines.extend([
+            "---",
+            "",
+            "## Grounded Index Summary",
+            f"- Total Nodes: {len(self.graphrag_service.nodes_by_id)}",
+            f"- Total Edges: {len(self.graphrag_service.graph_data.get('edges', []))}",
+            "",
+        ])
+
+        md_path.write_text("\n".join(md_lines), encoding="utf-8")
+
+        # 2. Build JSON
+        json_data = {
+            "timestamp": datetime.now().isoformat(),
+            "project_intention": self._graphrag_intention,
+            "indexed_gems": self._graphrag_gems,
+            "messages": self._chat_history,
+            "index_summary": {
+                "nodes_count": len(self.graphrag_service.nodes_by_id),
+                "edges_count": len(self.graphrag_service.graph_data.get("edges", [])),
+            },
+        }
+        json_path.write_text(json.dumps(json_data, indent=2), encoding="utf-8")
+
+        return md_path, json_path
+
+    def clear_chat(self) -> None:
+        """Clear the conversational chat history."""
+        self._chat_history.clear()
 
     def run(self, query: str) -> str:
         """Run the txtai Agent to answer a query and manage memory window."""

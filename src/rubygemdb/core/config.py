@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     sqlite_db_file: Path = data_dir / "rubygemdb.sqlite"
     txtai_dir: Path = data_dir / "txtai"
     prune_report_file: Path = data_dir / "prune-report.md"
+    gem_repos_dir: Path = cache_dir / "gem_repos"
+    graphrag_dir: Path = cache_dir / "graphrag"
     
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -62,3 +64,5 @@ settings = Settings()
 # Ensure directories exist
 settings.data_dir.mkdir(exist_ok=True)
 settings.cache_dir.mkdir(exist_ok=True)
+settings.gem_repos_dir.mkdir(parents=True, exist_ok=True)
+settings.graphrag_dir.mkdir(parents=True, exist_ok=True)

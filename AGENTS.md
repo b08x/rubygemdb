@@ -56,17 +56,22 @@ Each category also carries curated `base_gems` stack seeds (e.g. dotenv, drydock
 ### Core Component Directory Structure
 ```
 src/rubygemdb/
-├── agent.py            # Layer-aware txtai RAG agent (smolagents)
+├── agent.py            # Contextual GraphRAG chat & tool-calling agent
 ├── cli.py              # Command-line interface (process / reclassify / stack)
 ├── mcp_server.py       # Native MCP server & daemon lifecycle (FastMCP)
 ├── ui/
-│   └── tui.py          # Interactive Textual TUI explorer
+│   └── tui.py          # Interactive Textual TUI explorer & GraphRAG chat
 ├── core/
 │   └── config.py       # Settings and environment variable handling
 ├── models/
 │   ├── gem.py          # Pydantic data models for gem data
+│   ├── phases.py       # Build phase taxonomy & search filters
 │   └── categories.py   # Single source of truth: 21 categories, layers, sub-category facets
 ├── services/
+│   ├── container_runner.py # Podman/Docker runner for indexer container
+│   ├── gem_fetcher.py  # Git shallow-cloner with .gem unpack fallback
+│   ├── graphrag.py     # Two-stage GraphRAG retrieval & prompt synthesizer
+│   ├── hybrid_search.py # SQLite FTS5 + txtai vector search, RRF fusion
 │   ├── classifier.py   # Keyword/description/embedding classification + sub-category faceting
 │   ├── embedding_scorer.py # txtai embedding similarity vs category descriptions
 │   ├── prune.py        # Overlap/stale gem prune reports
@@ -78,6 +83,9 @@ src/rubygemdb/
     ├── base.py         # Storage interface
     ├── json_storage.py # JSON file storage implementation
     └── sqlite_storage.py # SQLite storage implementation
+docker/
+├── indexer.Dockerfile  # Ruby 4.0.4 runtime packaging rubydex, decode, bake
+└── extract_graph.rb    # Container script extracting AST symbols & structured decode docs
 ```
 
 ---
@@ -142,7 +150,7 @@ uv run rubygemdb stack "CLI data pipeline tool" --out stacks/  # also write file
 Output is advisory, not a dependency resolver. Deeper Rubysmith project generation from a stack manifest is a follow-up goal.
 
 ### MCP Server (`rubygemdb-mcp`)
-Native Model Context Protocol server exposing read-only tools (`search_gems`, `get_gem`, `compose_stack`, `list_categories`), resources (`rubygemdb://taxonomy`, `rubygemdb://stack-seeds`), and prompt template (`design-ruby-stack`):
+Native Model Context Protocol server exposing read-only tools (`search_gems`, `get_gem`, `compose_stack`, `list_categories`, `build_gem_graphrag`, `query_gem_graphrag`), resources (`rubygemdb://taxonomy`, `rubygemdb://stack-seeds`), and prompt templates (`design-ruby-stack`, `gem-architect-rag`):
 ```bash
 # Stdio transport (default, for host agents)
 uv run rubygemdb-mcp

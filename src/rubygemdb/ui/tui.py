@@ -18,7 +18,6 @@ from rubygemdb.services.llm import LLMService
 from rubygemdb.services.classifier import GemClassifier
 from rubygemdb.models.categories import CATEGORIES
 from rubygemdb.services.context7 import Context7Service
-from rubygemdb.services.advisor_export import write_export
 from rubygemdb.storage.sqlite_storage import SQLiteStorage
 from rubygemdb.core.config import settings
 from rubygemdb.models.gem import GemEntry
@@ -451,32 +450,49 @@ class ExportTab(ScrollableContainer):
 
 
 class AgentChatTab(ScrollableContainer):
-    """A chat tab for interacting with the TxtaiAgent."""
+    """A chat tab for interacting with the Contextual GraphRAG agent."""
 
     def __init__(self, agent_loader_callback):
         super().__init__()
         self.agent_loader_callback = agent_loader_callback
         self.agent = None
         self._chat_messages: list[dict] = []
-        self._query_queue: list[str] = []
+        self._query_queue: list[tuple[str, str]] = []
         self._thinking = False
+        self.selected_gems: list[str] = []
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="chat-split"):
             with Vertical(id="chat-main"):
-                yield Label("RubyGemDB Advisor", id="chat-title")
+                yield Label("RubyGemDB Contextual GraphRAG", id="chat-title")
+                with Horizontal(id="selected-gems-bar"):
+                    yield Label("Active Gems: None (select gems in Explorer to index)", id="selected-gems-label")
+                yield Input(placeholder="Project intention (e.g. Asynchronous CLI pipeline)", id="intention-input")
+                yield Button("Build GraphRAG Context", id="build-graphrag-btn", variant="primary")
                 yield RichLog(id="chat-log", markup=True, wrap=True)
                 from textual.widgets import Select
                 yield Select([], prompt="Optional: Select a codebase memory project for context", id="project-input")
-                yield Input(placeholder="Ask the agent a question...", id="chat-input")
+                yield Input(placeholder="Ask the GraphRAG agent a grounded question...", id="chat-input")
                 with Horizontal(id="chat-actions"):
                     yield Button("Add Gem", id="chat-add-gem-btn", variant="success")
                     yield Button("Export to Markdown", id="export-chat-btn", variant="primary")
                     yield Button("Clear Chat", id="clear-chat-btn", variant="error")
             with Vertical(id="chat-trace"):
-                yield Label("Agent Execution Trace", id="trace-title", classes="section-title")
+                yield Label("Container & GraphRAG Trace", id="trace-title", classes="section-title")
                 yield RichLog(id="trace-log", markup=True, wrap=True)
-            
+
+    def update_selected_gems(self, gems: list[str]) -> None:
+        """Update active gem selection from Explorer and refresh UI badges."""
+        self.selected_gems = sorted(list({g.strip() for g in gems if g.strip()}))
+        try:
+            label = self.query_one("#selected-gems-label", Label)
+            if self.selected_gems:
+                badges = " | ".join(f"[bold cyan]{g}[/bold cyan]" for g in self.selected_gems)
+                label.update(f"Active Gems ({len(self.selected_gems)}): {badges}")
+            else:
+                label.update("Active Gems: None (select gems in Explorer to index)")
+        except Exception:
+            pass
 
     def _add_message(self, role: str, content: str) -> None:
         """Track a message for later export and display it in the RichLog."""
@@ -503,7 +519,7 @@ class AgentChatTab(ScrollableContainer):
 
     def on_mount(self) -> None:
         self.log_widget = self.query_one("#chat-log", RichLog)
-        self._add_message("agent", "System ready. Loading embeddings index...")
+        self._add_message("agent", "System ready. Loading GraphRAG embeddings engine...")
         self.load_agent()
         self.load_projects()
 
@@ -536,11 +552,51 @@ class AgentChatTab(ScrollableContainer):
     def load_agent(self):
         try:
             self.agent = self.agent_loader_callback()
-            self.app.call_from_thread(self._add_message, "agent", "Ready! How can I help you today?")
+            self.app.call_from_thread(self._add_message, "agent", "Ready! Select gems, define your project intention, and click 'Build GraphRAG Context'.")
         except Exception as e:
             self.app.call_from_thread(self._add_message, "error", f"Failed to load agent: {e}")
 
-    @on(Input.Submitted, "#chat-input")
+    @on(Button.Pressed, "#build-graphrag-btn")
+    def on_build_graphrag_context(self) -> None:
+        """Trigger containerized extraction and GraphRAG vector indexing in worker thread."""
+        if not self.agent:
+            self._add_message("error", "Agent still loading... please wait.")
+            return
+
+        if not self.selected_gems:
+            self.notify("No gems selected. Select gems in the Explorer tab first.", severity="warning")
+            return
+
+        intention_widget = self.query_one("#intention-input", Input)
+        intention = intention_widget.value.strip()
+
+        self._start_thinking()
+        self._add_trace(f"[bold cyan]Starting GraphRAG index build for {self.selected_gems}...[/bold cyan]")
+        self.build_graphrag_worker(self.selected_gems, intention)
+
+    @work(thread=True)
+    def build_graphrag_worker(self, gems: list[str], intention: str) -> None:
+        def progress_cb(msg: str) -> None:
+            self.app.call_from_thread(self._add_trace, f"[cyan]➜[/cyan] {msg}")
+
+        try:
+            res = self.agent.set_graphrag_context(gems, intention=intention, progress_callback=progress_cb)
+            summary_msg = (
+                f"**GraphRAG Context Ready!**\n"
+                f"- **Indexed Gems:** {', '.join(res.get('gems', []))}\n"
+                f"- **Project Intention:** {res.get('intention') or 'None specified'}\n"
+                f"- **AST & Doc Nodes:** {res.get('nodes', 0)}\n"
+                f"- **Graph Edges:** {res.get('edges', 0)}\n\n"
+                f"You can now ask grounded architectural questions about these gems."
+            )
+            self.app.call_from_thread(self._add_message, "agent", summary_msg)
+            self.app.call_from_thread(self.notify, "GraphRAG Context ready!")
+        except Exception as e:
+            self.app.call_from_thread(self._add_message, "error", f"GraphRAG build failed: {e}")
+            self.app.call_from_thread(self._add_trace, f"[red]Error: {e}[/red]")
+        finally:
+            self.app.call_from_thread(self._stop_thinking)
+
     @on(Input.Submitted, "#chat-input")
     def submit_query(self, event: Input.Submitted) -> None:
         query = event.value.strip()
@@ -560,82 +616,40 @@ class AgentChatTab(ScrollableContainer):
             
         self._add_message("user", query)
         
-        if project_context:
-            self.log_widget.write(f"[dim]Detected Target Project: {project_context}[/dim]")
-            query = f"[Target Project Context: {project_context}]\nUser Query: {query}"
-
         if not self.agent:
             self._add_message("error", "Still loading... please wait.")
             return
 
         if getattr(self, "_thinking", False):
-            self._query_queue.append(query)
+            self._query_queue.append((query, project_context))
             self._add_message("system", f"Added to queue. ({len(self._query_queue)} pending)")
             return
 
         self._thinking = True
-        self.process_query(query)
+        self.process_query(query, project_context)
 
     @work(thread=True)
-    def process_query(self, query: str) -> None:
+    def process_query(self, query: str, project_context: Optional[str] = None) -> None:
         self.app.call_from_thread(self._start_thinking)
-        import threading
-        import time
         self._thinking = True
-
-        session = getattr(self.agent, "advisor_session", None)
-        stage = session.stage if session is not None else None
-
-        def status_updater():
-            statuses = ["Extracting requirement card..."]
-            if stage in ("card", "stack", "done"):
-                statuses.append("Searching slots for candidate gems...")
-                statuses.append("Ranking the proposed stack...")
-            for status in statuses:
-                if not self._thinking:
-                    break
-                try:
-                    self.app.call_from_thread(self._add_trace, f"[cyan]➜[/cyan] {status}")
-                except Exception:
-                    pass
-                time.sleep(2)
-
-        threading.Thread(target=status_updater, daemon=True).start()
+        self.app.call_from_thread(self._add_trace, f"[cyan]➜[/cyan] Querying GraphRAG agent: {query[:60]}...")
 
         try:
-            response = str(self.agent.advise(query))
+            response = str(self.agent.chat(query, project_context=project_context))
             self._thinking = False
             self.app.call_from_thread(self._add_message, "agent", response)
-            self.app.call_from_thread(self._update_phase_label)
         except Exception as e:
             self._thinking = False
             self.app.call_from_thread(self._add_message, "error", str(e))
+            self.app.call_from_thread(self._add_trace, f"[red]Query error: {e}[/red]")
         finally:
             self.app.call_from_thread(self._stop_thinking)
             if hasattr(self, "_query_queue") and self._query_queue:
-                next_query = self._query_queue.pop(0)
+                next_item = self._query_queue.pop(0)
                 self._thinking = True
-                self.app.call_from_thread(self.process_query, next_query)
+                self.app.call_from_thread(self.process_query, next_item[0], next_item[1])
             else:
                 self._thinking = False
-
-    def _update_phase_label(self) -> None:
-        """Show the advisor stage in the chat title."""
-        session = getattr(self.agent, "advisor_session", None)
-        try:
-            label = self.query_one("#chat-title", Label)
-        except Exception:
-            return
-        stage_labels = {
-            "brief": "gathering brief",
-            "card": "reviewing requirement card",
-            "stack": "reviewing proposed stack",
-            "done": "stack confirmed",
-        }
-        if session is not None and session.stage in stage_labels:
-            label.update(f"RubyGemDB Advisor — {stage_labels[session.stage]}")
-        else:
-            label.update("RubyGemDB Advisor")
 
     def _start_thinking(self):
         self.log_widget.loading = True
@@ -672,33 +686,27 @@ class AgentChatTab(ScrollableContainer):
 
     @on(Button.Pressed, "#export-chat-btn")
     def on_export_chat(self) -> None:
-        """Export the confirmed stack and transcript as markdown + JSON."""
-        session = getattr(self.agent, "advisor_session", None)
-        if session is None:
-            self.notify("No advisor session to export yet.", severity="warning")
+        """Export the active GraphRAG conversation as markdown and JSON."""
+        if not self.agent or not hasattr(self.agent, "export_transcript"):
+            self.notify("Agent not initialized.", severity="warning")
             return
         try:
-            md_path, json_path = write_export(
-                session, out_dir=settings.project_root / "output" / "chat_exports"
-            )
+            md_path, json_path = self.agent.export_transcript()
             self.notify(f"Chat exported to {md_path}")
-            self.log_widget.write(f"\n[dim]Stack exported to {md_path} and {json_path}[/dim]")
+            self.log_widget.write(f"\n[dim]Conversation exported to {md_path} and {json_path}[/dim]")
         except Exception as e:
             self.notify(f"Export failed: {e}", severity="error")
-
 
     @on(Button.Pressed, "#clear-chat-btn")
     def on_clear_chat(self) -> None:
         self._chat_messages.clear()
         self.log_widget.clear()
-        if self.agent is not None:
+        if self.agent is not None and hasattr(self.agent, "clear_chat"):
             try:
-                self.agent.reset_advisor()
+                self.agent.clear_chat()
             except Exception:
                 pass
-        self._update_phase_label()
-        self._add_message("agent", "System ready. Loading embeddings index...")
-        self.load_agent()
+        self._add_message("agent", "Chat cleared. Ready for queries.")
 
 
 class GemApp(App):
@@ -914,6 +922,24 @@ class GemApp(App):
         height: 1fr;
         border: solid $background;
         background: $surface;
+    }
+    #selected-gems-bar {
+        height: auto;
+        padding: 0 1;
+        margin-bottom: 1;
+        background: $surface;
+        border: solid $accent;
+    }
+    #selected-gems-label {
+        width: 100%;
+        color: $text;
+    }
+    #intention-input {
+        margin-bottom: 1;
+    }
+    #build-graphrag-btn {
+        width: 100%;
+        margin-bottom: 1;
     }
     #chat-log {
         height: 1fr;
@@ -1191,6 +1217,16 @@ class GemApp(App):
                 selected = list(self._selected_gems)
             export_tab.set_gems(selected)
             self.log_debug(f"Export tab activated, synced {len(selected)} gems")
+
+        if event.pane.id == TabConstants.CHAT:
+            try:
+                chat_tab = self.query_one(AgentChatTab)
+                with self._selection_lock:
+                    selected = list(self._selected_gems)
+                chat_tab.update_selected_gems(selected)
+                self.log_debug(f"Chat tab activated, synced {len(selected)} gems")
+            except Exception as e:
+                self.log_error(f"Failed to sync selected gems to chat tab: {e}")
 
     @on(DataTable.RowSelected)
     def on_row_selected(self, event: DataTable.RowSelected):
@@ -1743,26 +1779,16 @@ class GemApp(App):
         tabs.active = TabConstants.CHAT
         
         with self._selection_lock:
-            if self._selected_gems:
-                try:
-                    chat_tab = self.query_one(AgentChatTab)
-                    input_widget = chat_tab.query_one("#chat-input", Input)
-                    
-                    gem_list = ", ".join(sorted(list(self._selected_gems)))
-                    context_prefix = f"Regarding the gems {gem_list}: "
-                    
-                    if input_widget.value and not input_widget.value.startswith("Regarding"):
-                        input_widget.value = context_prefix + input_widget.value
-                    elif not input_widget.value:
-                        input_widget.value = context_prefix
-                        
-                    input_widget.focus()
-                    
-                    self._selected_gems.clear()
-                    self._update_selection_status(0)
-                    self.notify(f"Injected {len(gem_list.split(','))} gem(s) into chat context.")
-                except Exception as e:
-                    self.log_error(f"Failed to inject context into chat: {e}")
+            selected = list(self._selected_gems)
+        try:
+            chat_tab = self.query_one(AgentChatTab)
+            chat_tab.update_selected_gems(selected)
+            input_widget = chat_tab.query_one("#chat-input", Input)
+            input_widget.focus()
+            if selected:
+                self.notify(f"Synced {len(selected)} gem(s) into GraphRAG context.")
+        except Exception as e:
+            self.log_error(f"Failed to focus chat: {e}")
 
 
     def action_refresh(self):

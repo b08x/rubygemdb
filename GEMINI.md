@@ -12,6 +12,7 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
   - `services/`: Specialized services for RubyGems API, LLM classification, and Context7 integration.
   - `storage/`: Multi-backend storage (SQLite + JSON) for inventory and results.
 - **Interactive Explorer (TUI)**: A feature-rich Textual-based UI for browsing, filtering, and managing gem classifications.
+- **Contextual GraphRAG (TUI Chat)**: Spins up an ephemeral container (`rubygemdb-indexer:latest`) to extract AST symbol hierarchies (`rubydex`) and structured documentation (`decode`) from shallow-cloned gem repositories (with `.gem` unpack fallback), embedding results into ephemeral `txtai` vector stores with two-stage grounded retrieval and markdown/JSON transcript export.
 
 - **Codebase Memory MCP**: Native integration with the codebase-memory-mcp server to ground LLM-generated integration plans in the actual architectural structure of target projects.
 - **Other Steve Prompt Architect**: A highly aggressive system persona that intercepts raw user queries, strips out conversational slop, and generates concrete, SFL-compliant queries for the txtai vector database.
@@ -60,7 +61,7 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
   uv run rubygemdb stack "CLI data pipeline tool" --out stacks/
   ```
 - **Model Context Protocol (MCP) Server**:
-  Native MCP server running over stdio by default, or as a detached SSE daemon in the background. Exposes read-only tools (`search_gems`, `get_gem`, `compose_stack`, `list_categories`), resources (`rubygemdb://taxonomy`, `rubygemdb://stack-seeds`), and prompt (`design-ruby-stack`).
+  Native MCP server running over stdio by default, or as a detached SSE daemon in the background. Exposes read-only tools (`search_gems`, `get_gem`, `compose_stack`, `list_categories`, `build_gem_graphrag`, `query_gem_graphrag`), resources (`rubygemdb://taxonomy`, `rubygemdb://stack-seeds`), and prompts (`design-ruby-stack`, `gem-architect-rag`).
   ```bash
   # Stdio mode (default, for host agents)
   uv run rubygemdb-mcp
