@@ -134,6 +134,7 @@ def test_build_or_load_index_cached(tmp_path: Path, sample_graph_data):
     cache_dir.mkdir(parents=True)
     (cache_dir / "graph.json").write_text(json.dumps(sample_graph_data))
     (cache_dir / "txtai").mkdir()
+    (cache_dir / "txtai" / "embeddings").touch()
 
     mock_fetcher = MagicMock()
     mock_runner = MagicMock()
@@ -153,6 +154,39 @@ def test_build_or_load_index_cached(tmp_path: Path, sample_graph_data):
     # Since it was cached, fetcher and container runner should NOT be called
     mock_fetcher.fetch_gem.assert_not_called()
     mock_runner.run_indexer.assert_not_called()
+
+
+def test_build_or_load_index_ghost_cache_rebuilds(tmp_path: Path, sample_graph_data):
+    """Ghost cache (graph.json exists and txtai dir exists, but embeddings missing) must rebuild."""
+    base_dir = tmp_path / "graphrag_cache"
+    gem_hash = compute_gem_set_hash(["thor"])
+    cache_dir = base_dir / gem_hash
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "graph.json").write_text(json.dumps(sample_graph_data))
+    # txtai exists but empty - e.g. aborted run
+    (cache_dir / "txtai").mkdir()
+
+    mock_fetcher = MagicMock()
+    mock_fetcher.fetch_gem.return_value = tmp_path / "mock_thor"
+
+    mock_runner = MagicMock()
+    mock_runner.run_indexer.return_value = sample_graph_data
+
+    mock_embeddings = MagicMock()
+
+    service = GraphRAGService(
+        gem_fetcher=mock_fetcher,
+        container_runner=mock_runner,
+        base_dir=base_dir,
+        embeddings=mock_embeddings,
+    )
+
+    data = service.build_or_load_index(["thor"])
+    assert data["version"] == "1.0"
+    # Must have triggered extraction because embeddings file was missing
+    mock_fetcher.fetch_gem.assert_called_once_with("thor")
+    mock_runner.run_indexer.assert_called_once()
+    mock_embeddings.index.assert_called_once()
 
 
 def test_two_stage_retrieval(tmp_path: Path, sample_graph_data):

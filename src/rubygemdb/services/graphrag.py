@@ -64,6 +64,7 @@ class GraphRAGService:
             return self._embeddings
 
         from txtai import Embeddings  # type: ignore
+        from rubygemdb.services.embedding_cache import wrap_embeddings
 
         embeddings = Embeddings(
             path=settings.embedding_model_path,
@@ -71,6 +72,7 @@ class GraphRAGService:
             content=True,
             gpu=settings.txtai_gpu,
         )
+        wrap_embeddings(embeddings, model_name=settings.embedding_model_path)
         return embeddings
 
     def build_or_load_index(
@@ -88,12 +90,13 @@ class GraphRAGService:
         cache_dir = self.base_dir / gem_hash
         graph_file = cache_dir / "graph.json"
         txtai_dir = cache_dir / "txtai"
+        embeddings_file = txtai_dir / "embeddings"
 
         self.active_gems = cleaned_gems
         self.active_hash = gem_hash
 
-        # Check if already cached
-        if not force_rebuild and graph_file.exists() and txtai_dir.exists():
+        # Check if already cached (requires valid graph.json AND non-empty txtai embeddings)
+        if not force_rebuild and graph_file.exists() and embeddings_file.exists():
             msg = f"Loading cached GraphRAG index for [{', '.join(cleaned_gems)}] (hash {gem_hash})..."
             logger.info(msg)
             if progress_callback:
@@ -104,7 +107,7 @@ class GraphRAGService:
 
             self._index_graph_memory()
             embeddings = self._get_or_create_embeddings(txtai_dir)
-            if hasattr(embeddings, "load") and (txtai_dir / "embeddings").exists():
+            if hasattr(embeddings, "load") and embeddings_file.exists():
                 try:
                     embeddings.load(str(txtai_dir))
                 except Exception as e:
@@ -282,9 +285,13 @@ class GraphRAGService:
                 chunk_slice = documents[i : i + batch_size]
                 chunk_start = i + 1
                 chunk_end = min(i + batch_size, total_docs)
+                stats = getattr(embeddings, "_embedding_cache_stats", None)
+                cache_suffix = ""
+                if isinstance(stats, dict) and stats.get("total_texts", 0) > 0:
+                    cache_suffix = f" [cache hits: {stats.get('hits', 0)}, misses: {stats.get('misses', 0)}]"
                 chunk_msg = (
                     f"Vectorizing chunk {chunk_num}/{total_chunks} "
-                    f"({chunk_start}-{chunk_end} of {total_docs} symbols & doc tags)..."
+                    f"({chunk_start}-{chunk_end} of {total_docs} symbols & doc tags){cache_suffix}..."
                 )
                 logger.info(chunk_msg)
                 if progress_callback:
@@ -294,6 +301,14 @@ class GraphRAGService:
 
         if hasattr(embeddings, "index"):
             embeddings.index(document_stream())
+            stats = getattr(embeddings, "_embedding_cache_stats", None)
+            if isinstance(stats, dict):
+                logger.info(
+                    "GraphRAG vectorization complete: %d hits, %d misses (total: %d)",
+                    stats.get("hits", 0),
+                    stats.get("misses", 0),
+                    stats.get("total_texts", 0),
+                )
             if hasattr(embeddings, "save"):
                 try:
                     embeddings.save(str(txtai_dir))

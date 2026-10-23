@@ -18,6 +18,7 @@ from rubygemdb.models.categories import CATEGORY_BY_SLUG
 from rubygemdb.models.session import RAGSession
 from rubygemdb.storage.session_storage import SessionStorage
 from rubygemdb.core.config import settings
+from rubygemdb.services.embedding_cache import wrap_embeddings
 from rubygemdb.services.tracing import (
     trace_agent,
     trace_generation,
@@ -110,6 +111,7 @@ class TxtaiAgent:
             scoring={"method": "bm25", "normalize": False},
             fusion="rrf" 
         )
+        wrap_embeddings(self.embeddings, model_name=settings.embedding_model_path)
         
         # Load or rebuild index
         self.index_path = os.path.join(self.txtai_dir, "rubygems_index")
