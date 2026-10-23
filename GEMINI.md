@@ -10,7 +10,7 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
   - `core/config.py`: Centralized settings using `pydantic-settings` and `.env` support.
   - `models/gem.py`: Robust data models for gem entries, classifications, and risks.
   - `models/session.py`: GraphRAG session models (`RAGSession`, `RAGMessage`, `RAGTrace`).
-  - `services/`: Specialized services for RubyGems API, LLM classification, and Context7 integration.
+  - `services/`: Specialized services for RubyGems API, LLM classification, Context7 integration, and Langfuse tracing (`services/tracing.py`).
   - `storage/`: Multi-backend storage (SQLite + JSON) for inventory and results, plus a persistent GraphRAG session store (`storage/session_storage.py`).
 - **Persistent GraphRAG Sessions**: Conversations, retrieved-node citations, and execution traces persist in `data/sessions.sqlite` (`rag_sessions`, `rag_messages`, `rag_traces` tables, auto-created on first use). The TUI chat tab auto-restores the most recent session on open and offers New Session / Delete Session buttons; every turn is indexed into txtai as a `session_turn` document.
 - **Interactive Explorer (TUI)**: A feature-rich Textual-based UI for browsing, filtering, and managing gem classifications.
@@ -37,6 +37,10 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
     ```bash
     MISTRAL_API_KEY="your_mistral_key" # For LLM classification (read by core/config.py)
     CONTEXT7_API_KEY="your_context7_key" # For cheatsheet generation in TUI
+    LANGFUSE_PUBLIC_KEY="pk-lf-..." # Optional Langfuse tracing & observability
+    LANGFUSE_SECRET_KEY="sk-lf-..."
+    LANGFUSE_BASE_URL="http://localhost:3000" # or LANGFUSE_HOST
+    LANGFUSE_ENABLED="true"
     ```
 
     Optional retrieval-quality stages (both off by default): set `QUERY_EXPANSION_ENABLED` / `RERANKER_ENABLED` to enable local GGUF query expansion and cross-encoder reranking. Models download lazily from Hugging Face into `data/models/`; retrieval degrades to baseline when they are unavailable.

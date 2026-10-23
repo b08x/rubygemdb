@@ -99,6 +99,38 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("models_cache_dir", "model_cache_dir"),
     )
 
+    # Langfuse Observability
+    langfuse_public_key: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("langfuse_public_key", "LANGFUSE_PUBLIC_KEY"),
+    )
+    langfuse_secret_key: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("langfuse_secret_key", "LANGFUSE_SECRET_KEY"),
+    )
+    langfuse_host: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "langfuse_host", "langfuse_base_url", "LANGFUSE_HOST", "LANGFUSE_BASE_URL"
+        ),
+    )
+    langfuse_enabled: Optional[bool] = Field(
+        default=None,
+        validation_alias=AliasChoices("langfuse_enabled", "LANGFUSE_ENABLED"),
+    )
+
+    @property
+    def is_langfuse_configured(self) -> bool:
+        """True if Langfuse credentials are present and not explicitly disabled."""
+        if self.langfuse_enabled is False:
+            return False
+        return bool(self.langfuse_public_key and self.langfuse_secret_key)
+
+    @property
+    def resolved_langfuse_host(self) -> str:
+        """Resolved Langfuse host / base URL."""
+        return self.langfuse_host or "https://cloud.langfuse.com"
+
     @property
     def resolved_models_dir(self) -> Path:
         """Directory for downloaded GGUF models."""
@@ -214,3 +246,12 @@ settings.cache_dir.mkdir(exist_ok=True)
 settings.gem_repos_dir.mkdir(parents=True, exist_ok=True)
 settings.graphrag_dir.mkdir(parents=True, exist_ok=True)
 settings.resolved_models_dir.mkdir(parents=True, exist_ok=True)
+
+# Synchronize Langfuse environment variables for third-party SDKs and OTel
+if settings.langfuse_public_key:
+    os.environ.setdefault("LANGFUSE_PUBLIC_KEY", settings.langfuse_public_key)
+if settings.langfuse_secret_key:
+    os.environ.setdefault("LANGFUSE_SECRET_KEY", settings.langfuse_secret_key)
+if settings.langfuse_host:
+    os.environ.setdefault("LANGFUSE_HOST", settings.langfuse_host)
+    os.environ.setdefault("LANGFUSE_BASE_URL", settings.langfuse_host)

@@ -18,6 +18,7 @@ from rubygemdb.services.container_runner import ContainerRunner
 from rubygemdb.services.gem_fetcher import GemFetcher
 from rubygemdb.services.query_expander import QueryExpander, default_query_expander
 from rubygemdb.services.reranker import CrossEncoderReranker, default_reranker
+from rubygemdb.services.tracing import trace_retriever, trace_span
 
 logger = logging.getLogger("rubygemdb.graphrag")
 
@@ -311,146 +312,189 @@ class GraphRAGService:
         if not self.nodes_by_id:
             return {"primary_nodes": [], "expanded_nodes": [], "edges": []}
 
-        active_expander = query_expander or self.query_expander or default_query_expander
-        active_reranker = reranker or self.reranker or default_reranker
+        with trace_retriever(
+            name="graphrag-retrieve",
+            input={"query": query, "top_k": top_k, "expand_hops": expand_hops},
+            metadata={
+                "active_gems": self.active_gems,
+                "hash": self.active_hash,
+                "total_nodes": len(self.nodes_by_id),
+            },
+            tags=["rubygemdb", "graphrag", "retrieval"],
+        ) as ret_span:
+            active_expander = query_expander or self.query_expander or default_query_expander
+            active_reranker = reranker or self.reranker or default_reranker
 
-        # Dynamic candidate pool size clamped between 15 and 50
-        candidate_k = max(15, min(50, top_k * settings.reranker_candidate_multiplier))
+            # Dynamic candidate pool size clamped between 15 and 50
+            candidate_k = max(15, min(50, top_k * settings.reranker_candidate_multiplier))
 
-        expansion = None
-        if active_expander.is_enabled:
-            try:
-                expansion = active_expander.expand(query)
-            except Exception as e:
-                logger.warning("GraphRAG query expansion failed: %s", e)
+            expansion = None
+            if active_expander.is_enabled:
+                with trace_span(name="query-expansion", input={"query": query}) as exp_span:
+                    try:
+                        expansion = active_expander.expand(query)
+                        exp_span.update(output={
+                            "lexical": expansion.lexical,
+                            "vector": expansion.vector,
+                        })
+                    except Exception as e:
+                        logger.warning("GraphRAG query expansion failed: %s", e)
+                        exp_span.update(level="WARNING", status_message=str(e))
 
-        candidate_node_ids: List[str] = []
+            candidate_node_ids: List[str] = []
 
-        # Stage 1: Vector search
-        if self._embeddings is not None and hasattr(self._embeddings, "search"):
-            vector_queries = [query]
-            if expansion and expansion.vector:
-                for vq in expansion.vector:
-                    if vq and vq not in vector_queries:
-                        vector_queries.append(vq)
+            # Stage 1: Vector search
+            if self._embeddings is not None and hasattr(self._embeddings, "search"):
+                vector_queries = [query]
+                if expansion and expansion.vector:
+                    for vq in expansion.vector:
+                        if vq and vq not in vector_queries:
+                            vector_queries.append(vq)
 
-            for vq in vector_queries:
-                try:
-                    hits = self._embeddings.search(vq, candidate_k)
-                    for h in hits:
-                        parent_nid = None
-                        raw_id = ""
-                        if isinstance(h, (tuple, list)) and len(h) >= 1:
-                            raw_id = str(h[0])
-                        elif isinstance(h, dict):
-                            parent_nid = h.get("parent_node_id") or h.get("node_id")
-                            raw_id = str(h.get("id") or "")
-                        else:
-                            continue
+                with trace_retriever(
+                    name="vector-search-nodes",
+                    input={"queries": vector_queries, "candidate_k": candidate_k},
+                ) as vs_span:
+                    for vq in vector_queries:
+                        try:
+                            hits = self._embeddings.search(vq, candidate_k)
+                            for h in hits:
+                                parent_nid = None
+                                raw_id = ""
+                                if isinstance(h, (tuple, list)) and len(h) >= 1:
+                                    raw_id = str(h[0])
+                                elif isinstance(h, dict):
+                                    parent_nid = h.get("parent_node_id") or h.get("node_id")
+                                    raw_id = str(h.get("id") or "")
+                                else:
+                                    continue
 
-                        nid = parent_nid or raw_id
-                        if nid not in self.nodes_by_id:
-                            for candidate_nid in self.nodes_by_id:
-                                if raw_id.startswith(f"{candidate_nid}_"):
-                                    nid = candidate_nid
+                                nid = parent_nid or raw_id
+                                if nid not in self.nodes_by_id:
+                                    for candidate_nid in self.nodes_by_id:
+                                        if raw_id.startswith(f"{candidate_nid}_"):
+                                            nid = candidate_nid
+                                            break
+
+                                if nid in self.nodes_by_id and nid not in candidate_node_ids:
+                                    candidate_node_ids.append(nid)
+                                if len(candidate_node_ids) >= candidate_k:
                                     break
-
-                        if nid in self.nodes_by_id and nid not in candidate_node_ids:
-                            candidate_node_ids.append(nid)
+                        except Exception as e:
+                            logger.warning("Vector search fallback to keyword scan: %s", e)
                         if len(candidate_node_ids) >= candidate_k:
                             break
-                except Exception as e:
-                    logger.warning("Vector search fallback to keyword scan: %s", e)
-                if len(candidate_node_ids) >= candidate_k:
-                    break
+                    vs_span.update(output={"candidate_count": len(candidate_node_ids)})
 
-        # Fallback keyword scan if vector search returns no results or is unavailable
-        if not candidate_node_ids:
-            query_terms = [t.lower() for t in query.split() if len(t) > 2]
-            if expansion and expansion.lexical:
-                for lt in expansion.lexical:
-                    query_terms.extend([t.lower() for t in lt.split() if len(t) > 2])
-            scored = []
-            for nid, node in self.nodes_by_id.items():
-                text_blob = f"{node.get('name', '')} {json.dumps(node.get('data', {}))}".lower()
-                score = sum(1 for term in query_terms if term in text_blob)
-                if score > 0:
-                    scored.append((score, nid))
-            scored.sort(reverse=True)
-            candidate_node_ids = [nid for _, nid in scored[:candidate_k]]
+            # Fallback keyword scan if vector search returns no results or is unavailable
+            if not candidate_node_ids:
+                with trace_span(name="keyword-scan-fallback", input={"query": query}) as kw_span:
+                    query_terms = [t.lower() for t in query.split() if len(t) > 2]
+                    if expansion and expansion.lexical:
+                        for lt in expansion.lexical:
+                            query_terms.extend([t.lower() for t in lt.split() if len(t) > 2])
+                    scored = []
+                    for nid, node in self.nodes_by_id.items():
+                        text_blob = f"{node.get('name', '')} {json.dumps(node.get('data', {}))}".lower()
+                        score = sum(1 for term in query_terms if term in text_blob)
+                        if score > 0:
+                            scored.append((score, nid))
+                    scored.sort(reverse=True)
+                    candidate_node_ids = [nid for _, nid in scored[:candidate_k]]
+                    kw_span.update(output={"candidate_count": len(candidate_node_ids)})
 
-        # If still empty, take top symbol nodes
-        if not candidate_node_ids:
-            candidate_node_ids = list(self.nodes_by_id.keys())[:candidate_k]
+            # If still empty, take top symbol nodes
+            if not candidate_node_ids:
+                candidate_node_ids = list(self.nodes_by_id.keys())[:candidate_k]
 
-        # Stage 1.5: Cross-Encoder Reranking
-        primary_node_ids: List[str] = []
-        if active_reranker.is_enabled and candidate_node_ids:
-            candidate_nodes = [
-                self.nodes_by_id[nid] for nid in candidate_node_ids if nid in self.nodes_by_id
-            ]
+            # Stage 1.5: Cross-Encoder Reranking
+            primary_node_ids: List[str] = []
+            if active_reranker.is_enabled and candidate_node_ids:
+                with trace_span(
+                    name="cross-encoder-rerank",
+                    input={"candidate_count": len(candidate_node_ids), "top_k": top_k},
+                ) as rr_span:
+                    candidate_nodes = [
+                        self.nodes_by_id[nid] for nid in candidate_node_ids if nid in self.nodes_by_id
+                    ]
 
-            def _node_to_passage(node: Dict[str, Any]) -> str:
-                name = node.get("name", "")
-                data = node.get("data", {})
-                sig = data.get("signature", "")
-                doc = data.get("docstring", "") or " ".join(data.get("comments", []))
-                qname = data.get("qualified_name", name)
-                gem = node.get("gem", "")
-                return f"{qname} (gem: {gem}) {sig} {doc}".strip()
+                    def _node_to_passage(node: Dict[str, Any]) -> str:
+                        name = node.get("name", "")
+                        data = node.get("data", {})
+                        sig = data.get("signature", "")
+                        doc = data.get("docstring", "") or " ".join(data.get("comments", []))
+                        qname = data.get("qualified_name", name)
+                        gem = node.get("gem", "")
+                        return f"{qname} (gem: {gem}) {sig} {doc}".strip()
 
-            try:
-                reranked = active_reranker.rerank(
-                    query=query,
-                    items=candidate_nodes,
-                    text_extractor=_node_to_passage,
-                    top_k=top_k,
-                )
-                primary_node_ids = [item.get("id", "") for item in reranked if item.get("id")]
-                reranked_nodes_by_id = {item["id"]: item for item in reranked if "id" in item}
-            except Exception as e:
-                logger.warning("GraphRAG reranking failed, falling back: %s", e)
+                    try:
+                        reranked = active_reranker.rerank(
+                            query=query,
+                            items=candidate_nodes,
+                            text_extractor=_node_to_passage,
+                            top_k=top_k,
+                        )
+                        primary_node_ids = [item.get("id", "") for item in reranked if item.get("id")]
+                        reranked_nodes_by_id = {item["id"]: item for item in reranked if "id" in item}
+                        rr_span.update(output={"primary_count": len(primary_node_ids)})
+                    except Exception as e:
+                        logger.warning("GraphRAG reranking failed, falling back: %s", e)
+                        primary_node_ids = candidate_node_ids[:top_k]
+                        reranked_nodes_by_id = {}
+                        rr_span.update(level="WARNING", status_message=str(e))
+            else:
                 primary_node_ids = candidate_node_ids[:top_k]
                 reranked_nodes_by_id = {}
-        else:
-            primary_node_ids = candidate_node_ids[:top_k]
-            reranked_nodes_by_id = {}
 
-        # Stage 2: 1-hop graph neighborhood expansion
-        expanded_node_ids: Set[str] = set()
-        matched_edges: List[Dict[str, Any]] = []
+            # Stage 2: 1-hop graph neighborhood expansion
+            with trace_span(
+                name="graph-neighborhood-expansion",
+                input={"primary_nodes_count": len(primary_node_ids), "expand_hops": expand_hops},
+            ) as exp_hop_span:
+                expanded_node_ids: Set[str] = set()
+                matched_edges: List[Dict[str, Any]] = []
 
-        for nid in primary_node_ids:
-            # Outbound edges
-            for edge in self.edges_by_source.get(nid, []):
-                tgt = edge.get("target")
-                if tgt and tgt in self.nodes_by_id:
-                    expanded_node_ids.add(tgt)
-                    matched_edges.append(edge)
+                for nid in primary_node_ids:
+                    # Outbound edges
+                    for edge in self.edges_by_source.get(nid, []):
+                        tgt = edge.get("target")
+                        if tgt and tgt in self.nodes_by_id:
+                            expanded_node_ids.add(tgt)
+                            matched_edges.append(edge)
 
-            # Inbound edges
-            for edge in self.edges_by_target.get(nid, []):
-                src = edge.get("source")
-                if src and src in self.nodes_by_id:
-                    expanded_node_ids.add(src)
-                    matched_edges.append(edge)
+                    # Inbound edges
+                    for edge in self.edges_by_target.get(nid, []):
+                        src = edge.get("source")
+                        if src and src in self.nodes_by_id:
+                            expanded_node_ids.add(src)
+                            matched_edges.append(edge)
 
-        # Remove primary from expanded set to distinguish tiers
-        expanded_node_ids.difference_update(primary_node_ids)
+                # Remove primary from expanded set to distinguish tiers
+                expanded_node_ids.difference_update(primary_node_ids)
+                exp_hop_span.update(output={
+                    "expanded_count": len(expanded_node_ids),
+                    "matched_edges_count": len(matched_edges),
+                })
 
-        primary_nodes = [
-            reranked_nodes_by_id.get(nid, self.nodes_by_id[nid])
-            for nid in primary_node_ids
-            if nid in self.nodes_by_id
-        ]
-        expanded_nodes = [self.nodes_by_id[nid] for nid in sorted(expanded_node_ids) if nid in self.nodes_by_id]
+            primary_nodes = [
+                reranked_nodes_by_id.get(nid, self.nodes_by_id[nid])
+                for nid in primary_node_ids
+                if nid in self.nodes_by_id
+            ]
+            expanded_nodes = [self.nodes_by_id[nid] for nid in sorted(expanded_node_ids) if nid in self.nodes_by_id]
 
-        return {
-            "query": query,
-            "primary_nodes": primary_nodes,
-            "expanded_nodes": expanded_nodes,
-            "edges": matched_edges,
-        }
+            ret_span.update(output={
+                "primary_nodes_count": len(primary_nodes),
+                "expanded_nodes_count": len(expanded_nodes),
+                "edges_count": len(matched_edges),
+            })
+
+            return {
+                "query": query,
+                "primary_nodes": primary_nodes,
+                "expanded_nodes": expanded_nodes,
+                "edges": matched_edges,
+            }
 
     def format_grounded_context(
         self,

@@ -3,7 +3,6 @@ and their integration into hybrid search and GraphRAG.
 """
 
 import math
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest

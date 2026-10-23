@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.14"
 dependencies = [
     "huggingface_hub>=0.28.0",
+    "langfuse>=5.0.4",
     "llama-cpp-python>=0.3.0",
     "mcp>=1.29.0",
     "pydantic>=2.12.5",

@@ -18,6 +18,7 @@ from rubygemdb.services.classifier import GemClassifier
 from rubygemdb.services.context7 import Context7Service
 from rubygemdb.services.prune import PruneService
 from rubygemdb.services.stack import StackService
+from rubygemdb.services.tracing import flush_tracing
 from rubygemdb.storage.sqlite_storage import SQLiteStorage
 from rubygemdb.storage.json_storage import JSONStorage
 
@@ -451,14 +452,17 @@ def run_cli():
     elif getattr(args, "cpu", False):
         settings.cuda_enabled = False
 
-    if args.command == "process":
-        run_process(args)
-    elif args.command == "reclassify":
-        run_reclassify(args)
-    elif args.command == "stack":
-        run_stack(args)
-    elif args.command == "build-indexer":
-        run_build_indexer(args)
+    try:
+        if args.command == "process":
+            run_process(args)
+        elif args.command == "reclassify":
+            run_reclassify(args)
+        elif args.command == "stack":
+            run_stack(args)
+        elif args.command == "build-indexer":
+            run_build_indexer(args)
+    finally:
+        flush_tracing()
 
 if __name__ == "__main__":
     run_cli()

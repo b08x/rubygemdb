@@ -3,6 +3,7 @@ import requests
 from typing import Optional, Any
 from hashlib import sha256
 from rubygemdb.core.config import settings
+from rubygemdb.services.tracing import trace_generation
 
 class LLMService:
     def __init__(self):
@@ -54,7 +55,14 @@ Return JSON only:
             
         key = self._prompt_hash(prompt)
         if key in self.cache:
-            return self.cache[key]
+            with trace_generation(
+                name="classify-gem-llm",
+                model=settings.active_model,
+                input={"messages": [{"role": "user", "content": prompt}]},
+                output=self.cache[key],
+                metadata={"cache_hit": True, "provider": settings.active_provider},
+            ):
+                return self.cache[key]
 
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -66,21 +74,50 @@ Return JSON only:
             "temperature": 0
         }
 
-        try:
-            r = requests.post(settings.active_llm_endpoint, json=payload, headers=headers, timeout=15)
-            if r.status_code == 200:
-                text = r.json()["choices"][0]["message"]["content"]
-                # Handle possible markdown backticks in LLM response
-                if "```json" in text:
-                    text = text.split("```json")[1].split("```")[0].strip()
-                elif "```" in text:
-                    text = text.split("```")[1].split("```")[0].strip()
-                
-                result = json.loads(text)
-                self.cache[key] = result
-                self._save_cache()
-                return result
-        except Exception:
-            pass
+        with trace_generation(
+            name="classify-gem-llm",
+            model=settings.active_model,
+            input={"messages": payload["messages"]},
+            model_parameters={"temperature": 0},
+            metadata={
+                "cache_hit": False,
+                "provider": settings.active_provider,
+                "endpoint": settings.active_llm_endpoint,
+            },
+        ) as gen:
+            try:
+                r = requests.post(settings.active_llm_endpoint, json=payload, headers=headers, timeout=15)
+                if r.status_code == 200:
+                    resp_data = r.json()
+                    text = resp_data["choices"][0]["message"]["content"]
+                    # Handle possible markdown backticks in LLM response
+                    if "```json" in text:
+                        text = text.split("```json")[1].split("```")[0].strip()
+                    elif "```" in text:
+                        text = text.split("```")[1].split("```")[0].strip()
+                    
+                    result = json.loads(text)
+                    self.cache[key] = result
+                    self._save_cache()
+
+                    # Track token usage if provided by provider
+                    usage = resp_data.get("usage")
+                    usage_details = None
+                    if isinstance(usage, dict):
+                        usage_details = {
+                            "input": int(usage.get("prompt_tokens", 0)),
+                            "output": int(usage.get("completion_tokens", 0)),
+                            "total": int(usage.get("total_tokens", 0)),
+                        }
+
+                    gen.update(output=result, usage_details=usage_details)
+                    return result
+                else:
+                    gen.update(
+                        level="ERROR",
+                        status_message=f"HTTP {r.status_code}: {r.text[:200]}",
+                    )
+            except Exception as e:
+                gen.update(level="ERROR", status_message=str(e))
 
         return None

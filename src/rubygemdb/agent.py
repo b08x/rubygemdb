@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 import sqlite3
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -17,9 +18,16 @@ from rubygemdb.models.categories import CATEGORY_BY_SLUG
 from rubygemdb.models.session import RAGSession
 from rubygemdb.storage.session_storage import SessionStorage
 from rubygemdb.core.config import settings
+from rubygemdb.services.tracing import (
+    trace_agent,
+    trace_generation,
+    trace_retriever,
+    trace_tool,
+)
 
 # Initialize RubyGems Service
 rubygems_service = RubyGemsService()
+logger = logging.getLogger("rubygemdb.agent")
 
 def create_child_chunks(text: str, max_chars: int = 512) -> list[str]:
     """Splits a parent text into child chunks using RecursiveParentChildChunker."""
@@ -51,17 +59,21 @@ def fetch_rubygems_info(gem_name: str) -> str:
     Returns:
         JSON string containing the gem's description, dependencies, and URLs.
     """
-    info = rubygems_service.fetch_gem_info(gem_name)
-    if not info:
-        return f"Gem '{gem_name}' not found on rubygems.org."
-    
-    return json.dumps({
-        "name": info.get("name"),
-        "info": info.get("info"),
-        "version": info.get("version"),
-        "project_uri": info.get("project_uri"),
-        "dependencies": info.get("dependencies", {}).get("runtime", [])
-    }, indent=2)
+    with trace_tool(name="fetch-rubygems-info", input={"gem_name": gem_name}) as t_span:
+        info = rubygems_service.fetch_gem_info(gem_name)
+        if not info:
+            res = f"Gem '{gem_name}' not found on rubygems.org."
+            t_span.update(output={"found": False})
+            return res
+        
+        t_span.update(output={"found": True, "name": info.get("name"), "version": info.get("version")})
+        return json.dumps({
+            "name": info.get("name"),
+            "info": info.get("info"),
+            "version": info.get("version"),
+            "project_uri": info.get("project_uri"),
+            "dependencies": info.get("dependencies", {}).get("runtime", [])
+        }, indent=2)
 
 
 
@@ -342,8 +354,14 @@ class TxtaiAgent:
                     query: Natural language search query (e.g., 'fast web framework' or 'NLP text processing').
                     limit: Maximum number of results to return (default 5).
                 """
-                results = hybrid_search(query, phase=None, limit=limit, vector_search=self._vector_search, db_path=self.db_path)
-                return json.dumps(results, indent=2)
+                with trace_retriever(
+                    name="hybrid-memory-search",
+                    input={"query": query, "limit": limit},
+                    tags=["rubygemdb", "search", "tool"],
+                ) as mem_span:
+                    results = hybrid_search(query, phase=None, limit=limit, vector_search=self._vector_search, db_path=self.db_path)
+                    mem_span.update(output={"results_count": len(results)})
+                    return json.dumps(results, indent=2)
 
             agent_prompt = """You are the RubyGemDB Gem Assistant and Architect. You answer questions about Ruby gems: what a gem does, whether it fits the user's project, how two gems compare, or what its risks are. You do NOT design implementation backlogs or scaffold code.
 
@@ -377,22 +395,31 @@ Rules:
 
     def _llm_json(self, system_prompt: str, user_prompt: str) -> dict | None:
         """One JSON-only LLM call; returns None on any failure."""
-        try:
-            model = self._ensure_model()
-            response = model([
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ]).content
-            text = str(response).strip()
-            if "```json" in text:
-                text = text.split("```json")[1].split("```")[0].strip()
-            elif "```" in text:
-                text = text.split("```")[1].split("```")[0].strip()
-            parsed = json.loads(text)
-            return parsed if isinstance(parsed, dict) else None
-        except Exception as e:
-            print(f"Agent LLM call failed: {e}")
-            return None
+        with trace_generation(
+            name="agent-llm-json",
+            model=settings.active_agent_model,
+            input={"messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]},
+            metadata={"session_id": self.active_session_id},
+        ) as json_span:
+            try:
+                model = self._ensure_model()
+                response = model([
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ]).content
+                text = str(response).strip()
+                if "```json" in text:
+                    text = text.split("```json")[1].split("```")[0].strip()
+                elif "```" in text:
+                    text = text.split("```")[1].split("```")[0].strip()
+                parsed = json.loads(text)
+                res = parsed if isinstance(parsed, dict) else None
+                json_span.update(output=res)
+                return res
+            except Exception as e:
+                logger.warning(f"Agent LLM call failed: {e}")
+                json_span.update(level="ERROR", status_message=str(e))
+                return None
 
     def _vector_search(self, query: str, categories: list[str] | None, limit: int) -> list[dict]:
         """txtai similarity search over child chunks, deduplicated by parent gem."""
@@ -584,97 +611,120 @@ Rules:
             metadata={"session_id": self.active_session_id, "role": "user"},
         )
 
-        if not self._graphrag_gems:
-            full_query = f"[Target Project Context: {project_context}]\n{query}" if project_context else query
-            ans = self.run(full_query)
+        with trace_agent(
+            name="rag-chat-turn",
+            session_id=self.active_session_id,
+            input={
+                "query": query,
+                "project_context": project_context,
+                "active_gems": self._graphrag_gems,
+            },
+            metadata={
+                "active_gems": self._graphrag_gems,
+                "intention": self._graphrag_intention,
+                "project_context": project_context,
+            },
+            tags=["rubygemdb", "chat", "graphrag"] if self._graphrag_gems else ["rubygemdb", "chat"],
+        ) as turn_span:
+            if not self._graphrag_gems:
+                full_query = f"[Target Project Context: {project_context}]\n{query}" if project_context else query
+                ans = self.run(full_query)
+                self._chat_history.append({"role": "user", "content": query})
+                self._chat_history.append({"role": "agent", "content": ans})
+
+                # Index response into txtai embedding memory tagged with session_id
+                self.index_memory(
+                    ans,
+                    doc_type="session_turn",
+                    metadata={"session_id": self.active_session_id, "role": "agent"},
+                )
+                # Persist agent response to rag_messages
+                self.session_storage.append_message(
+                    self.active_session_id,
+                    role="agent",
+                    content=ans,
+                    retrieved_nodes=[],
+                )
+                turn_span.update(output={"response": ans})
+                return ans
+
+            # Retrieve 2-stage GraphRAG context
+            retrieval = self.graphrag_service.retrieve(query, top_k=5)
+            grounded_context = self.graphrag_service.format_grounded_context(
+                retrieval, intention=self._graphrag_intention
+            )
+
+            retrieved_node_ids: list[str] = []
+            for n in retrieval.get("primary_nodes", []):
+                if isinstance(n, dict) and "id" in n:
+                    retrieved_node_ids.append(str(n["id"]))
+                elif isinstance(n, str):
+                    retrieved_node_ids.append(n)
+            for n in retrieval.get("expanded_nodes", []):
+                if isinstance(n, dict) and "id" in n:
+                    retrieved_node_ids.append(str(n["id"]))
+                elif isinstance(n, str):
+                    retrieved_node_ids.append(n)
+
+            system_prompt = (
+                "You are the RubyGemDB Gem Architect and Assistant. You provide concrete, highly grounded "
+                "architectural and implementation advice for Ruby gems.\n"
+                "When GraphRAG context is provided, ground your answers in the exact method signatures, "
+                "parameter types from decode, code examples, and call relationships.\n"
+                "Always cite the gem and method/class names accurately. Include practical code snippets "
+                "based on the verified examples where helpful."
+            )
+
+            user_content_parts = []
+            if project_context:
+                user_content_parts.append(f"[Target Project Context: {project_context}]")
+            if grounded_context:
+                user_content_parts.append(f"Grounded Gem Knowledge:\n{grounded_context}")
+            user_content_parts.append(f"User Query:\n{query}")
+
+            user_prompt = "\n\n".join(user_content_parts)
+
+            model = self._ensure_model()
+            messages = [{"role": "system", "content": system_prompt}]
+
+            for turn in self._chat_history[-4:]:
+                # Normalize internal domain role 'agent' to LLM provider role 'assistant'
+                role = "assistant" if turn["role"] == "agent" else turn["role"]
+                if role in ("user", "assistant"):
+                    messages.append({"role": role, "content": turn["content"]})
+
+            messages.append({"role": "user", "content": user_prompt})
+
+            with trace_generation(
+                name="synthesize-response",
+                model=settings.active_agent_model,
+                input={"messages": messages},
+            ) as gen_span:
+                try:
+                    response = str(model(messages).content).strip()
+                    gen_span.update(output=response)
+                except Exception as e:
+                    response = f"LLM generation failed: {e}"
+                    gen_span.update(level="ERROR", status_message=str(e), output=response)
+
             self._chat_history.append({"role": "user", "content": query})
-            self._chat_history.append({"role": "agent", "content": ans})
+            self._chat_history.append({"role": "agent", "content": response})
 
             # Index response into txtai embedding memory tagged with session_id
             self.index_memory(
-                ans,
+                response,
                 doc_type="session_turn",
                 metadata={"session_id": self.active_session_id, "role": "agent"},
             )
-            # Persist agent response to rag_messages
+            # Persist agent response and retrieved node IDs to rag_messages
             self.session_storage.append_message(
                 self.active_session_id,
                 role="agent",
-                content=ans,
-                retrieved_nodes=[],
+                content=response,
+                retrieved_nodes=retrieved_node_ids,
             )
-            return ans
-
-        # Retrieve 2-stage GraphRAG context
-        retrieval = self.graphrag_service.retrieve(query, top_k=5)
-        grounded_context = self.graphrag_service.format_grounded_context(
-            retrieval, intention=self._graphrag_intention
-        )
-
-        retrieved_node_ids: list[str] = []
-        for n in retrieval.get("primary_nodes", []):
-            if isinstance(n, dict) and "id" in n:
-                retrieved_node_ids.append(str(n["id"]))
-            elif isinstance(n, str):
-                retrieved_node_ids.append(n)
-        for n in retrieval.get("expanded_nodes", []):
-            if isinstance(n, dict) and "id" in n:
-                retrieved_node_ids.append(str(n["id"]))
-            elif isinstance(n, str):
-                retrieved_node_ids.append(n)
-
-        system_prompt = (
-            "You are the RubyGemDB Gem Architect and Assistant. You provide concrete, highly grounded "
-            "architectural and implementation advice for Ruby gems.\n"
-            "When GraphRAG context is provided, ground your answers in the exact method signatures, "
-            "parameter types from decode, code examples, and call relationships.\n"
-            "Always cite the gem and method/class names accurately. Include practical code snippets "
-            "based on the verified examples where helpful."
-        )
-
-        user_content_parts = []
-        if project_context:
-            user_content_parts.append(f"[Target Project Context: {project_context}]")
-        if grounded_context:
-            user_content_parts.append(f"Grounded Gem Knowledge:\n{grounded_context}")
-        user_content_parts.append(f"User Query:\n{query}")
-
-        user_prompt = "\n\n".join(user_content_parts)
-
-        model = self._ensure_model()
-        messages = [{"role": "system", "content": system_prompt}]
-
-        for turn in self._chat_history[-4:]:
-            # Normalize internal domain role 'agent' to LLM provider role 'assistant'
-            role = "assistant" if turn["role"] == "agent" else turn["role"]
-            if role in ("user", "assistant"):
-                messages.append({"role": role, "content": turn["content"]})
-
-        messages.append({"role": "user", "content": user_prompt})
-
-        try:
-            response = str(model(messages).content).strip()
-        except Exception as e:
-            response = f"LLM generation failed: {e}"
-
-        self._chat_history.append({"role": "user", "content": query})
-        self._chat_history.append({"role": "agent", "content": response})
-
-        # Index response into txtai embedding memory tagged with session_id
-        self.index_memory(
-            response,
-            doc_type="session_turn",
-            metadata={"session_id": self.active_session_id, "role": "agent"},
-        )
-        # Persist agent response and retrieved node IDs to rag_messages
-        self.session_storage.append_message(
-            self.active_session_id,
-            role="agent",
-            content=response,
-            retrieved_nodes=retrieved_node_ids,
-        )
-
-        return response
+            turn_span.update(output={"response": response})
+            return response
 
     def export_transcript(self, out_dir: Optional[Path] = None) -> tuple[Path, Path]:
         """Export the active GraphRAG chat conversation as markdown and JSON."""
@@ -746,32 +796,39 @@ Rules:
 
     def run(self, query: str) -> str:
         """Run the txtai Agent to answer a query and manage memory window."""
-        # Index the user's query
-        self.index_memory(query, doc_type="chat_user")
-        
-        response = self.agent(query)
-        
-        # Index the agent's final response
-        self.index_memory(response, doc_type="chat_agent")
-        
-        # Prevent Context Bloat via Sliding Window
-        # Keep only the system prompt + the last 6 steps (3 user/agent turns)
-        if hasattr(self.agent, "memory") and hasattr(self.agent.memory, "steps"):
-            if len(self.agent.memory.steps) > 6:
-                # Assuming first step might be system prompt, but we simply keep last 6 for safety.
-                # Usually we'd preserve step 0 if it's a SystemPromptStep.
-                system_steps = [s for s in self.agent.memory.steps if getattr(s, "role", "") == "system"]
-                recent_steps = self.agent.memory.steps[-6:]
-                
-                new_steps = []
-                for s in system_steps:
-                    if s not in recent_steps:
-                        new_steps.append(s)
-                new_steps.extend(recent_steps)
-                
-                self.agent.memory.steps = new_steps
-                
-        return response
+        with trace_agent(
+            name="agent-tool-calling-turn",
+            session_id=self.active_session_id,
+            input={"query": query},
+            tags=["rubygemdb", "agent"],
+        ) as run_span:
+            # Index the user's query
+            self.index_memory(query, doc_type="chat_user")
+            
+            response = self.agent(query)
+            
+            # Index the agent's final response
+            self.index_memory(response, doc_type="chat_agent")
+            
+            # Prevent Context Bloat via Sliding Window
+            # Keep only the system prompt + the last 6 steps (3 user/agent turns)
+            if hasattr(self.agent, "memory") and hasattr(self.agent.memory, "steps"):
+                if len(self.agent.memory.steps) > 6:
+                    # Assuming first step might be system prompt, but we simply keep last 6 for safety.
+                    # Usually we'd preserve step 0 if it's a SystemPromptStep.
+                    system_steps = [s for s in self.agent.memory.steps if getattr(s, "role", "") == "system"]
+                    recent_steps = self.agent.memory.steps[-6:]
+                    
+                    new_steps = []
+                    for s in system_steps:
+                        if s not in recent_steps:
+                            new_steps.append(s)
+                    new_steps.extend(recent_steps)
+                    
+                    self.agent.memory.steps = new_steps
+                    
+            run_span.update(output={"response": str(response)})
+            return response
 
 if __name__ == "__main__":
     agent = TxtaiAgent()

@@ -82,7 +82,8 @@ src/rubygemdb/
 │   ├── stack.py        # Layered gem-stack composition
 │   ├── rubygems.py     # RubyGems API client with caching
 │   ├── llm.py          # Mistral LLM client for fallback classification
-│   └── context7.py     # Context7 API client; repo-anchored library-ID verification
+│   ├── context7.py     # Context7 API client; repo-anchored library-ID verification
+│   └── tracing.py      # Langfuse v5 observability context managers & graceful no-op fallback
 └── storage/
     ├── base.py         # Storage interface
     ├── json_storage.py # JSON file storage implementation
@@ -190,6 +191,12 @@ export MISTRAL_API_KEY="your_mistral_key"
 
 # Context7 API key for generating gem usage cheatsheets
 export CONTEXT7_API_KEY="your_context7_key"
+
+# Optional Langfuse tracing & observability (disabled when unset or LANGFUSE_ENABLED=false)
+export LANGFUSE_PUBLIC_KEY="pk-lf-..."
+export LANGFUSE_SECRET_KEY="sk-lf-..."
+export LANGFUSE_BASE_URL="http://localhost:3000"  # or LANGFUSE_HOST
+export LANGFUSE_ENABLED="true"
 ```
 
 Optional retrieval-quality stages (both off by default; GGUF models download lazily from Hugging Face into `data/models/` on first use):

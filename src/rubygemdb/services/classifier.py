@@ -6,6 +6,7 @@ from rubygemdb.models.categories import CATEGORIES, CATEGORY_BY_SLUG, VALID_CATE
 from rubygemdb.services.rubygems import RubyGemsService
 from rubygemdb.services.llm import LLMService
 from rubygemdb.services.embedding_scorer import EmbeddingScorer
+from rubygemdb.services.tracing import trace_span
 
 _TOKEN_RE = re.compile(r"[^a-z0-9]+")
 
@@ -233,44 +234,77 @@ class GemClassifier:
 
     def classify(self, name: str, category: Optional[str] = None, homepage: Optional[str] = None,
                  source_code_uri: Optional[str] = None, context7_id: Optional[str] = None) -> GemEntry:
-        info = self.rubygems.fetch_gem_info(name) or {}
-        classification, signals, deps, sub_cats = self.heuristic_classify(name, info, category)
-
-        classification.sub_categories = sub_cats
-
-        # Unconditionally call the LLM to generate an agent-optimized description
-        prompt = self.llm.build_prompt(name, info, deps)
-        llm_result = self.llm.call_llm(prompt)
-        agent_desc = ""
-
-        if llm_result:
-            # Only override heuristic classification if LLM is confident and heuristics weren't
-            if classification.confidence < 0.7 and llm_result.get("confidence", 0) > 0.6:
-                llm_primary = llm_result.get("primary")
-                if llm_primary in VALID_CATEGORIES:
-                    classification.primary = llm_primary
-                    classification.confidence = llm_result["confidence"]
-                    classification.sub_categories = self.detect_sub_categories(name, info, deps, llm_primary)
-            agent_desc = llm_result.get("agent_description", "")
-
-        risks = self.score_gem(classification.primary, deps)
-
-        cat = CATEGORY_BY_SLUG.get(classification.primary)
-        attaches_to = cat.slug.split("_")[0] if cat else classification.primary.split("_")[0]
-
-        return GemEntry(
-            name=name,
-            classification=classification,
-            role={
-                "description": str(info.get("info", "")) if info else "",
-                "agent_description": agent_desc,
-                "attaches_to": attaches_to
+        with trace_span(
+            name="classify-gem",
+            input={"name": name, "category_hint": category},
+            metadata={
+                "homepage": homepage,
+                "source_code_uri": source_code_uri,
+                "context7_id": context7_id,
             },
-            risks=risks,
-            signals=signals,
-            dependencies=deps,
-            description=info.get("info") if info else "",
-            homepage=homepage,
-            source_code_uri=source_code_uri,
-            context7_id=context7_id
-        )
+            tags=["rubygemdb", "classifier"],
+        ) as span:
+            info = self.rubygems.fetch_gem_info(name) or {}
+
+            with trace_span(
+                name="heuristic-classify",
+                input={"name": name, "category_hint": category},
+            ) as h_span:
+                classification, signals, deps, sub_cats = self.heuristic_classify(name, info, category)
+                classification.sub_categories = sub_cats
+                h_span.update(output={
+                    "primary": classification.primary,
+                    "confidence": classification.confidence,
+                    "sub_categories": sub_cats,
+                })
+
+            # Unconditionally call the LLM to generate an agent-optimized description
+            prompt = self.llm.build_prompt(name, info, deps)
+            llm_result = self.llm.call_llm(prompt)
+            agent_desc = ""
+
+            if llm_result:
+                # Only override heuristic classification if LLM is confident and heuristics weren't
+                if classification.confidence < 0.7 and llm_result.get("confidence", 0) > 0.6:
+                    llm_primary = llm_result.get("primary")
+                    if llm_primary in VALID_CATEGORIES:
+                        classification.primary = llm_primary
+                        classification.confidence = llm_result["confidence"]
+                        with trace_span(
+                            name="detect-subcategories",
+                            input={"primary": llm_primary, "deps_count": len(deps)},
+                        ) as sc_span:
+                            sub_cats = self.detect_sub_categories(name, info, deps, llm_primary)
+                            classification.sub_categories = sub_cats
+                            sc_span.update(output={"sub_categories": sub_cats})
+
+                agent_desc = llm_result.get("agent_description", "")
+
+            risks = self.score_gem(classification.primary, deps)
+
+            cat = CATEGORY_BY_SLUG.get(classification.primary)
+            attaches_to = cat.slug.split("_")[0] if cat else classification.primary.split("_")[0]
+
+            span.update(output={
+                "name": name,
+                "primary": classification.primary,
+                "confidence": classification.confidence,
+                "sub_categories": classification.sub_categories,
+            })
+
+            return GemEntry(
+                name=name,
+                classification=classification,
+                role={
+                    "description": str(info.get("info", "")) if info else "",
+                    "agent_description": agent_desc,
+                    "attaches_to": attaches_to
+                },
+                risks=risks,
+                signals=signals,
+                dependencies=deps,
+                description=info.get("info") if info else "",
+                homepage=homepage,
+                source_code_uri=source_code_uri,
+                context7_id=context7_id
+            )
