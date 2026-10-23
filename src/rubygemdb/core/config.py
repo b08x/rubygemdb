@@ -2,7 +2,7 @@ import os
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
-from typing import Optional, Union
+from typing import Literal, Optional, Union
 
 class Settings(BaseSettings):
     # API Keys
@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     rubygems_search_url: str = "https://rubygems.org/api/v1/search.json?query={query}"
 
     # Chunking Configuration
-    chunk_parent_mode: str = "paragraph"
+    chunk_parent_mode: Literal["paragraph", "full_doc"] = "paragraph"
     chunk_parent_max_chars: int = 4000
     chunk_child_max_chars: int = 512
     chunk_child_overlap_chars: int = 50
@@ -137,6 +137,7 @@ class Settings(BaseSettings):
     llm_cache_file: Path = cache_dir / "llm_cache.json"
     classified_gems_file: Path = data_dir / "classified_gems.json"
     sqlite_db_file: Path = data_dir / "rubygemdb.sqlite"
+    session_db_file: Path = data_dir / "sessions.sqlite"
     txtai_dir: Path = data_dir / "txtai"
     prune_report_file: Path = data_dir / "prune-report.md"
     gem_repos_dir: Path = cache_dir / "gem_repos"

@@ -21,6 +21,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import uuid
 
 from mcp.server.fastmcp import FastMCP
 
@@ -258,6 +259,19 @@ def list_categories() -> List[Dict[str, Any]]:
 _graphrag_service: Optional[Any] = None
 
 
+_session_storage: Any = None
+
+
+def _get_session_storage(db_path: Optional[str] = None) -> Any:
+    """Lazily load SessionStorage."""
+    global _session_storage
+    if _session_storage is None or db_path is not None:
+        from rubygemdb.storage.session_storage import SessionStorage
+
+        _session_storage = SessionStorage(db_path=db_path)
+    return _session_storage
+
+
 def _get_graphrag_service() -> Any:
     """Lazily load GraphRAGService to avoid heavy initial imports."""
     global _graphrag_service
@@ -269,19 +283,143 @@ def _get_graphrag_service() -> Any:
 
 
 @mcp.tool()
-def build_gem_graphrag(gems: List[str], intention: str = "") -> Dict[str, Any]:
+def list_rag_sessions(limit: int = 20) -> List[Dict[str, Any]]:
+    """List tracked GraphRAG sessions, ordered by most recently updated.
+
+    Args:
+        limit: Maximum number of sessions to return (default 20).
+
+    Returns:
+        List of session metadata dictionaries.
+    """
+    storage = _get_session_storage()
+    sessions = storage.list_sessions(limit=limit)
+    return [s.model_dump() for s in sessions]
+
+
+@mcp.tool()
+def get_rag_session(session_id: str) -> Dict[str, Any]:
+    """Retrieve full details of a GraphRAG session including message history and traces.
+
+    Args:
+        session_id: Unique session UUID.
+
+    Returns:
+        Dictionary containing session metadata, messages, and execution traces.
+    """
+    storage = _get_session_storage()
+    session = storage.get_session(session_id)
+    if not session:
+        raise ValueError(f"Session '{session_id}' not found.")
+    messages = storage.get_messages(session_id)
+    traces = storage.get_traces(session_id)
+    return {
+        "session": session.model_dump(),
+        "messages": [m.model_dump() for m in messages],
+        "traces": [t.model_dump() for t in traces],
+    }
+
+
+@mcp.tool()
+def resume_rag_session(session_id: str) -> Dict[str, Any]:
+    """Resume an existing GraphRAG session, pre-warming its active gems if present.
+
+    Args:
+        session_id: Unique session UUID to resume.
+
+    Returns:
+        Summary dictionary with session status, active gems, and recent conversation turns.
+    """
+    storage = _get_session_storage()
+    session = storage.get_session(session_id)
+    if not session:
+        raise ValueError(f"Session '{session_id}' not found.")
+    if session.active_gems:
+        service = _get_graphrag_service()
+        service.build_or_load_index(session.active_gems)
+    messages = storage.get_messages(session_id)
+    return {
+        "session_id": session.session_id,
+        "title": session.title,
+        "active_gems": session.active_gems,
+        "intention": session.intention,
+        "status": session.status,
+        "message_count": len(messages),
+        "latest_messages": [m.model_dump() for m in messages[-5:]],
+    }
+
+
+@mcp.tool()
+def export_rag_session_transcript(
+    session_id: str, format: str = "markdown"
+) -> Dict[str, Any]:
+    """Export a formatted transcript (markdown or JSON) of a tracked GraphRAG session.
+
+    Args:
+        session_id: Unique session UUID.
+        format: Export format, either 'markdown' or 'json' (default 'markdown').
+
+    Returns:
+        Dictionary containing the formatted transcript string and structured data.
+    """
+    storage = _get_session_storage()
+    transcript_text, json_dict = storage.export_transcript(session_id, format=format)
+    return {
+        "session_id": session_id,
+        "format": format,
+        "transcript": transcript_text,
+        "data": json_dict,
+    }
+
+
+@mcp.tool()
+def delete_rag_session(session_id: str) -> Dict[str, Any]:
+    """Delete a GraphRAG session, its message history, and execution traces.
+
+    Args:
+        session_id: Unique session UUID to delete.
+
+    Returns:
+        Dictionary indicating whether the session was deleted.
+    """
+    storage = _get_session_storage()
+    deleted = storage.delete_session(session_id)
+    return {
+        "session_id": session_id,
+        "deleted": deleted,
+    }
+
+
+@mcp.tool()
+def build_gem_graphrag(
+    gems: List[str], intention: str = "", session_id: Optional[str] = None
+) -> Dict[str, Any]:
     """Pre-warm and index the AST symbol hierarchy and decode documentation for a set of gems.
 
     Args:
         gems: List of Ruby gem names to clone/unpack and index.
         intention: Optional project intention or architectural context.
+        session_id: Optional session UUID to bind and persist context.
 
     Returns:
-        Dictionary with active gems, hash, node counts, and edge statistics.
+        Dictionary with session_id, active gems, hash, node counts, and edge statistics.
     """
+    storage = _get_session_storage()
+    sid = session_id or str(uuid.uuid4())
+    session = storage.get_session(sid)
+    if not session:
+        storage.create_session(
+            session_id=sid,
+            active_gems=gems,
+            intention=intention,
+        )
+    else:
+        storage.update_session(sid, active_gems=gems, intention=intention)
+
     service = _get_graphrag_service()
     data = service.build_or_load_index(gems)
     return {
+        "session_id": sid,
         "gems": service.active_gems,
         "hash": service.active_hash,
         "intention": intention,
@@ -293,7 +431,10 @@ def build_gem_graphrag(gems: List[str], intention: str = "") -> Dict[str, Any]:
 
 @mcp.tool()
 def query_gem_graphrag(
-    gems: List[str], query: str, intention: Optional[str] = None
+    gems: List[str],
+    query: str,
+    intention: Optional[str] = None,
+    session_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute a 2-stage GraphRAG query over selected gems, returning grounded AST signatures, decode parameter types, and code examples.
 
@@ -301,15 +442,50 @@ def query_gem_graphrag(
         gems: List of Ruby gem names to query (will auto-index if not already cached).
         query: Natural language query about gem capabilities, methods, or classes.
         intention: Optional project intention for grounding context.
+        session_id: Optional session UUID to track conversation turns.
 
     Returns:
-        Dictionary with retrieval results (primary nodes, expanded nodes, matched edges, and formatted markdown context).
+        Dictionary with session_id, retrieval results (primary nodes, expanded nodes, matched edges, and formatted markdown context).
     """
+    storage = _get_session_storage()
+    sid = session_id or str(uuid.uuid4())
+    session = storage.get_session(sid)
+    if not session:
+        storage.create_session(
+            session_id=sid,
+            active_gems=gems,
+            intention=intention or "",
+        )
+    elif gems:
+        storage.update_session(sid, active_gems=gems, intention=intention or session.intention)
+
     service = _get_graphrag_service()
     service.build_or_load_index(gems)
     retrieval = service.retrieve(query, top_k=5)
     grounded_context = service.format_grounded_context(retrieval, intention=intention)
+
+    retrieved_node_ids: List[str] = []
+    for n in retrieval.get("primary_nodes", []):
+        if isinstance(n, dict) and "id" in n:
+            retrieved_node_ids.append(str(n["id"]))
+        elif isinstance(n, str):
+            retrieved_node_ids.append(n)
+    for n in retrieval.get("expanded_nodes", []):
+        if isinstance(n, dict) and "id" in n:
+            retrieved_node_ids.append(str(n["id"]))
+        elif isinstance(n, str):
+            retrieved_node_ids.append(n)
+
+    storage.append_message(sid, role="user", content=query)
+    storage.append_message(
+        sid,
+        role="agent",
+        content=grounded_context,
+        retrieved_nodes=retrieved_node_ids,
+    )
+
     return {
+        "session_id": sid,
         "gems": service.active_gems,
         "query": query,
         "intention": intention,

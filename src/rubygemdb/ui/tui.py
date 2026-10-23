@@ -2,12 +2,12 @@ import os
 import json
 import threading
 import argparse
-from typing import Optional
+from typing import Any, Optional
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, ScrollableContainer
 from textual.widgets import (
     Header, Footer, DataTable, RadioSet, RadioButton, Label,
-    Button, Markdown, ListView, ListItem, Input, TabbedContent, TabPane, RichLog,
+    Button, Markdown, ListView, ListItem, Input, TabbedContent, TabPane, RichLog, Select,
 )
 from textual.screen import ModalScreen
 from textual.timer import Timer
@@ -19,6 +19,7 @@ from rubygemdb.services.classifier import GemClassifier
 from rubygemdb.models.categories import CATEGORIES
 from rubygemdb.services.context7 import Context7Service
 from rubygemdb.storage.sqlite_storage import SQLiteStorage
+from rubygemdb.storage.session_storage import SessionStorage
 from rubygemdb.core.config import settings
 from rubygemdb.models.gem import GemEntry
 from rubygemdb.agent import TxtaiAgent
@@ -450,13 +451,16 @@ class ExportTab(ScrollableContainer):
 
 
 class AgentChatTab(ScrollableContainer):
-    """A chat tab for interacting with the Contextual GraphRAG agent."""
+    """A chat tab for interacting with the Contextual GraphRAG agent with persistent session tracking."""
 
-    def __init__(self, agent_loader_callback):
+    def __init__(self, agent_loader_callback, session_storage: Optional[SessionStorage] = None):
         super().__init__()
         self.agent_loader_callback = agent_loader_callback
-        self.agent = None
-        self._chat_messages: list[dict] = []
+        self.session_storage = session_storage or SessionStorage()
+        self.current_session_id: Optional[str] = None
+        self._updating_session_select = False
+        self.agent: Optional[Any] = None
+        self._chat_messages: list[dict[str, str]] = []
         self._query_queue: list[tuple[str, str]] = []
         self._thinking = False
         self.selected_gems: list[str] = []
@@ -465,12 +469,16 @@ class AgentChatTab(ScrollableContainer):
         with Horizontal(id="chat-split"):
             with Vertical(id="chat-main"):
                 yield Label("RubyGemDB Contextual GraphRAG", id="chat-title")
+                from textual.widgets import Select
+                with Horizontal(id="session-bar"):
+                    yield Select([], prompt="Select session...", id="session-select")
+                    yield Button("New Session", id="new-session-btn", variant="primary")
+                    yield Button("Delete Session", id="delete-session-btn", variant="error")
                 with Horizontal(id="selected-gems-bar"):
                     yield Label("Active Gems: None (select gems in Explorer to index)", id="selected-gems-label")
                 yield Input(placeholder="Project intention (e.g. Asynchronous CLI pipeline)", id="intention-input")
                 yield Button("Build GraphRAG Context", id="build-graphrag-btn", variant="primary")
                 yield RichLog(id="chat-log", markup=True, wrap=True)
-                from textual.widgets import Select
                 yield Select([], prompt="Optional: Select a codebase memory project for context", id="project-input")
                 yield Input(placeholder="Ask the GraphRAG agent a grounded question...", id="chat-input")
                 with Horizontal(id="chat-actions"):
@@ -481,9 +489,16 @@ class AgentChatTab(ScrollableContainer):
                 yield Label("Container & GraphRAG Trace", id="trace-title", classes="section-title")
                 yield RichLog(id="trace-log", markup=True, wrap=True)
 
-    def update_selected_gems(self, gems: list[str]) -> None:
+    def update_selected_gems(self, gems: list[str], force: bool = False) -> None:
         """Update active gem selection from Explorer and refresh UI badges."""
+        if not gems and self.selected_gems and not force:
+            return
         self.selected_gems = sorted(list({g.strip() for g in gems if g.strip()}))
+        if self.current_session_id and (self.selected_gems or force):
+            try:
+                self.session_storage.update_session(self.current_session_id, active_gems=self.selected_gems)
+            except Exception:
+                pass
         try:
             label = self.query_one("#selected-gems-label", Label)
             if self.selected_gems:
@@ -494,14 +509,8 @@ class AgentChatTab(ScrollableContainer):
         except Exception:
             pass
 
-    def _add_message(self, role: str, content: str) -> None:
-        """Track a message for later export and display it in the RichLog."""
-        from datetime import datetime
-        self._chat_messages.append({
-            "role": role,
-            "content": content,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        })
+    def _render_message(self, role: str, content: str) -> None:
+        """Render a formatted message to the RichLog widget."""
         color_map = {
             "agent": "green",
             "user": "blue",
@@ -510,18 +519,172 @@ class AgentChatTab(ScrollableContainer):
         }
         color = color_map.get(role, "white")
         self.log_widget.write(f"\n[bold {color}]{role.title()}:[/bold {color}]")
-        
         if role == "agent":
             from rich.markdown import Markdown
             self.log_widget.write(Markdown(content))
         else:
             self.log_widget.write(content)
 
+    def _add_message(self, role: str, content: str) -> None:
+        """Track a message for later export and display it in the RichLog."""
+        from datetime import datetime
+        self._chat_messages.append({
+            "role": role,
+            "content": content,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        self._render_message(role, content)
+
+    def load_session(self, session_id: str) -> None:
+        """Load and restore an existing session into the chat tab UI."""
+        session = self.session_storage.get_session(session_id)
+        if not session:
+            return
+
+        self.current_session_id = session.session_id
+        if self.agent:
+            try:
+                self.agent.bind_session(session.session_id)
+            except Exception:
+                pass
+
+        # Update selected gems
+        self.update_selected_gems(session.active_gems, force=True)
+
+        # Update intention input
+        try:
+            intention_widget = self.query_one("#intention-input", Input)
+            intention_widget.value = session.intention or ""
+        except Exception:
+            pass
+
+        # Clear and restore message history
+        self._chat_messages.clear()
+        if hasattr(self, "log_widget") and self.log_widget:
+            self.log_widget.clear()
+
+        messages = self.session_storage.get_messages(session.session_id)
+        if messages:
+            for msg in messages:
+                self._chat_messages.append({
+                    "role": msg.role,
+                    "content": msg.content,
+                    "timestamp": msg.timestamp,
+                })
+                if hasattr(self, "log_widget") and self.log_widget:
+                    self._render_message(msg.role, msg.content)
+        else:
+            if hasattr(self, "log_widget") and self.log_widget:
+                self._render_message("agent", f"Loaded session '{session.title}'. Ready for queries.")
+
+        # Restore execution traces
+        try:
+            trace_log = self.query_one("#trace-log", RichLog)
+            trace_log.clear()
+            traces = self.session_storage.get_traces(session.session_id, limit=200)
+            if traces:
+                for t in traces:
+                    trace_log.write(f"[dim]{t.timestamp}[/dim] {t.trace_text}")
+            else:
+                trace_log.write("[dim]No previous traces for this session.[/dim]")
+        except Exception:
+            pass
+
+        # Set dropdown select value
+        try:
+            from textual.widgets import Select
+            self._updating_session_select = True
+            select = self.query_one("#session-select", Select)
+            select.value = session.session_id
+        except Exception:
+            pass
+        finally:
+            self._updating_session_select = False
+
+    def refresh_session_options(self, select_id: Optional[str] = None) -> None:
+        """Refresh options in the session select dropdown."""
+        from textual.widgets import Select
+        try:
+            sessions = self.session_storage.list_sessions(limit=50)
+            if not sessions:
+                new_session = self.session_storage.create_session()
+                sessions = [new_session]
+            options = [
+                (f"{s.title or s.session_id[:8]} ({s.updated_at[:16]})", s.session_id)
+                for s in sessions
+            ]
+            self._updating_session_select = True
+            select = self.query_one("#session-select", Select)
+            select.set_options(options)
+            target = select_id or (sessions[0].session_id if sessions else None)
+            if target:
+                select.value = target
+        except Exception:
+            pass
+        finally:
+            self._updating_session_select = False
+
     def on_mount(self) -> None:
         self.log_widget = self.query_one("#chat-log", RichLog)
-        self._add_message("agent", "System ready. Loading GraphRAG embeddings engine...")
+        self.trace_widget = self.query_one("#trace-log", RichLog)
+
+        # Restore latest session or create initial session
+        latest = self.session_storage.get_latest_session()
+        if not latest:
+            latest = self.session_storage.create_session()
+        self.refresh_session_options(select_id=latest.session_id)
+        self.load_session(latest.session_id)
+
         self.load_agent()
         self.load_projects()
+
+    @on(Select.Changed, "#session-select")
+    def on_session_changed(self, event: Any) -> None:
+        """Handle session switching from dropdown."""
+        if getattr(self, "_updating_session_select", False):
+            return
+        from textual.widgets import Select
+        if event.value != Select.BLANK and event.value != self.current_session_id:
+            # Save current intention if modified
+            if self.current_session_id:
+                try:
+                    intention = self.query_one("#intention-input", Input).value.strip()
+                    self.session_storage.update_session(self.current_session_id, intention=intention)
+                except Exception:
+                    pass
+            self.load_session(str(event.value))
+
+    @on(Button.Pressed, "#new-session-btn")
+    def on_new_session(self) -> None:
+        """Start a new session with cleared inputs and a fresh session ID."""
+        if self.current_session_id:
+            try:
+                intention = self.query_one("#intention-input", Input).value.strip()
+                self.session_storage.update_session(self.current_session_id, intention=intention)
+            except Exception:
+                pass
+
+        new_session = self.session_storage.create_session()
+        self.refresh_session_options(select_id=new_session.session_id)
+        self.load_session(new_session.session_id)
+        self.notify("Started new GraphRAG session.")
+
+    @on(Button.Pressed, "#delete-session-btn")
+    def on_delete_session(self) -> None:
+        """Delete current session from database and switch to previous or create fresh."""
+        if not self.current_session_id:
+            return
+        to_delete = self.current_session_id
+        self.session_storage.delete_session(to_delete)
+        self.notify("Deleted session.")
+
+        sessions = self.session_storage.list_sessions(limit=50)
+        if not sessions:
+            new_session = self.session_storage.create_session()
+            sessions = [new_session]
+
+        self.refresh_session_options(select_id=sessions[0].session_id)
+        self.load_session(sessions[0].session_id)
 
     @work(thread=True)
     def load_projects(self):
@@ -539,11 +702,11 @@ class AgentChatTab(ScrollableContainer):
                     text_content = data.get("content", [{}])[0].get("text", "{}")
                     projects = json.loads(text_content).get("projects", [])
                     options = [(f"{p['name']} ({p['root_path']})", p['name']) for p in projects]
-                    
+
                     def update_ui():
                         select = self.query_one("#project-input", Select)
                         select.set_options(options)
-                    
+
                     self.app.call_from_thread(update_ui)
         except Exception as e:
             self.app.call_from_thread(self.log_widget.write, f"[dim]Failed to load projects: {e}[/dim]")
@@ -552,7 +715,9 @@ class AgentChatTab(ScrollableContainer):
     def load_agent(self):
         try:
             self.agent = self.agent_loader_callback()
-            self.app.call_from_thread(self._add_message, "agent", "Ready! Select gems, define your project intention, and click 'Build GraphRAG Context'.")
+            if self.current_session_id:
+                self.agent.bind_session(self.current_session_id)
+            self.app.call_from_thread(self._render_message, "system", "GraphRAG embeddings engine ready.")
         except Exception as e:
             self.app.call_from_thread(self._add_message, "error", f"Failed to load agent: {e}")
 
@@ -570,12 +735,25 @@ class AgentChatTab(ScrollableContainer):
         intention_widget = self.query_one("#intention-input", Input)
         intention = intention_widget.value.strip()
 
+        if self.current_session_id:
+            try:
+                self.session_storage.update_session(
+                    self.current_session_id,
+                    intention=intention,
+                    active_gems=self.selected_gems,
+                )
+            except Exception:
+                pass
+
         self._start_thinking()
         self._add_trace(f"[bold cyan]Starting GraphRAG index build for {self.selected_gems}...[/bold cyan]")
         self.build_graphrag_worker(self.selected_gems, intention)
 
     @work(thread=True)
     def build_graphrag_worker(self, gems: list[str], intention: str) -> None:
+        if not self.agent:
+            return
+
         def progress_cb(msg: str) -> None:
             self.app.call_from_thread(self._add_trace, f"[cyan]➜[/cyan] {msg}")
 
@@ -613,9 +791,9 @@ class AgentChatTab(ScrollableContainer):
                 project_context = str(val).strip()
         except Exception:
             project_context = ""
-            
+
         self._add_message("user", query)
-        
+
         if not self.agent:
             self._add_message("error", "Still loading... please wait.")
             return
@@ -630,6 +808,8 @@ class AgentChatTab(ScrollableContainer):
 
     @work(thread=True)
     def process_query(self, query: str, project_context: Optional[str] = None) -> None:
+        if not self.agent:
+            return
         self.app.call_from_thread(self._start_thinking)
         self._thinking = True
         self.app.call_from_thread(self._add_trace, f"[cyan]➜[/cyan] Querying GraphRAG agent: {query[:60]}...")
@@ -654,13 +834,15 @@ class AgentChatTab(ScrollableContainer):
     def _start_thinking(self):
         self.log_widget.loading = True
         self._add_trace("[b yellow]Starting task execution...[/b yellow]")
-        
+
     def _add_trace(self, text: str):
         try:
             self.query_one("#trace-log", RichLog).write(text)
+            if self.current_session_id:
+                self.session_storage.append_trace(self.current_session_id, text)
         except Exception:
             pass
-            
+
     def _stop_thinking(self):
         self.log_widget.loading = False
         self._add_trace("[b green]Execution completed.[/b green]")
@@ -922,6 +1104,21 @@ class GemApp(App):
         height: 1fr;
         border: solid $background;
         background: $surface;
+    }
+    #session-bar {
+        height: auto;
+        margin-bottom: 1;
+    }
+    #session-select {
+        width: 1fr;
+    }
+    #new-session-btn {
+        width: 16;
+        margin-left: 1;
+    }
+    #delete-session-btn {
+        width: 18;
+        margin-left: 1;
     }
     #selected-gems-bar {
         height: auto;

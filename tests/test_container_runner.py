@@ -62,7 +62,7 @@ def test_build_image_success(mock_runner: ContainerRunner):
         proc.wait.return_value = 0
         mock_popen.return_value = proc
 
-        callback_messages = []
+        callback_messages: list[str] = []
         mock_runner.build_image(progress_callback=callback_messages.append)
 
         assert any("Successfully built" in msg for msg in callback_messages)

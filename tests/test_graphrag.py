@@ -200,7 +200,7 @@ def test_build_vector_index_chunk_progress(tmp_path: Path, sample_graph_data):
     service.graph_data = sample_graph_data
     service._index_graph_memory()
 
-    progress_messages = []
+    progress_messages: list[str] = []
     service._build_vector_index(
         tmp_path / "txtai",
         progress_callback=progress_messages.append,

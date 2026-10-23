@@ -14,6 +14,8 @@ from rubygemdb.services.hybrid_search import build_fts_index, ensure_fts_index, 
 from rubygemdb.services.graphrag import GraphRAGService
 from rubygemdb.services.chunking import RecursiveParentChildChunker, ChunkConfig
 from rubygemdb.models.categories import CATEGORY_BY_SLUG
+from rubygemdb.models.session import RAGSession
+from rubygemdb.storage.session_storage import SessionStorage
 from rubygemdb.core.config import settings
 
 # Initialize RubyGems Service
@@ -66,10 +68,17 @@ def fetch_rubygems_info(gem_name: str) -> str:
 
 
 class TxtaiAgent:
-    def __init__(self, db_path: str = "data/rubygemdb.sqlite", txtai_dir: str = "data/txtai"):
+    def __init__(
+        self,
+        db_path: str = "data/rubygemdb.sqlite",
+        txtai_dir: str = "data/txtai",
+        session_storage: Optional[SessionStorage] = None,
+    ):
         self.db_path = db_path
         self.txtai_dir = txtai_dir
         os.makedirs(self.txtai_dir, exist_ok=True)
+        self.session_storage: SessionStorage = session_storage or SessionStorage()
+        self.active_session_id: Optional[str] = None
         
         # Configure Embeddings with:
         # - Local GGUF via llama.cpp
@@ -473,6 +482,49 @@ Rules:
     def graphrag_service(self, service: GraphRAGService) -> None:
         self._graphrag_service = service
 
+    def bind_session(self, session_id: Optional[str] = None, create_if_missing: bool = True) -> RAGSession:
+        """Bind agent to an active session, restoring active gems, intention, and chat history."""
+        if session_id:
+            session = self.session_storage.get_session(session_id)
+            if not session:
+                if create_if_missing:
+                    session = self.session_storage.create_session(
+                        session_id=session_id,
+                        active_gems=self._graphrag_gems,
+                        intention=self._graphrag_intention,
+                    )
+                else:
+                    raise ValueError(f"Session '{session_id}' not found.")
+        else:
+            session = self.session_storage.create_session(
+                active_gems=self._graphrag_gems,
+                intention=self._graphrag_intention,
+            )
+
+        self.active_session_id = session.session_id
+        if session.active_gems:
+            self._graphrag_gems = list(session.active_gems)
+        elif self._graphrag_gems:
+            self.session_storage.update_session(self.active_session_id, active_gems=self._graphrag_gems)
+
+        if session.intention:
+            self._graphrag_intention = session.intention
+        elif self._graphrag_intention:
+            self.session_storage.update_session(self.active_session_id, intention=self._graphrag_intention)
+
+        # Reload conversation turns into _chat_history
+        self._chat_history.clear()
+        messages = self.session_storage.get_messages(session.session_id)
+        for msg in messages:
+            if msg.role in ("user", "agent"):
+                self._chat_history.append({
+                    "role": msg.role,
+                    "content": msg.content,
+                    "timestamp": msg.timestamp,
+                })
+
+        return session
+
     def set_graphrag_context(
         self,
         gems: list[str],
@@ -482,11 +534,33 @@ Rules:
         """Pre-warm and build GraphRAG index for the selected gems and intention."""
         self._graphrag_gems = sorted(list({g.strip() for g in gems if g.strip()}))
         self._graphrag_intention = intention.strip()
+
+        if self.active_session_id:
+            self.session_storage.update_session(
+                self.active_session_id,
+                active_gems=self._graphrag_gems,
+                intention=self._graphrag_intention,
+            )
+
+        cb: Optional[Callable[[str], None]]
+        if progress_callback is not None or self.active_session_id:
+            def wrapped_progress(msg: str) -> None:
+                if self.active_session_id:
+                    try:
+                        self.session_storage.append_trace(self.active_session_id, msg)
+                    except Exception:
+                        pass
+                if progress_callback:
+                    progress_callback(msg)
+            cb = wrapped_progress
+        else:
+            cb = None
+
         if not self._graphrag_gems:
             return {"gems": [], "intention": self._graphrag_intention, "nodes": 0, "edges": 0}
 
         data = self.graphrag_service.build_or_load_index(
-            self._graphrag_gems, progress_callback=progress_callback
+            self._graphrag_gems, progress_callback=cb
         )
         return {
             "gems": self._graphrag_gems,
@@ -497,11 +571,38 @@ Rules:
 
     def chat(self, query: str, project_context: Optional[str] = None) -> str:
         """Grounded conversational query using contextual GraphRAG when gems are selected."""
+        if not self.active_session_id:
+            self.bind_session()
+
+        assert self.active_session_id is not None
+        # Persist user query to rag_messages
+        self.session_storage.append_message(self.active_session_id, role="user", content=query)
+        # Index user query into txtai embedding memory tagged with session_id
+        self.index_memory(
+            query,
+            doc_type="session_turn",
+            metadata={"session_id": self.active_session_id, "role": "user"},
+        )
+
         if not self._graphrag_gems:
             full_query = f"[Target Project Context: {project_context}]\n{query}" if project_context else query
             ans = self.run(full_query)
             self._chat_history.append({"role": "user", "content": query})
             self._chat_history.append({"role": "agent", "content": ans})
+
+            # Index response into txtai embedding memory tagged with session_id
+            self.index_memory(
+                ans,
+                doc_type="session_turn",
+                metadata={"session_id": self.active_session_id, "role": "agent"},
+            )
+            # Persist agent response to rag_messages
+            self.session_storage.append_message(
+                self.active_session_id,
+                role="agent",
+                content=ans,
+                retrieved_nodes=[],
+            )
             return ans
 
         # Retrieve 2-stage GraphRAG context
@@ -509,6 +610,18 @@ Rules:
         grounded_context = self.graphrag_service.format_grounded_context(
             retrieval, intention=self._graphrag_intention
         )
+
+        retrieved_node_ids: list[str] = []
+        for n in retrieval.get("primary_nodes", []):
+            if isinstance(n, dict) and "id" in n:
+                retrieved_node_ids.append(str(n["id"]))
+            elif isinstance(n, str):
+                retrieved_node_ids.append(n)
+        for n in retrieval.get("expanded_nodes", []):
+            if isinstance(n, dict) and "id" in n:
+                retrieved_node_ids.append(str(n["id"]))
+            elif isinstance(n, str):
+                retrieved_node_ids.append(n)
 
         system_prompt = (
             "You are the RubyGemDB Gem Architect and Assistant. You provide concrete, highly grounded "
@@ -543,6 +656,21 @@ Rules:
 
         self._chat_history.append({"role": "user", "content": query})
         self._chat_history.append({"role": "agent", "content": response})
+
+        # Index response into txtai embedding memory tagged with session_id
+        self.index_memory(
+            response,
+            doc_type="session_turn",
+            metadata={"session_id": self.active_session_id, "role": "agent"},
+        )
+        # Persist agent response and retrieved node IDs to rag_messages
+        self.session_storage.append_message(
+            self.active_session_id,
+            role="agent",
+            content=response,
+            retrieved_nodes=retrieved_node_ids,
+        )
+
         return response
 
     def export_transcript(self, out_dir: Optional[Path] = None) -> tuple[Path, Path]:
@@ -556,6 +684,12 @@ Rules:
         prefix = f"graphrag_chat_{stamp}"
         md_path = target_dir / f"{prefix}.md"
         json_path = target_dir / f"{prefix}.json"
+
+        if self.active_session_id:
+            md_content, json_data = self.session_storage.export_transcript(self.active_session_id)
+            md_path.write_text(md_content, encoding="utf-8")
+            json_path.write_text(json.dumps(json_data, indent=2), encoding="utf-8")
+            return md_path, json_path
 
         # 1. Build Markdown
         md_lines = [
