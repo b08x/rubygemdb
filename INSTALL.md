@@ -68,6 +68,7 @@ $ rubygemdb-tui gems-inventory.csv
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
 - Ollama with `embeddinggemma` model (for agent features; the MCP server runs FTS5-first without Ollama and loads embeddings lazily only when keyword search returns nothing)
 - Optional: local GGUF models for query expansion and cross-encoder reranking — no manual setup; when `QUERY_EXPANSION_ENABLED` or `RERANKER_ENABLED` is set, the models (~1.1 GB and ~640 MB) download lazily from Hugging Face into `data/models/`
+- Optional: a Langfuse instance (Langfuse Cloud or self-hosted) for observability — no setup needed to skip it; tracing stays a no-op until `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are set
 
 <details>
 <summary><strong>uv (Recommended)</strong></summary>
@@ -230,6 +231,12 @@ RERANKER_N_CTX=1024
 # RERANKER_N_THREADS=           # unset = llama.cpp default
 RERANKER_CANDIDATE_MULTIPLIER=3 # candidate pool = top_k × multiplier, clamped 15–50
 # MODELS_CACHE_DIR=             # unset = ./data/models
+
+# Langfuse Observability (optional - tracing is a no-op until both keys are set)
+LANGFUSE_PUBLIC_KEY=
+LANGFUSE_SECRET_KEY=
+# LANGFUSE_HOST=                # unset = https://cloud.langfuse.com (LANGFUSE_BASE_URL also accepted)
+# LANGFUSE_ENABLED=             # unset = enabled when keys present; false disables even with keys
 ```
 
 Legacy aliases (`EXPANDER_*`, `CROSS_ENCODER_*`, `CANDIDATE_MULTIPLIER`, `MODEL_CACHE_DIR`) are also accepted. Both stages fall back to baseline retrieval when the models are disabled, missing, or fail at runtime.
@@ -276,6 +283,7 @@ uv run mypy src/rubygemdb/
 - `mcp` >= 1.29.0 — Model Context Protocol server (official SDK; provides `mcp.server.fastmcp`)
 - `huggingface_hub` >= 0.28.0 — Hugging Face Hub GGUF model download (query expansion & reranking)
 - `llama-cpp-python` >= 0.3.0 — Local GGUF inference for query expansion and cross-encoder reranking
+- `langfuse` >= 5.0.4 — Langfuse v5 observability tracing (optional; degrades to a no-op without keys)
 
 ### Development
 

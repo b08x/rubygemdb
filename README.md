@@ -22,6 +22,7 @@
 - **Native MCP Server** — `rubygemdb-mcp` serves the taxonomy, gem metadata, stack composition, and GraphRAG sessions to coding agents (Claude Code, Antigravity, Cursor) over stdio or a background SSE daemon — the gem catalog is strictly read-only
 - **Contextual GraphRAG Pipeline** — On-demand containerized extraction of AST symbol hierarchies (`rubydex`) and structured documentation (`decode`) from gem source repositories, embedded into ephemeral `txtai` vector stores with 2-stage retrieval for deeply grounded coding agent chat and MCP queries
 - **Persistent GraphRAG Sessions** — Conversations, retrieved-node citations, and execution traces persist in a dedicated `data/sessions.sqlite` store; the TUI auto-restores the most recent session on open, and MCP clients can list, inspect, resume, export, and delete sessions
+- **Optional Langfuse Observability** — Langfuse v5 tracing context managers wrap gem classification, LLM calls (with token usage), hybrid search, GraphRAG retrieval, agent chat turns, and MCP GraphRAG tools, grouping traces by session id; off unless `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY` are set, and `LANGFUSE_ENABLED=false` disables it even then — when disabled the tracer yields no-op observations and never initializes the client
 - **Interactive TUI** — Textual-based terminal UI for browsing, filtering, editing, and exporting classified gems with real-time classification
 - **Batch CLI Pipeline** — Headless processing of gem inventories with metadata verification, classification, and YAML report generation
 - **Risk Assessment** — Invasiveness, coupling, and abstraction leak scoring for architectural impact analysis
@@ -71,6 +72,7 @@ graph LR
     ollama["Ollama\nembeddinggemma model"]
     mcp-context7["Context7 MCP\n@upstash/context7-mcp"]
     mcp-cbm["Codebase Memory MCP\ncodebase-memory-mcp"]
+    langfuse-api["Langfuse API\ncloud.langfuse.com (optional)"]
 
     rubygems-service["RubyGems Service"] -->|"fetches gem info"| rubygems-api
     context7-service["Context7 Service"] -->|"searches libraries"| context7-api
@@ -78,6 +80,7 @@ graph LR
     agent["AI Agent"] -->|"generates embeddings"| ollama
     agent -->|"retrieves docs"| mcp-context7
     agent -->|"searches code"| mcp-cbm
+    tracing-service["Tracing Service\nservices/tracing.py"] -->|"reports spans & traces"| langfuse-api
 
     style rubygems-api fill:#585b70,stroke:#585b70,color:#cdd6f4
     style context7-api fill:#585b70,stroke:#585b70,color:#cdd6f4
@@ -85,6 +88,7 @@ graph LR
     style ollama fill:#585b70,stroke:#585b70,color:#cdd6f4
     style mcp-context7 fill:#585b70,stroke:#585b70,color:#cdd6f4
     style mcp-cbm fill:#585b70,stroke:#585b70,color:#cdd6f4
+    style langfuse-api fill:#585b70,stroke:#585b70,color:#cdd6f4
 ```
 
 ---
@@ -288,6 +292,8 @@ Alternatively, set `CUDA_ENABLED=true` / `CUDA_ENABLED=false` or `DEVICE=cuda` i
 
 Optional retrieval-quality models: enabling `QUERY_EXPANSION_ENABLED` or `RERANKER_ENABLED` lazily downloads GGUF models (~1.1 GB and ~640 MB) from Hugging Face into `data/models/` on first use. No model setup is needed to run the baseline pipeline — both stages are off by default.
 
+Optional Langfuse observability: set `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` to enable tracing (plus `LANGFUSE_HOST` or `LANGFUSE_BASE_URL` for a self-hosted instance — the default is `https://cloud.langfuse.com`). Tracing is off unless both keys are set, and `LANGFUSE_ENABLED=false` disables it even when they are. No keys, no client: the tracer degrades to no-op observations and never initializes the Langfuse SDK. Traced operations cover classification, LLM calls, hybrid search, GraphRAG retrieval, agent chat turns, and MCP GraphRAG tools; the CLI flushes buffered traces when a command finishes.
+
 ---
 
 ## Development
@@ -321,7 +327,8 @@ rubygemdb/
 │   │   ├── prune.py        # Overlap/stale gem prune reports
 │   │   ├── rubygems.py     # RubyGems API client
 │   │   ├── llm.py          # Mistral LLM client
-│   │   └── context7.py     # Context7 API client with repo-anchored ID verification
+│   │   ├── context7.py     # Context7 API client with repo-anchored ID verification
+│   │   └── tracing.py      # Langfuse v5 observability context managers (optional; no-op fallback)
 │   ├── storage/
 │   │   ├── base.py         # Storage interface
 │   │   ├── json_storage.py # JSON file storage

@@ -1,3 +1,23 @@
+## [Unreleased]
+
+### 🚀 Features
+
+- Add optional Langfuse observability and tracing (`services/tracing.py`): context-manager spans over gem classification, LLM calls (with token usage), hybrid search, GraphRAG retrieval stages, agent chat turns, and MCP GraphRAG tools
+- Add settings `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST` (alias `LANGFUSE_BASE_URL`), and `LANGFUSE_ENABLED`; the host defaults to `https://cloud.langfuse.com`
+- Tracing is disabled unless both keys are set; `LANGFUSE_ENABLED=false` disables it even with keys present. When disabled, traced blocks yield no-op observations and the Langfuse client is never initialized (the SDK imports lazily, only when enabled)
+- Trace names are kebab-case (`classify-gem`, `classify-gem-llm`, `rag-chat-turn`, `graphrag-retrieve`, `mcp-build-gem-graphrag`, …) and tagged `rubygemdb`; GraphRAG chat turns group traces by session id
+- Exceptions raised inside a traced operation are recorded with `level=ERROR` and a status message before being re-raised
+- The CLI flushes buffered traces via `flush_tracing()` when `process`, `reclassify`, `stack`, or `build-indexer` finish, on success or failure
+- Add `langfuse>=5.0.4` runtime dependency (pulls in the OpenTelemetry SDK family)
+
+### 🧪 Testing
+
+- Add test suite `tests/test_tracing.py` covering the no-op fallback contract, span/generation creation, error capture, session-id propagation, and flush behavior
+
+### 📚 Documentation
+
+- Document Langfuse configuration and tracing behavior in README.md, CLAUDE.md, and INSTALL.md (AGENTS.md and GEMINI.md were updated alongside the code in the same commit)
+
 ## [0.8.0] - 2026-10-23
 
 ### 🚀 Features

@@ -45,7 +45,8 @@ src/rubygemdb/
 │   ├── prune.py       # Overlap/stale gem prune reports
 │   ├── rubygems.py    # RubyGems API client with caching
 │   ├── llm.py         # Mistral LLM client for fallback classification
-│   └── context7.py    # Context7 API client for cheatsheet generation
+│   ├── context7.py    # Context7 API client for cheatsheet generation
+│   └── tracing.py     # Langfuse v5 observability context managers (optional; no-op fallback)
 └── storage/           # Data persistence layer
     ├── base.py        # Storage interface
     ├── json_storage.py# JSON file storage implementation
@@ -80,6 +81,15 @@ Required environment variables for full functionality:
 export MISTRAL_API_KEY="your_key"          # For LLM classification
 export CONTEXT7_API_KEY="your_key"        # For cheatsheet generation
 ```
+
+Optional Langfuse tracing & observability (disabled when keys are unset or `LANGFUSE_ENABLED=false`):
+```bash
+export LANGFUSE_PUBLIC_KEY="pk-lf-..."    # Both keys must be set to enable tracing
+export LANGFUSE_SECRET_KEY="sk-lf-..."
+export LANGFUSE_HOST="http://localhost:3000"  # or LANGFUSE_BASE_URL; default https://cloud.langfuse.com
+# export LANGFUSE_ENABLED="true"          # explicit enable; =false disables even with keys set
+```
+When configured, classification, LLM calls, hybrid search, GraphRAG retrieval, agent chat turns, and MCP GraphRAG tools emit Langfuse spans (`services/tracing.py`); the CLI flushes them when a command exits. When disabled, traced blocks yield no-op observations and the Langfuse client is never initialized.
 
 Optional retrieval-quality stages (off by default; GGUF models download lazily from Hugging Face into `data/models/`):
 ```bash
