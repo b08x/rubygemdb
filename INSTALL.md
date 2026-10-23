@@ -66,7 +66,7 @@ $ rubygemdb-tui gems-inventory.csv
 
 - Python 3.14+
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
-- Ollama with `embeddinggemma` model (for agent features)
+- Ollama with `embeddinggemma` model (for agent features; the MCP server runs FTS5-first without Ollama and loads embeddings lazily only when keyword search returns nothing)
 
 <details>
 <summary><strong>uv (Recommended)</strong></summary>
@@ -91,7 +91,8 @@ uv sync --extra cuda
 git clone https://github.com/rwpannick/rubygemdb.git
 cd rubygemdb
 pip install -e .
-pip install -r dev-requirements.txt
+# Dev tooling (pytest, ruff, mypy) is managed by uv's [dependency-groups] via
+# `uv sync --dev` — there is no dev-requirements.txt.
 ```
 
 </details>
@@ -105,6 +106,9 @@ uv run rubygemdb --help
 
 # Test TUI
 uv run rubygemdb-tui --help
+
+# Test MCP server
+uv run rubygemdb-mcp --help
 
 # Run tests
 uv run pytest
@@ -250,6 +254,7 @@ uv run mypy src/rubygemdb/
 - `txtai[agent,pipeline,similarity]` >= 9.13.0 — Vector embeddings
 - `sqlite-vec` >= 0.1.9 — SQLite vector extension
 - `pyyaml` >= 6.0.3 — YAML serialization
+- `mcp` >= 1.29.0 — Model Context Protocol server (official SDK; provides `mcp.server.fastmcp`)
 
 ### Development
 
@@ -287,3 +292,5 @@ nokogiri,1.15.0,,HTML/XML parser,...
 | `data/cache/gem_cache.json` | RubyGems API response cache |
 | `data/cache/llm_cache.json` | LLM prompt/response cache |
 | `data/txtai/` | Vector embedding index |
+| `data/mcp.pid` | MCP daemon PID file (`data/mcp.json` sidecar records host/port) |
+| `data/mcp.log` | MCP daemon log |

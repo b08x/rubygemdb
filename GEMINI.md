@@ -59,6 +59,19 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
   ```bash
   uv run rubygemdb stack "CLI data pipeline tool" --out stacks/
   ```
+- **Model Context Protocol (MCP) Server**:
+  Native MCP server running over stdio by default, or as a detached SSE daemon in the background. Exposes read-only tools (`search_gems`, `get_gem`, `compose_stack`, `list_categories`), resources (`rubygemdb://taxonomy`, `rubygemdb://stack-seeds`), and prompt (`design-ruby-stack`).
+  ```bash
+  # Stdio mode (default, for host agents)
+  uv run rubygemdb-mcp
+
+  # Background SSE daemon lifecycle
+  uv run rubygemdb-mcp --daemon start --port 8011
+  uv run rubygemdb-mcp --daemon status
+  uv run rubygemdb-mcp --daemon stop
+  uv run rubygemdb-mcp --sse                 # shortcut for --daemon start
+  ```
+  Other flags: `--transport stdio|sse` (default `stdio`), `--host` (default `127.0.0.1`), `--port` (default `8000`), `--foreground`, `--pid-file` (default `data/mcp.pid`), `--log-file` (default `data/mcp.log`). All tools are strictly read-only: SQLite `mode=ro` connections; mutating storage methods raise `PermissionError`.
 
 ## Development Conventions
 

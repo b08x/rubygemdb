@@ -25,6 +25,7 @@ RubyGemDB is a Ruby gem analysis and classification tool that categorizes gems i
 src/rubygemdb/
 ├── cli.py              # Command-line interface entry point
 ├── agent.py            # Advisor wiring: card/intent/reason LLMs + tool-calling agent
+├── mcp_server.py       # Native MCP server & daemon lifecycle (FastMCP)
 ├── ui/tui.py          # Interactive Textual-based TUI with gem explorer + advisor chat
 ├── core/config.py     # Settings and environment variable handling  
 ├── models/gem.py      # Pydantic data models for gem data
@@ -32,8 +33,11 @@ src/rubygemdb/
 ├── services/          # Core business logic
 │   ├── advisor.py     # Card-driven advisor session state machine
 │   ├── advisor_export.py # Markdown + JSON export of advisor sessions
-│   ├── hybrid_search.py # SQLite FTS5 + txtai vector search, RRF fusion
+│   ├── hybrid_search.py # SQLite FTS5 + txtai vector search, RRF fusion (explicit `category` filter; `phase` narrows via category keywords)
 │   ├── classifier.py  # Heuristic and LLM classification logic
+│   ├── embedding_scorer.py # txtai embedding similarity vs category descriptions
+│   ├── stack.py       # Layered gem-stack composition (read_only mode for MCP)
+│   ├── prune.py       # Overlap/stale gem prune reports
 │   ├── rubygems.py    # RubyGems API client with caching
 │   ├── llm.py         # Devstral LLM client for fallback classification
 │   └── context7.py    # Context7 API client for cheatsheet generation
@@ -97,6 +101,20 @@ python -m rubygemdb.ui.tui [optional-gems-inventory.csv]
 uv run rubygemdb-tui [optional-gems-inventory.csv]
 ```
 
+### Running the MCP Server
+Expose the taxonomy, classified gems, and stack composition to coding agents (stdio by default, or a background SSE daemon):
+```bash
+# Stdio transport (default, for host agents such as Claude Code)
+uv run rubygemdb-mcp
+
+# Background SSE daemon lifecycle
+uv run rubygemdb-mcp --daemon start --port 8011
+uv run rubygemdb-mcp --daemon status
+uv run rubygemdb-mcp --daemon stop
+```
+
+Tools (`search_gems`, `get_gem`, `compose_stack`, `list_categories`), resources (`rubygemdb://taxonomy`, `rubygemdb://stack-seeds`), and prompt (`design-ruby-stack`) are strictly read-only: SQLite connections open `mode=ro` and every mutating `SQLiteStorage` method raises `PermissionError`. The daemon writes `data/mcp.pid`, a `data/mcp.json` host/port sidecar, and `data/mcp.log`.
+
 ### Development Workflow
 ```bash
 # Lint code
@@ -136,6 +154,7 @@ CSV files must contain either:
 
 ### Primary Storage
 - **SQLite Database**: `data/rubygemdb.sqlite` - Central storage for inventory and classified gems; the `classified_gems` table carries a `sub_categories` column (auto-added by migration on existing databases)
+- **Read-Only Mode**: `SQLiteStorage(read_only=True, db_path=...)` opens `file:...?mode=ro` URI connections, skips schema init, and raises `PermissionError` on every mutating method — this is what the MCP server uses; `get_classified_gem(name)` / `get_inventory_gem(name)` back the `get_gem` MCP tool
 - **YAML Output**: Per-category files in output directory for batch processing results
 
 ### Caching Layers

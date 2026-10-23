@@ -1,0 +1,579 @@
+"""Model Context Protocol (MCP) server for RubyGemDB.
+
+Enables AI coding agents (Claude Code, Antigravity, OpenCode, Cursor) to discover
+Ruby gems, query classifications and architectural layers, and compose layered
+gem stacks.
+
+Exposes an executable `rubygemdb-mcp` CLI entrypoint running over stdio by default
+for host agent child-process spawning, alongside `--daemon start|status|stop` lifecycle
+commands to run detached in the background over SSE.
+"""
+
+import argparse
+import json
+import logging
+import os
+import re
+import signal
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from mcp.server.fastmcp import FastMCP
+
+from rubygemdb.core.config import settings
+from rubygemdb.models.categories import CATEGORIES, CATEGORY_BY_SLUG, LAYERS
+from rubygemdb.services.hybrid_search import SearchCallable, hybrid_search
+from rubygemdb.services.stack import StackService, guess_category, seed_gems
+from rubygemdb.storage.sqlite_storage import SQLiteStorage
+
+logger = logging.getLogger("rubygemdb.mcp")
+
+mcp = FastMCP(
+    name="rubygemdb",
+    instructions=(
+        "Ruby gem analysis and architectural classification server. "
+        "Provides tools to search gems across 21 architectural categories, "
+        "inspect gem capabilities, dependencies, and risks, and compose "
+        "layered gem stacks (substrate -> plumbing -> composition -> quality)."
+    ),
+)
+
+_lazy_vector_search: Optional[SearchCallable] = None
+_lazy_vector_search_loaded: bool = False
+
+
+def _get_read_only_storage(db_path: Optional[str] = None) -> SQLiteStorage:
+    """Instantiate a strictly read-only SQLiteStorage instance."""
+    resolved_path = db_path or str(settings.sqlite_db_file)
+    return SQLiteStorage(read_only=True, db_path=resolved_path)
+
+
+def _get_lazy_vector_search() -> Optional[SearchCallable]:
+    """Load txtai embeddings lazily on demand if available, without blocking startup."""
+    global _lazy_vector_search, _lazy_vector_search_loaded
+    if not _lazy_vector_search_loaded:
+        _lazy_vector_search_loaded = True
+        index_path = settings.txtai_dir / "rubygems_index"
+        if index_path.exists():
+            try:
+                from txtai import Embeddings  # type: ignore
+
+                embeddings = Embeddings(
+                    path="ollama/embeddinggemma",
+                    backend="sqlite",
+                    content=True,
+                    gpu=settings.txtai_gpu,
+                )
+                embeddings.load(str(index_path))
+
+                def _vs(query: str, categories: Optional[List[str]], limit: int) -> List[Dict[str, Any]]:
+                    results = embeddings.search(query, limit)
+                    matches: List[Dict[str, Any]] = []
+                    for r in results:
+                        if isinstance(r, (tuple, list)) and len(r) == 2:
+                            r = {"id": r[0], "score": r[1]}
+                        if not isinstance(r, dict):
+                            continue
+                        name = None
+                        text = str(r.get("text") or "")
+                        m = re.match(r"^Gem Name: (\S+)", text)
+                        if m:
+                            name = m.group(1)
+                        elif r.get("type") in (None, "gem") and r.get("name"):
+                            name = str(r["name"])
+                        if not name:
+                            continue
+                        cat = r.get("category") or guess_category(name)
+                        if categories and cat not in categories:
+                            continue
+                        matches.append({
+                            "name": name,
+                            "category": cat,
+                            "description": text,
+                            "score": float(r.get("score", 0.0)),
+                        })
+                    return matches
+
+                _lazy_vector_search = _vs
+            except Exception as e:
+                logger.warning("Could not load txtai embeddings for vector search: %s", e)
+                _lazy_vector_search = None
+    return _lazy_vector_search
+
+
+# --- MCP Tools ---
+
+
+@mcp.tool()
+def search_gems(
+    query: str,
+    category: Optional[str] = None,
+    phase: Optional[str] = None,
+    limit: int = 10,
+) -> List[Dict[str, Any]]:
+    """Search Ruby gems using SQLite FTS5 keyword matching and architectural metadata.
+
+    Supports filtering by architectural category or build phase. Deferring heavy
+    embeddings allows sub-millisecond responses for almost all queries.
+
+    Args:
+        query: Free-text search query (e.g. 'html parser', 'terminal ui', 'jwt auth').
+        category: Optional category slug (e.g. 'document_parsing', 'cli_libraries', 'ai_llm').
+        phase: Optional build phase filter ('skeleton', 'input', 'processing', 'output').
+        limit: Maximum number of results to return (default: 10).
+    """
+    db_uri = f"file:{Path(settings.sqlite_db_file).resolve()}?mode=ro"
+
+    # Fast sub-millisecond keyword FTS5 match first
+    results = hybrid_search(
+        query=query,
+        phase=phase,
+        category=category,
+        limit=limit,
+        vector_search=None,
+        db_path=db_uri,
+    )
+
+    # If no FTS hits, attempt lazy vector fallback if index is available
+    if not results:
+        vs = _get_lazy_vector_search()
+        if vs is not None:
+            results = hybrid_search(
+                query=query,
+                phase=phase,
+                category=category,
+                limit=limit,
+                vector_search=vs,
+                db_path=db_uri,
+            )
+
+    return results
+
+
+@mcp.tool()
+def get_gem(name: str) -> Dict[str, Any]:
+    """Retrieve complete architectural metadata, layer, sub-categories, agent description,
+    dependencies, and risks for a named Ruby gem.
+
+    Args:
+        name: The exact name of the gem (e.g. 'nokogiri', 'thor', 'dotenv').
+    """
+    storage = _get_read_only_storage()
+    gem = storage.get_classified_gem(name)
+    if gem:
+        cat = CATEGORY_BY_SLUG.get(gem.classification.primary)
+        return {
+            "name": gem.name,
+            "category": gem.classification.primary,
+            "layer": cat.layer if cat else "unknown",
+            "sub_categories": gem.classification.sub_categories,
+            "confidence": gem.classification.confidence,
+            "description": gem.description,
+            "agent_description": gem.role.get("description", gem.description or ""),
+            "role": gem.role,
+            "capabilities": gem.capabilities,
+            "dependencies": gem.dependencies,
+            "risks": gem.risks.model_dump(),
+            "signals": gem.signals.model_dump(),
+            "homepage": gem.homepage,
+            "source_code_uri": gem.source_code_uri,
+            "context7_id": gem.context7_id,
+            "preferred": gem.preferred,
+            "classified": True,
+        }
+
+    # Check unclassified inventory fallback
+    inv = storage.get_inventory_gem(name)
+    if inv:
+        cat_name = inv.get("category") or guess_category(name)
+        cat = CATEGORY_BY_SLUG.get(cat_name)
+        return {
+            "name": name,
+            "category": cat_name,
+            "layer": cat.layer if cat else "unknown",
+            "sub_categories": [],
+            "confidence": 0.0,
+            "description": inv.get("description"),
+            "agent_description": inv.get("description") or "",
+            "role": {},
+            "capabilities": [],
+            "dependencies": [],
+            "risks": {"invasiveness": 1, "coupling": 1, "abstraction_leak": "low"},
+            "signals": {"rails": False, "external_io": False, "native_ext": False},
+            "homepage": inv.get("homepage"),
+            "source_code_uri": inv.get("source_code_uri"),
+            "context7_id": inv.get("context7_id"),
+            "preferred": bool(inv.get("preferred")),
+            "classified": False,
+        }
+
+    return {"error": f"Gem '{name}' not found in database."}
+
+
+@mcp.tool()
+def compose_stack(query: str) -> Dict[str, Any]:
+    """Compose a layered Ruby gem stack manifest and Gemfile snippet for a context query.
+
+    Organizes recommendations across architectural layers (substrate -> plumbing -> composition -> quality)
+    starting from curated base picks. Operates strictly read-only.
+
+    Args:
+        query: Description of the application or tooling being built (e.g. 'CLI data pipeline tool').
+    """
+    storage = _get_read_only_storage()
+    service = StackService(storage=storage, read_only=True)
+    manifest = service.build_stack(query)
+    gemfile = service.render_gemfile(manifest)
+    manifest_yaml = service.render_manifest_yaml(manifest)
+
+    return {
+        "context": manifest.get("context", query),
+        "layers": manifest.get("layers", []),
+        "gemfile": gemfile,
+        "manifest_yaml": manifest_yaml,
+    }
+
+
+@mcp.tool()
+def list_categories() -> List[Dict[str, Any]]:
+    """List the 21 architectural categories, stack layers, descriptions, and curated base gems."""
+    return [
+        {
+            "slug": c.slug,
+            "label": c.label,
+            "layer": c.layer,
+            "description": c.description,
+            "base_gems": c.base_gems,
+            "sub_categories": list(c.sub_categories.keys()),
+            "sub_categories_with_examples": c.sub_categories,
+        }
+        for c in CATEGORIES
+    ]
+
+
+# --- MCP Resources ---
+
+
+@mcp.resource("rubygemdb://taxonomy", mime_type="text/markdown")
+def get_taxonomy_resource() -> str:
+    """Markdown reference of all 21 categories, layer associations, and sub-category vocabularies."""
+    lines = [
+        "# RubyGemDB Architectural Taxonomy",
+        "",
+        "RubyGemDB organizes Ruby gems into 21 functional categories across 4 architectural stack layers:",
+        "",
+    ]
+    for layer in LAYERS:
+        lines.append(f"## Layer: {layer.capitalize()}")
+        lines.append("")
+        layer_categories = [c for c in CATEGORIES if c.layer == layer]
+        for c in layer_categories:
+            lines.append(f"### {c.label} (`{c.slug}`)")
+            lines.append(f"- **Description**: {c.description}")
+            if c.base_gems:
+                lines.append(f"- **Base Seeds**: {', '.join(f'`{g}`' for g in c.base_gems)}")
+            if c.sub_categories:
+                sub_cats_str = ", ".join(f"`{k}`" for k in c.sub_categories.keys())
+                lines.append(f"- **Sub-categories**: {sub_cats_str}")
+            lines.append("")
+    return "\n".join(lines)
+
+
+@mcp.resource("rubygemdb://stack-seeds", mime_type="text/markdown")
+def get_stack_seeds_resource() -> str:
+    """Markdown reference of curated base gems grouped by architectural layer."""
+    lines = [
+        "# Curated RubyGemDB Stack Seeds",
+        "",
+        "Curated base gem picks for scaffolding robust Ruby applications and back-end tooling:",
+        "",
+    ]
+    seeds = seed_gems()
+    for layer in LAYERS:
+        lines.append(f"## {layer.capitalize()} Layer")
+        layer_seeds = [s for s in seeds if s["layer"] == layer]
+        if not layer_seeds:
+            lines.append("- *(No seeds configured for this layer)*")
+        else:
+            for s in layer_seeds:
+                lines.append(f"- `{s['gem']}` (Category: `{s['category']}`)")
+        lines.append("")
+    return "\n".join(lines)
+
+
+# --- MCP Prompts ---
+
+
+@mcp.prompt("design-ruby-stack")
+def design_ruby_stack(project_description: str) -> str:
+    """Prompt template guiding agents to explore categories, search candidates layer-by-layer, and output a validated stack."""
+    return f"""You are an expert Ruby systems architect designing a robust, layered gem stack for:
+
+"{project_description}"
+
+Follow this disciplined step-by-step procedure:
+
+1. **Taxonomy & Layer Orientation**:
+   - Inspect the 21 architectural categories using `list_categories` or reading resource `rubygemdb://taxonomy`.
+   - Review standard stack seeds with resource `rubygemdb://stack-seeds` (e.g. `dotenv`, `drydock`, `pry`, `rubocop`).
+
+2. **Layer-by-Layer Discovery**:
+   - For each stack layer (Substrate -> Plumbing -> Composition -> Quality), run targeted queries using `search_gems(query=..., category=...)`.
+   - For candidate gems, call `get_gem(name=...)` to check their dependencies, capabilities, and invasiveness/coupling risks.
+
+3. **Compose & Validate Stack**:
+   - Call `compose_stack(query="{project_description}")` to generate a candidate manifest and Gemfile snippet.
+   - Refine the selection to ensure clean abstraction boundaries and minimal dependency bloat.
+"""
+
+
+# --- CLI & Daemon Lifecycle Management ---
+
+
+def _is_port_in_use(host: str, port: int) -> bool:
+    """Check if a network port is already in use."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind((host, port))
+            return False
+        except OSError:
+            return True
+
+
+def _read_pid(pid_file: Path) -> Optional[int]:
+    """Read PID from PID file, or None if invalid/missing."""
+    if not pid_file.exists():
+        return None
+    try:
+        content = pid_file.read_text().strip()
+        return int(content) if content else None
+    except (ValueError, OSError):
+        return None
+
+
+def _is_process_running(pid: int) -> bool:
+    """Check if process with given PID is alive."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def daemon_start(host: str, port: int, pid_file: Path, log_file: Path) -> int:
+    """Start background SSE server daemon process."""
+    pid = _read_pid(pid_file)
+    if pid is not None and _is_process_running(pid):
+        print(f"RubyGemDB MCP server is already running (PID: {pid}).")
+        return 0
+
+    if pid_file.exists():
+        pid_file.unlink(missing_ok=True)
+
+    if _is_port_in_use(host, port):
+        print(f"Error: Port {port} is already in use by another process.", file=sys.stderr)
+        return 1
+
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+
+    log_handle = open(log_file, "a", encoding="utf-8")
+    cmd = [
+        sys.executable,
+        "-m",
+        "rubygemdb.mcp_server",
+        "--foreground",
+        "--host",
+        host,
+        "--port",
+        str(port),
+    ]
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+
+    info_file = pid_file.with_suffix(".json")
+    pid_file.write_text(str(proc.pid))
+    try:
+        info_file.write_text(json.dumps({"pid": proc.pid, "host": host, "port": port}))
+    except OSError:
+        pass
+    time.sleep(0.3)
+
+    if proc.poll() is not None:
+        print("Error: Background process terminated immediately. Check log:", log_file, file=sys.stderr)
+        pid_file.unlink(missing_ok=True)
+        info_file.unlink(missing_ok=True)
+        return 1
+
+    print(f"Started RubyGemDB MCP server (PID: {proc.pid}) on http://{host}:{port}/sse")
+    print(f"Log file: {log_file}")
+    return 0
+
+
+def daemon_status(host: str, port: int, pid_file: Path, log_file: Path) -> int:
+    """Report status of the background MCP server daemon."""
+    info_file = pid_file.with_suffix(".json")
+    if info_file.exists():
+        try:
+            data = json.loads(info_file.read_text())
+            host = data.get("host", host)
+            port = data.get("port", port)
+        except Exception:
+            pass
+
+    pid = _read_pid(pid_file)
+    if pid is None:
+        print("RubyGemDB MCP server is stopped.")
+        return 1
+
+    if _is_process_running(pid):
+        print(f"RubyGemDB MCP server is running (PID: {pid}) on http://{host}:{port}/sse")
+        print(f"Log file: {log_file}")
+        return 0
+
+    print(f"RubyGemDB MCP server is stopped (stale PID file: {pid}).")
+    pid_file.unlink(missing_ok=True)
+    info_file.unlink(missing_ok=True)
+    return 1
+
+
+def daemon_stop(pid_file: Path) -> int:
+    """Stop the background MCP server daemon cleanly."""
+    info_file = pid_file.with_suffix(".json")
+    pid = _read_pid(pid_file)
+    if pid is None:
+        print("RubyGemDB MCP server is not running.")
+        info_file.unlink(missing_ok=True)
+        return 0
+
+    if not _is_process_running(pid):
+        print(f"RubyGemDB MCP server was not running (cleaned up stale PID: {pid}).")
+        pid_file.unlink(missing_ok=True)
+        info_file.unlink(missing_ok=True)
+        return 0
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+        for _ in range(30):
+            time.sleep(0.1)
+            if not _is_process_running(pid):
+                break
+        else:
+            os.kill(pid, signal.SIGKILL)
+        print(f"Stopped RubyGemDB MCP server (PID: {pid}).")
+    except OSError as e:
+        print(f"Error terminating process {pid}: {e}", file=sys.stderr)
+    finally:
+        pid_file.unlink(missing_ok=True)
+        info_file.unlink(missing_ok=True)
+
+    return 0
+
+
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    """Parse CLI arguments for rubygemdb-mcp."""
+    parser = argparse.ArgumentParser(
+        prog="rubygemdb-mcp",
+        description="RubyGemDB Model Context Protocol (MCP) Server",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  rubygemdb-mcp                        # Run stdio MCP server (for Claude Code, Antigravity, Cursor)
+  rubygemdb-mcp --daemon start         # Run background SSE daemon on port 8000
+  rubygemdb-mcp --daemon status        # Check status of background daemon
+  rubygemdb-mcp --daemon stop          # Stop background daemon
+  rubygemdb-mcp --daemon start --port 8011  # Run background SSE daemon on port 8011
+  rubygemdb-mcp --sse                  # Start background SSE daemon (shortcut)
+        """,
+    )
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "sse"],
+        default="stdio",
+        help="MCP transport protocol (stdio or sse; default: stdio)",
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host address for SSE server (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port for SSE server (default: 8000)",
+    )
+    parser.add_argument(
+        "--sse",
+        action="store_true",
+        help="Start background SSE daemon (shortcut for --daemon start)",
+    )
+    parser.add_argument(
+        "--daemon",
+        choices=["start", "status", "stop"],
+        help="Manage background SSE daemon lifecycle (start, status, stop)",
+    )
+    parser.add_argument(
+        "--foreground",
+        action="store_true",
+        help="Run SSE server in foreground (used by worker or for debugging)",
+    )
+    parser.add_argument(
+        "--pid-file",
+        type=Path,
+        default=None,
+        help="Path to PID file (default: data/mcp.pid)",
+    )
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help="Path to log file (default: data/mcp.log)",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    """CLI entrypoint for rubygemdb-mcp."""
+    args = parse_args(argv)
+
+    pid_file = args.pid_file or (settings.data_dir / "mcp.pid")
+    log_file = args.log_file or (settings.data_dir / "mcp.log")
+
+    # If --sse is given without --daemon and without --foreground, treat as --daemon start
+    daemon_action = args.daemon
+    if args.sse and not daemon_action and not args.foreground:
+        daemon_action = "start"
+
+    # Handle daemon lifecycle commands
+    if daemon_action == "start":
+        return daemon_start(args.host, args.port, pid_file, log_file)
+    elif daemon_action == "status":
+        return daemon_status(args.host, args.port, pid_file, log_file)
+    elif daemon_action == "stop":
+        return daemon_stop(pid_file)
+
+    # Run server
+    if args.foreground or args.transport == "sse":
+        mcp.settings.host = args.host
+        mcp.settings.port = args.port
+        mcp.run(transport="sse")
+        return 0
+    else:
+        # Default: stdio transport
+        mcp.run(transport="stdio")
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

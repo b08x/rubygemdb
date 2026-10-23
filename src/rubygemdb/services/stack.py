@@ -47,12 +47,13 @@ def seed_gems() -> List[dict]:
 
 
 class StackService:
-    def __init__(self, index=None, storage=None, limit: int = 12):
+    def __init__(self, index=None, storage=None, limit: int = 12, read_only: bool = False):
         """index: txtai Embeddings (or a compatible mock with .search).
         storage: SQLiteStorage (or compatible mock) for seed inventory adds."""
         self._index = index
         self.storage = storage
         self.limit = limit
+        self.read_only = read_only
 
     def _load_index(self):
         from txtai import Embeddings  # type: ignore
@@ -115,7 +116,7 @@ class StackService:
 
         # Ensure curated seeds exist in the inventory so they stay retrievable.
         seeds = seed_gems()
-        if self.storage is not None:
+        if self.storage is not None and not self.read_only:
             for seed in seeds:
                 try:
                     self.storage.add_gem_to_inventory(seed["gem"])

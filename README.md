@@ -18,6 +18,7 @@
 - **Heuristic + LLM Hybrid** — Fast pattern matching for obvious cases, with a Mistral-powered LLM pass that can override the heuristic category when confidence drops below 0.7
 - **Semantic Vector Search** — txtai-powered embeddings with multi-query expansion and recency boosting for finding gems by natural language description
 - **AI Agent with MCP Tools** — Context7 documentation retrieval and Codebase Memory integration via Model Context Protocol
+- **Native MCP Server** — `rubygemdb-mcp` serves the taxonomy, gem metadata, and stack composition to coding agents (Claude Code, Antigravity, Cursor) over stdio or a background SSE daemon — strictly read-only
 - **Card-Driven Advisor** — Conversational project-brief chat that extracts a structured requirement card (deliverable, inputs, transforms, outputs), proposes a layered gem stack per slot, and lets you accept, swap, remove, retry, or edit picks — exportable as markdown and JSON
 - **Interactive TUI** — Textual-based terminal UI for browsing, filtering, editing, and exporting classified gems with real-time classification
 - **Batch CLI Pipeline** — Headless processing of gem inventories with metadata verification, classification, and YAML report generation
@@ -32,6 +33,7 @@ graph LR
     cli["CLI Processor\nsrc/rubygemdb/cli.py"]
     tui["TUI Explorer\nsrc/rubygemdb/ui/tui.py"]
     agent["AI Agent\nsrc/rubygemdb/agent.py"]
+    mcp["MCP Server\nsrc/rubygemdb/mcp_server.py"]
     core["Core Config\nsrc/rubygemdb/core/"]
     models["Data Models\nsrc/rubygemdb/models/"]
     services["Services\nsrc/rubygemdb/services/"]
@@ -44,6 +46,8 @@ graph LR
     tui -->|"launches agent queries"| agent
     agent -->|"semantic search"| services
     agent -->|"indexes/retrieves"| storage
+    mcp -->|"serves read-only tools"| services
+    mcp -->|"reads (mode=ro)"| storage
     services -->|"uses"| core
     services -->|"returns"| models
     storage -->|"persists"| models
@@ -51,6 +55,7 @@ graph LR
     style cli fill:#89b4fa,stroke:#89b4fa,color:#1e1e2e
     style tui fill:#89b4fa,stroke:#89b4fa,color:#1e1e2e
     style agent fill:#89b4fa,stroke:#89b4fa,color:#1e1e2e
+    style mcp fill:#89b4fa,stroke:#89b4fa,color:#1e1e2e
     style storage fill:#a6e3a1,stroke:#a6e3a1,color:#1e1e2e
 ```
 
@@ -127,7 +132,7 @@ Gem retrieval combines two signals fused with Reciprocal Rank Fusion (K=60):
 1. **Vector Retrieval** — txtai embedding similarity (`ollama/embeddinggemma`) with a 30% recency boost for recently updated gems
 2. **Full-Text Search** — SQLite FTS5 index (`gem_fts`) over gem names and descriptions; tries a strict AND-joined match first and falls back to the looser OR match, so single-token coincidences do not outrank full matches
 3. **RRF Fusion** — `services/hybrid_search.py` merges both rankings into one candidate list; degrades gracefully to whichever signal is available
-4. **Category Narrowing** — when a phase filter is active, query tokens restrict results to the categories they actually target (stem-matched against category keywords), so a "chunk text" query no longer pulls in persistence or media gems
+4. **Category Narrowing** — an explicit `category` slug restricts results directly; otherwise, when a phase filter is active, query tokens restrict results to the categories they actually target (stem-matched against category keywords), so a "chunk text" query no longer pulls in persistence or media gems
 
 ### Advisor Conversation Flow
 
@@ -163,6 +168,98 @@ The tool-calling agent behind `ask <gem> <question>` answers gem questions only 
 
 ---
 
+## MCP Server (`rubygemdb-mcp`)
+
+RubyGemDB exposes a native Model Context Protocol (MCP) server so coding agents (Claude Code, Antigravity, OpenCode, Cursor) can directly discover Ruby gems, query classifications and architectural layers, and compose layered gem stacks.
+
+### CLI Usage & Lifecycle Management
+
+- **Stdio Mode (Default)**: Runs as a child-process communicating over standard I/O (recommended for Claude Code, Antigravity, Cursor):
+  ```bash
+  uv run rubygemdb-mcp
+  ```
+- **SSE Daemon Mode**: Run detached in the background over Server-Sent Events (SSE):
+  ```bash
+  uv run rubygemdb-mcp --daemon start --port 8011    # start background server
+  uv run rubygemdb-mcp --daemon status               # check running status
+  uv run rubygemdb-mcp --daemon stop                 # stop server cleanly
+  uv run rubygemdb-mcp --sse                         # shortcut for --daemon start
+  ```
+
+Full flag surface (`rubygemdb-mcp --help`):
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--transport` | `stdio` | Transport: `stdio` or `sse` (bare `--transport sse` runs in the foreground) |
+| `--host` | `127.0.0.1` | SSE bind address |
+| `--port` | `8000` | SSE port (the examples above pin `8011`) |
+| `--sse` | — | Shortcut for `--daemon start` |
+| `--daemon` | — | `start` / `status` / `stop`; `start` is idempotent — an already-running daemon prints a notice and exits 0 |
+| `--foreground` | — | Run SSE in the foreground (used by the daemon worker; handy for debugging) |
+| `--pid-file` | `data/mcp.pid` | PID file; a `mcp.json` sidecar beside it records host/port |
+| `--log-file` | `data/mcp.log` | Daemon log |
+
+Daemon artifacts land in `data/`: `mcp.pid`, the `mcp.json` host/port sidecar, and `mcp.log`. Stale PID files are detected and cleaned up by `status` and `stop`.
+
+### Exposed Capabilities
+
+- **Tools (Read-Only)**:
+  - `search_gems(query, category=None, phase=None, limit=10)`: Sub-millisecond SQLite FTS5 search. `category` takes one of the 21 category slugs; `phase` takes `skeleton`, `input`, `processing`, or `output`. The txtai vector index is consulted only when FTS5 returns zero hits.
+  - `get_gem(name)`: Complete architectural metadata, layer, sub-categories, agent description, dependencies, signals, and risks. Gems present in the inventory but not yet classified return the same shape with `classified: false` and zero confidence; unknown names return an `error` object.
+  - `compose_stack(query)`: Composes layered gem stack manifest (substrate -> quality) and Gemfile snippet. Runs in read-only mode — curated seed gems are not written back to the inventory.
+  - `list_categories()`: Lists 21 architectural categories, stack layers, descriptions, and curated base gems.
+
+Every tool opens the SQLite database read-only (`mode=ro`), and in that mode all mutating storage methods raise `PermissionError` — read-only by construction, not by convention.
+- **Resources**:
+  - `rubygemdb://taxonomy`: Markdown guide of all 21 categories, layers, and sub-category vocabularies.
+  - `rubygemdb://stack-seeds`: Markdown guide of curated base gems grouped by layer.
+- **Prompts**:
+  - `design-ruby-stack(project_description)`: Guided prompt for formulating queries and layering architectures.
+
+### Client Configuration Snippets
+
+#### Claude Code (`~/.claude.json` or `.claude.json`)
+```json
+{
+  "mcpServers": {
+    "rubygemdb": {
+      "command": "uv",
+      "args": ["--directory", "/path/to/rubygemdb", "run", "rubygemdb-mcp"]
+    }
+  }
+}
+```
+
+#### Antigravity / Cursor (`mcp_config.json`)
+```json
+{
+  "mcpServers": {
+    "rubygemdb": {
+      "command": "uv",
+      "args": ["--directory", "/path/to/rubygemdb", "run", "rubygemdb-mcp"]
+    }
+  }
+}
+```
+
+#### SSE Setup (Remote or Multi-Agent)
+Start the background daemon:
+```bash
+uv run rubygemdb-mcp --daemon start --port 8011
+```
+Configure your client with URL `http://127.0.0.1:8011/sse`:
+```json
+{
+  "mcpServers": {
+    "rubygemdb": {
+      "url": "http://127.0.0.1:8011/sse"
+    }
+  }
+}
+```
+
+---
+
 ## Installation & Accelerator Support
 
 ```bash
@@ -191,6 +288,7 @@ rubygemdb/
 ├── src/rubygemdb/
 │   ├── cli.py              # CLI batch processor
 │   ├── agent.py            # Card-driven advisor with tool-calling agent
+│   ├── mcp_server.py       # Native MCP server & daemon lifecycle (FastMCP)
 │   ├── core/
 │   │   └── config.py       # Pydantic Settings configuration
 │   ├── models/
@@ -215,7 +313,7 @@ rubygemdb/
 │   └── ui/
 │       └── tui.py          # Textual TUI application
 ├── tests/
-│   └── (litmus suite)      # Taxonomy + facet vocabularies, classification, migration, stack, search
+│   └── (litmus suite)      # Taxonomy + facets, classification, migration, stack, search, MCP server & daemon lifecycle
 └── pyproject.toml
 ```
 

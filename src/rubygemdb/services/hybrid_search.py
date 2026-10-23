@@ -203,7 +203,7 @@ def make_fts_search(db_path: str | None = None) -> SearchCallable:
         sql += " ORDER BY rank LIMIT ?"
         params.append(limit)
         try:
-            conn = sqlite3.connect(resolved_db)
+            conn = sqlite3.connect(resolved_db, uri=True)
         except sqlite3.Error:
             return []
         try:
@@ -259,6 +259,7 @@ def hybrid_search(
     vector_search: Optional[SearchCallable] = None,
     fts_search: Optional[SearchCallable] = None,
     db_path: str | None = None,
+    category: Optional[str] = None,
 ) -> list[dict]:
     """Fuse vector and keyword search with reciprocal rank fusion.
 
@@ -268,12 +269,20 @@ def hybrid_search(
         limit: maximum number of fused results.
         vector_search: txtai-backed search callable (None skips vector search).
         fts_search: FTS5-backed search callable (defaults to the SQLite gem_fts table).
+        db_path: path to SQLite database.
+        category: category slug to restrict results to, or None for no filter.
 
     Returns up to `limit` hits sorted by fused score, each carrying name,
     description, category, layer, phase, source_code_uri, context7_id, score.
     """
-    categories = categories_for(phase) if phase else None
-    if categories:
+    if category:
+        categories = [category]
+    elif phase:
+        categories = categories_for(phase)
+    else:
+        categories = None
+
+    if categories and not category:
         # Narrow the phase bucket to the categories the query targets so a
         # phase-wide filter does not drag in unrelated categories' gems.
         categories = narrow_categories(query, categories)
@@ -324,7 +333,7 @@ def _preferred_names(names: list[str], db_path: str | None) -> set[str]:
     resolved_db = db_path or str(settings.sqlite_db_file)
     placeholders = ", ".join("?" for _ in names)
     try:
-        conn = sqlite3.connect(resolved_db)
+        conn = sqlite3.connect(resolved_db, uri=True)
     except sqlite3.Error:
         return set()
     try:
