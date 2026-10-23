@@ -11,8 +11,8 @@ RubyGemDB is a Ruby gem analysis and classification tool that categorizes gems i
 ### Core Classification System
 - **21 Functional Categories** (defined in `src/rubygemdb/models/categories.py`, each with a stack layer): web_frameworks, http_networking, servers_concurrency, background_jobs, persistence, document_parsing, document_generation, static_site_generation, cli_libraries, testing_qa, code_quality_typing, runtime_validation, developer_tools, ai_llm, mcp_tooling, text_search, security_auth, media_processing, gui_desktop, native_bindings, core_extensions
 - **Stack Layers**: every category is tagged substrate / plumbing / composition / quality so results can be presented as a layered stack for back-end tooling design
-- **Scoring Pipeline**: keyword rules (name + dependencies) + RubyGems description-text scoring + txtai embedding similarity against category descriptions; best score wins
-- **LLM Fallback**: Mistral LLM integration for ambiguous cases (confidence < 0.7)
+- **Scoring Pipeline**: keyword rules (name + dependencies) + RubyGems description-text scoring + txtai embedding similarity against category descriptions; best score wins. After the primary category is chosen, a taxonomy-driven pass (`GemClassifier.detect_sub_categories`) matches the category's `sub_categories` vocabulary against the gem's name, description, and dependencies
+- **LLM Refinement**: the Mistral/Devstral LLM is always consulted for the agent description; heuristic confidence < 0.7 is what lets its category (confidence > 0.6) override the heuristic pick
 - **Confidence Scoring**: Risk assessment based on invasiveness, coupling, and abstraction leak potential
 
 ### Data Flow
@@ -114,23 +114,16 @@ uv run rubygemdb data/gems-inventory.csv --out test-output/
 
 ## Classification Logic
 
-### Heuristic Patterns
-- **Runtime Spine**: Boot + wiring (rails, active_support, bundler, dry-*)
-- **CLI/Terminal UI**: CLI frameworks (thor, gli, tty-*, commander, clamp)
-- **Storage/Persistence**: ORMs, DB adapters (activerecord, sequel, mongoid, sqlite)
-- **Async/Networking**: HTTP, messaging, jobs (sidekiq, async, faraday, grpc, kafka)
-- **AI/NLP**: AI/ML, LLMs (openai, ruby-openai, llm, nlp, langchain)
-- **Data Processing**: Parsing, scraping (nokogiri, roo, prawn, mechanize)
-- **Retrieval/Similarity**: Search, fuzzy (elasticsearch, searchkick, fuzzy)
-- **Algorithms/Knowledge**: Data structures (algorithm, rbtree, graph, trie)
-- **Validation/Types**: Validation, type systems (dry-validation, dry-types, activemodel)
-- **Parsing/Encoding**: Serializers (json, yajl, oj, msgpack, xml)
-- **Debugging/Introspection**: Debuggers, loggers, profilers (pry, byebug, sentry, datadog)
-- **MCP Tooling**: Model Context Protocol tools (mcp)
+### Heuristic Signals
+- **Keyword rules** (from `models/categories.py`): gem-name token matches score 0.8; dependency substring matches score 0.65
+- **Description scoring**: RubyGems `info` term hits against category keywords/descriptions (≤ 0.6)
+- **Embedding similarity**: txtai vectors vs category description vectors (≤ 0.6)
+- **Sub-category faceting**: `detect_sub_categories` scores the winning category's facet vocabulary (example gems and sub-slug tokens) against name, description, and dependencies; kept facets persist in `classified_gems.sub_categories`
+- **Defaults**: unmatched gems fall to `core_extensions` at 0.4 confidence
 
 ### Confidence Thresholds
-- High confidence (>0.7): Use heuristic classification
-- Low confidence (<0.7): Queue for LLM batch processing
+- High confidence (>0.7): Keep heuristic classification (the LLM still generates the agent description)
+- Low confidence (<0.7): The LLM's category may override the heuristic pick
 - LLM confidence threshold: 0.6 to override heuristics
 
 ## Input Data Format
@@ -142,7 +135,7 @@ CSV files must contain either:
 ## Storage and Caching Strategy
 
 ### Primary Storage
-- **SQLite Database**: `data/rubygemdb.sqlite` - Central storage for inventory and classified gems
+- **SQLite Database**: `data/rubygemdb.sqlite` - Central storage for inventory and classified gems; the `classified_gems` table carries a `sub_categories` column (auto-added by migration on existing databases)
 - **YAML Output**: Per-category files in output directory for batch processing results
 
 ### Caching Layers
@@ -162,6 +155,7 @@ CSV files must contain either:
 - Generate usage cheatsheets for selected gems
 - Saves to `/home/b08x/Workspace/Tools/cheatsheets/`
 - Requires CONTEXT7_API_KEY environment variable
+- Library IDs are repo-anchored: `verify_library` canonicalizes IDs to `/owner/repo` form derived from the gem's source/homepage repo URL, preferring an exact repo-path match over the first search result
 
 ## Error Handling Patterns
 
@@ -183,7 +177,8 @@ Classification results saved as `{category}.yaml` in output directory:
 - name: gem_name
   classification:
     primary: category_name
-    secondary: null
+    confidence: 0.85
+    sub_categories: [terminal_styling]
   role:
     description: "Gem description from RubyGems"
     attaches_to: "category_prefix"

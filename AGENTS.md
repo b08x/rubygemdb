@@ -11,6 +11,8 @@ RubyGemDB is a Ruby gem analysis and classification tool that categorizes gems i
 ### Functional Categories
 21 functional categories, each tagged with a stack layer (`substrate`, `plumbing`, `composition`, `quality`), defined in a single module: `src/rubygemdb/models/categories.py`. The taxonomy is oriented around the project's primary purpose — assisting back-end tooling design — so search and retrieval can present gems as a layered stack.
 
+Every category also defines a `sub_categories` vocabulary — fine-grained facets (slug → example gems, 80 facets across all 21 categories) used for classification, search, and display. The vocabularies live only in `categories.py`; `tests/test_categories.py` enforces at least two facets per category and pins the exact slugs.
+
 **substrate** (runtime base everything stands on):
 1. `core_extensions` — Core Extensions (activesupport, facets, bigdecimal, securerandom, dotenv)
 2. `native_bindings` — Native Bindings (ffi, fiddle, rake-compiler, ruby-macho)
@@ -62,15 +64,15 @@ src/rubygemdb/
 │   └── config.py       # Settings and environment variable handling
 ├── models/
 │   ├── gem.py          # Pydantic data models for gem data
-│   └── categories.py   # Single source of truth: 21 categories + layers
+│   └── categories.py   # Single source of truth: 21 categories, layers, sub-category facets
 ├── services/
-│   ├── classifier.py   # Keyword/description/embedding classification logic
+│   ├── classifier.py   # Keyword/description/embedding classification + sub-category faceting
 │   ├── embedding_scorer.py # txtai embedding similarity vs category descriptions
 │   ├── prune.py        # Overlap/stale gem prune reports
 │   ├── stack.py        # Layered gem-stack composition
 │   ├── rubygems.py     # RubyGems API client with caching
 │   ├── llm.py          # Mistral LLM client for fallback classification
-│   └── context7.py     # Context7 API client for cheatsheet generation
+│   └── context7.py     # Context7 API client; repo-anchored library-ID verification
 └── storage/
     ├── base.py         # Storage interface
     ├── json_storage.py # JSON file storage implementation
@@ -182,8 +184,15 @@ Classification combines three scoring signals; the best-scoring category wins:
 
 Name-keyword matches score 0.8 confidence; dependency-only 0.65; description/embedding-only ≤ 0.6; unknown gems default to `core_extensions` at 0.4.
 
+### Sub-Category Detection
+After the primary category is chosen, `GemClassifier.detect_sub_categories` scores that category's `sub_categories` vocabulary against the gem:
+- Example-gem name match +10.0; example-gem substring in the name +3.0
+- Sub-slug token hits: +2.0 per name hit, +0.5 per description hit
+- Example gems in the dependency list: +2.5 each
+Facets scoring ≥ 2.0 are kept, best-first; if none clears the bar, the best description-token sub-slug is used as a fallback. Detection re-runs after an LLM category override, so facets always match the final primary category.
+
 ### LLM Fallback
-Triggers when heuristic confidence < 0.7: Uses Devstral API to refine classification with 0.6 minimum confidence threshold to override heuristics.
+The Devstral API is always consulted to generate the agent description; the heuristic-confidence gate (< 0.7) only decides whether the LLM's category (itself requiring > 0.6 confidence) may override the heuristic pick.
 
 ---
 
@@ -193,7 +202,7 @@ Local cache files:
 1. `gem_cache.json`: Raw RubyGems API responses
 2. `llm_cache.json`: SHA256-hashed LLM prompt/response pairs
 3. `classified_gems.json`: Persisted TUI classification results
-4. `data/rubygemdb.sqlite`: Central SQLite database for inventory and classified gems
+4. `data/rubygemdb.sqlite`: Central SQLite database for inventory and classified gems (the `classified_gems` table carries a `sub_categories` column, auto-added by migration on existing databases)
 5. `data/txtai/`: Layer-aware txtai embedding index
 6. `data/cache/category_vectors/`: Cached category-description vectors for embedding scoring
 7. `data/prune-report.md`: Approval-gated overlap/stale gem report
@@ -217,7 +226,7 @@ Requires either `name` or `gem` column for gem names. Optional columns:
 - `category`: Initial category hint
 - `description`: Gem description
 - `homepage`: Gem homepage URL
-- `context7_id`: Context7 library ID for cheatsheet generation
+- `context7_id`: Context7 library ID for cheatsheet generation. IDs are canonicalized to `/owner/repo` form when a GitHub/GitLab/Codeberg repo URL can be derived from the gem's source or homepage URI (`services/context7.py`), so manually curated IDs should follow that form
 
 ### Output YAML
 Per-category YAML files contain structured gem classification data:
@@ -226,6 +235,7 @@ Per-category YAML files contain structured gem classification data:
   classification:
     primary: category_name  # one of the 21 slugs
     confidence: 0.85
+    sub_categories: [terminal_styling]  # facet slugs from the category's vocabulary
   role:
     description: "Gem metadata description"
     attaches_to: "category_prefix"
@@ -254,7 +264,7 @@ Per-category YAML files contain structured gem classification data:
 
 ## Testing
 
-The litmus pytest suite verifies taxonomy integrity, classification expectations (jekyll→static_site_generation, nokogiri→document_parsing, thor→cli_libraries, sidekiq→background_jobs, ruby_llm→ai_llm), migration completeness (no old slugs under `src/`), and stack composition:
+The litmus pytest suite verifies taxonomy integrity, sub-category vocabulary coverage (every category has ≥ 2 facets, exact slugs pinned), classification expectations (jekyll→static_site_generation, nokogiri→document_parsing, thor→cli_libraries, sidekiq→background_jobs, ruby_llm→ai_llm), migration completeness (no old slugs under `src/`), and stack composition:
 1. Run the suite: `uv run pytest tests/`
 2. Validate classification logic with sample gems: `uv run python -m rubygemdb data/sample-gems.csv --out test-output/`
 

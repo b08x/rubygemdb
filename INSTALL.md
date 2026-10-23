@@ -35,10 +35,10 @@ Classifying gems... ━━━━━━━━━━━━━━━━━━━━
 
 | Category                    | Count |
 |-----------------------------|-------|
-| runtime_spine               |    42 |
-| data_processing             |    38 |
-| cli_terminal_ui             |    29 |
-| async_networking            |    31 |
+| web_frameworks              |    42 |
+| document_parsing            |    38 |
+| cli_libraries               |    29 |
+| background_jobs             |    31 |
 ```
 
 </td>
@@ -49,9 +49,9 @@ $ rubygemdb-tui gems-inventory.csv
 
 ┌─ RubyGemDB Explorer ─────────────────────────────┐
 │ Filter Classification          │ Name  │ Category │
-│ ○ All Categories               │ rails │ runtime_ │
-│ ● runtime_spine                │ pg    │ storage_ │
-│ ● cli_terminal_ui              │ side..│ async_n..│
+│ ○ All Categories               │ rails │ web_fram │
+│ ● web_frameworks               │ pg    │ persiste │
+│ ● cli_libraries                │ side..│ cli_lib..│
 │ ...                           │       │          │
 └────────────────────────────────┴───────┴──────────┘
 ```
@@ -133,7 +133,7 @@ uv run rubygemdb gems-inventory.csv --out output/ --embed
 
 **Processing Phases:**
 
-1. **Phase 1: Metadata Verification** — Validates gem existence on RubyGems, verifies source URLs, and enriches with Context7 library IDs
+1. **Phase 1: Metadata Verification** — Validates gem existence on RubyGems, verifies source URLs, and enriches with Context7 library IDs (canonicalized to `/owner/repo` form, derived from the gem's source/homepage repo URL when possible)
 2. **Phase 2: Classification** — Applies heuristic matching with LLM fallback for low-confidence cases
 3. **Phase 3: Embeddings** — Builds txtai vector index for semantic search (optional)
 

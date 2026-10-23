@@ -15,7 +15,7 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
 
 - **Codebase Memory MCP**: Native integration with the codebase-memory-mcp server to ground LLM-generated integration plans in the actual architectural structure of target projects.
 - **Other Steve Prompt Architect**: A highly aggressive system persona that intercepts raw user queries, strips out conversational slop, and generates concrete, SFL-compliant queries for the txtai vector database.
-- **Context7 Integration**: Deep integration with Context7 for library search, manual ID entry, and batch cheatsheet generation for gems and their dependencies.
+- **Context7 Integration**: Deep integration with Context7 for library search, manual ID entry, and batch cheatsheet generation for gems and their dependencies. Library IDs are canonicalized to `/owner/repo` form, derived from source/homepage repo URLs when possible.
 
 ## Building and Running
 
@@ -70,7 +70,8 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
 
 ### Classification Logic
 - **Heuristics First**: Gems are first matched against keyword rules and scored by description text and txtai embedding similarity against category descriptions (e.g., `nokogiri` -> `document_parsing`).
-- **LLM Fallback**: If the heuristic confidence is below 0.7, the tool calls the LLM (Mistral/Devstral) for a more nuanced analysis.
+- **Sub-Category Facets**: after the primary category wins, `detect_sub_categories` matches that category's `sub_categories` vocabulary (example gems, sub-slug tokens) against the gem's name, description, and dependencies. Facets persist in the `classified_gems.sub_categories` column and appear in YAML/TUI output.
+- **LLM Fallback**: the LLM (Mistral/Devstral) is always consulted for the agent description; when heuristic confidence is below 0.7, its category may override the heuristic pick.
 - **Confidence Threshold**: LLM results require a confidence > 0.6 to override initial heuristics.
 - **Metadata Update**: Users can manually refine Context7 IDs and Source URIs directly from the TUI, which updates the SQLite storage.
 

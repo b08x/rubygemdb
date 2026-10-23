@@ -14,11 +14,11 @@
 
 ## Features
 
-- **21-Category Taxonomy** — Classifies gems into functional categories (web_frameworks, cli_libraries, ai_llm, etc.), each tagged with a stack layer (substrate, plumbing, composition, quality), with confidence scoring and sub-category detection from dependency analysis
-- **Heuristic + LLM Hybrid** — Fast pattern matching for obvious cases, with Mistral-powered LLM fallback when heuristic confidence drops below 0.7
+- **21-Category Taxonomy** — Classifies gems into functional categories (web_frameworks, cli_libraries, ai_llm, etc.), each tagged with a stack layer (substrate, plumbing, composition, quality), with confidence scoring and taxonomy-driven sub-category faceting — every category carries a curated facet vocabulary (e.g. web_frameworks → full_stack_frameworks, micro_frameworks, rack_middleware)
+- **Heuristic + LLM Hybrid** — Fast pattern matching for obvious cases, with a Mistral-powered LLM pass that can override the heuristic category when confidence drops below 0.7
 - **Semantic Vector Search** — txtai-powered embeddings with multi-query expansion and recency boosting for finding gems by natural language description
 - **AI Agent with MCP Tools** — Context7 documentation retrieval and Codebase Memory integration via Model Context Protocol
-- **Phase-Walking Advisor** — Conversational project-brief chat that decomposes a brief into capabilities, then walks skeleton → input → processing → output phases, presenting gem picks you can accept, swap, ask about, skip, or revisit — exportable as markdown and JSON
+- **Card-Driven Advisor** — Conversational project-brief chat that extracts a structured requirement card (deliverable, inputs, transforms, outputs), proposes a layered gem stack per slot, and lets you accept, swap, remove, retry, or edit picks — exportable as markdown and JSON
 - **Interactive TUI** — Textual-based terminal UI for browsing, filtering, editing, and exporting classified gems with real-time classification
 - **Batch CLI Pipeline** — Headless processing of gem inventories with metadata verification, classification, and YAML report generation
 - **Risk Assessment** — Invasiveness, coupling, and abstraction leak scoring for architectural impact analysis
@@ -110,14 +110,11 @@ graph LR
 | `code_quality_typing` | quality | Linters, static analyzers, type systems, LSPs | Invasiveness: 2/5 |
 | `developer_tools` | quality | Debuggers, profilers, REPLs, logging, gem tooling | Invasiveness: 1/5 |
 
-### Sub-Category Detection
+### Sub-Category Facets
 
-Automatic sub-category extraction from dependency names:
+Every category defines a `sub_categories` vocabulary — facet slugs mapped to example gems (80 facets across the 21 categories, defined in `src/rubygemdb/models/categories.py`). After the primary category is chosen, `GemClassifier.detect_sub_categories` scores the winning category's facets against the gem's name, description, and dependencies, keeping the best matches. When the LLM overrides the primary category, detection re-runs so facets always match the final category.
 
-- `rails`, `sidekiq`, `background_jobs`, `activejob`, `server`
-- `database`, `redis`, `search`, `auth`, `api`
-- `serialization`, `spreadsheet`, `pdf`, `cloud`
-- `monitoring`, `messaging`
+Detected facets persist in the `classified_gems.sub_categories` SQLite column, flow into the per-category YAML output, and render in the TUI details pane. `tests/test_categories.py` pins the facet vocabulary — renaming a facet breaks the tests.
 
 ---
 
@@ -198,15 +195,19 @@ rubygemdb/
 │   │   └── config.py       # Pydantic Settings configuration
 │   ├── models/
 │   │   ├── gem.py          # Pydantic data models
+│   │   ├── categories.py   # Single source of truth: 21 categories, layers, sub-category facets
 │   │   └── phases.py       # skeleton/input/processing/output phase mapping
 │   ├── services/
 │   │   ├── advisor.py      # Advisor conversation state machine
 │   │   ├── advisor_export.py # Markdown/JSON chat export
 │   │   ├── hybrid_search.py # FTS5 + vector search with RRF fusion
-│   │   ├── classifier.py   # Heuristic + LLM classification
+│   │   ├── classifier.py   # Heuristic + LLM classification with sub-category faceting
+│   │   ├── embedding_scorer.py # txtai embedding similarity vs category descriptions
+│   │   ├── stack.py        # Layered gem-stack composition
+│   │   ├── prune.py        # Overlap/stale gem prune reports
 │   │   ├── rubygems.py     # RubyGems API client
 │   │   ├── llm.py          # Mistral LLM client
-│   │   └── context7.py     # Context7 API client
+│   │   └── context7.py     # Context7 API client with repo-anchored ID verification
 │   ├── storage/
 │   │   ├── base.py         # Storage interface
 │   │   ├── json_storage.py # JSON file storage
@@ -214,8 +215,7 @@ rubygemdb/
 │   └── ui/
 │       └── tui.py          # Textual TUI application
 ├── tests/
-│   ├── test_classifier.py
-│   └── test_export.py
+│   └── (litmus suite)      # Taxonomy + facet vocabularies, classification, migration, stack, search
 └── pyproject.toml
 ```
 
