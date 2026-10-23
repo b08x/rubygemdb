@@ -483,6 +483,7 @@ def query_gem_graphrag(
         service.build_or_load_index(gems)
         retrieval = service.retrieve(query, top_k=5)
         grounded_context = service.format_grounded_context(retrieval, intention=intention)
+        citations = retrieval.get("citations", [])
 
         retrieved_node_ids: List[str] = []
         for n in retrieval.get("primary_nodes", []):
@@ -502,6 +503,7 @@ def query_gem_graphrag(
             role="agent",
             content=grounded_context,
             retrieved_nodes=retrieved_node_ids,
+            citations=citations,
         )
 
         res = {
@@ -512,6 +514,7 @@ def query_gem_graphrag(
             "primary_nodes": retrieval.get("primary_nodes", []),
             "expanded_nodes": retrieval.get("expanded_nodes", []),
             "edges": retrieval.get("edges", []),
+            "citations": citations,
             "grounded_context": grounded_context,
         }
         span.update(output={
@@ -519,6 +522,7 @@ def query_gem_graphrag(
             "primary_nodes_count": len(res["primary_nodes"]),
             "expanded_nodes_count": len(res["expanded_nodes"]),
             "edges_count": len(res["edges"]),
+            "citations_count": len(citations),
         })
         return res
 

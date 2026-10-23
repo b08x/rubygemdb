@@ -24,6 +24,10 @@ class Settings(BaseSettings):
         default="openrouter/z-ai/glm-5.3-flash",
         validation_alias=AliasChoices("rubygemdb_agent_model", "agent_model"),
     )
+    agent_max_tokens: int = Field(
+        default=4096,
+        validation_alias=AliasChoices("agent_max_tokens", "AGENT_MAX_TOKENS"),
+    )
 
     rubygemdb_embedding_provider: Optional[str] = Field(
         default="ollama",

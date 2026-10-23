@@ -312,7 +312,11 @@ class TxtaiAgent:
             model_id = settings.active_agent_model
             
             # Instantiate native LiteLLMModel for proper tool-calling support
-            self.model = LiteLLMModel(model_id=model_id, api_key=settings.llm_api_key)
+            self.model = LiteLLMModel(
+                model_id=model_id,
+                api_key=settings.llm_api_key,
+                max_tokens=settings.agent_max_tokens,
+            )
 
             c7_mcp = MCPClient(
                 StdioServerParameters(command="npx", args=["-y", "@upstash/context7-mcp"]),
@@ -392,7 +396,11 @@ Rules:
     def _ensure_model(self) -> LiteLLMModel:
         """Lazily create the LiteLLM model shared by the agent."""
         if self.model is None:
-            self.model = LiteLLMModel(model_id=settings.active_agent_model, api_key=settings.llm_api_key)
+            self.model = LiteLLMModel(
+                model_id=settings.active_agent_model,
+                api_key=settings.llm_api_key,
+                max_tokens=settings.agent_max_tokens,
+            )
         return self.model
 
     def _llm_json(self, system_prompt: str, user_prompt: str) -> dict | None:
@@ -655,6 +663,7 @@ Rules:
             grounded_context = self.graphrag_service.format_grounded_context(
                 retrieval, intention=self._graphrag_intention
             )
+            citations = retrieval.get("citations", [])
 
             retrieved_node_ids: list[str] = []
             for n in retrieval.get("primary_nodes", []):
@@ -670,11 +679,23 @@ Rules:
 
             system_prompt = (
                 "You are the RubyGemDB Gem Architect and Assistant. You provide concrete, highly grounded "
-                "architectural and implementation advice for Ruby gems.\n"
-                "When GraphRAG context is provided, ground your answers in the exact method signatures, "
-                "parameter types from decode, code examples, and call relationships.\n"
-                "Always cite the gem and method/class names accurately. Include practical code snippets "
-                "based on the verified examples where helpful."
+                "architectural and implementation advice for Ruby gems.\n\n"
+                "### Mandatory Grounding & Citation Rules:\n"
+                "1. EXPLICIT CITATIONS: You MUST cite the source of every Ruby class, module, method, parameter, "
+                "or verified pattern using its citation tag (e.g. `[C1]`, `[C2]`).\n"
+                "2. STRICT ANTI-HALLUCINATION CONTRACT (POKA-YOKE):\n"
+                "   - You may ONLY use Ruby classes, modules, methods, and options that explicitly appear in the Grounded Gem Knowledge citations.\n"
+                "   - DO NOT invent classes or namespaces (e.g. do NOT invent `PragmaticSegmenter::Tokenizer` when only `PragmaticSegmenter::Segmenter` is cited).\n"
+                "   - DO NOT invent options, delimiters, or parameters (e.g. do NOT invent `delimiters`, `chunk_type: :recursive`, or `max_size` if they are not listed in the verified signatures/parameters).\n"
+                "3. HANDLING UNSUPPORTED CAPABILITIES:\n"
+                "   - If the user's task requires functionality not natively provided by the cited gem APIs (e.g. recursive parent/child chunking or delimiter hierarchies when the gem only segments sentences):\n"
+                "     a) Explicitly state that the gem does not support this capability out of the box.\n"
+                "     b) Cite the exact methods the gem DOES provide (e.g. `PragmaticSegmenter::Segmenter#segment` [C1]).\n"
+                "     c) Provide the missing algorithm or glue logic as clean, custom Ruby application code, clearly distinguishing custom code from gem API calls.\n"
+                "4. COMPLETENESS:\n"
+                "   - Provide complete, executable code solutions. Never truncate mid-implementation or end abruptly.\n"
+                "5. CITATIONS SUMMARY:\n"
+                "   - Conclude your answer with a brief '### Citations' section listing the citation tags you used and their gem/symbol."
             )
 
             user_content_parts = []
@@ -718,12 +739,13 @@ Rules:
                 doc_type="session_turn",
                 metadata={"session_id": self.active_session_id, "role": "agent"},
             )
-            # Persist agent response and retrieved node IDs to rag_messages
+            # Persist agent response, citations, and retrieved node IDs to rag_messages
             self.session_storage.append_message(
                 self.active_session_id,
                 role="agent",
                 content=response,
                 retrieved_nodes=retrieved_node_ids,
+                citations=citations,
             )
             turn_span.update(output={"response": response})
             return response

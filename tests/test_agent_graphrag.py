@@ -65,6 +65,13 @@ def test_chat_with_graphrag(mock_agent: TxtaiAgent):
     assert mock_agent._chat_history[0]["role"] == "user"
     assert mock_agent._chat_history[1]["role"] == "agent"
 
+    # Verify Poka-Yoke Anti-Hallucination & Citation instructions in system prompt
+    call_args = fake_model.call_args[0][0]
+    sys_prompt = next(m["content"] for m in call_args if m["role"] == "system")
+    assert "CITATIONS" in sys_prompt
+    assert "POKA-YOKE" in sys_prompt
+    assert "ANTI-HALLUCINATION" in sys_prompt
+
 
 def test_chat_without_graphrag_falls_back_to_run(mock_agent: TxtaiAgent):
     mock_agent._graphrag_gems = []

@@ -511,12 +511,19 @@ class GraphRAGService:
                 "edges": matched_edges,
             }
 
+    def get_citations(self, retrieval: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Return structured citations from retrieval result, formatting context if not already done."""
+        if "citations" in retrieval:
+            return retrieval["citations"]
+        self.format_grounded_context(retrieval)
+        return retrieval.get("citations", [])
+
     def format_grounded_context(
         self,
         retrieval: Dict[str, Any],
         intention: Optional[str] = None,
     ) -> str:
-        """Assemble retrieved AST symbols, parameters, decode tags, and examples into a prompt context."""
+        """Assemble retrieved AST symbols, parameters, decode tags, and examples into a prompt context with explicit citations."""
         sections: List[str] = []
 
         if intention and intention.strip():
@@ -529,8 +536,11 @@ class GraphRAGService:
         expanded_nodes: List[Dict[str, Any]] = retrieval.get("expanded_nodes", [])
         edges: List[Dict[str, Any]] = retrieval.get("edges", [])
 
+        citations: List[Dict[str, Any]] = []
+        citation_counter = 1
+
         # 1. Signatures & Documentation
-        symbols_sec: List[str] = ["### Grounded Ruby API Signatures & Documentation"]
+        symbols_sec: List[str] = ["### Grounded Ruby API Signatures & Documentation (with Citations)"]
         rendered_symbols = False
 
         all_nodes = primary_nodes + [n for n in expanded_nodes if n.get("type") in ("method", "class", "module")]
@@ -542,19 +552,35 @@ class GraphRAGService:
             name = node.get("name", "")
             qname = data.get("qualified_name", name)
             gem = node.get("gem", "")
+            file_path = data.get("file", "")
 
             if qname in seen_qnames:
                 continue
             seen_qnames.add(qname)
 
+            cite_id = f"C{citation_counter}"
+            citation_counter += 1
+            file_suffix = f" | File: `{file_path}`" if file_path else ""
+
             if ntype == "method":
                 rendered_symbols = True
                 sig = data.get("signature", f"def {name}")
                 doc = data.get("docstring", "")
-                symbols_sec.append(f"- **Method `{qname}`** (Gem: `{gem}`)")
+                symbols_sec.append(f"- **[{cite_id}] Method `{qname}`** (Gem: `{gem}`{file_suffix})")
                 symbols_sec.append(f"  - Signature: `{sig}`")
                 if doc:
                     symbols_sec.append(f"  - Summary: {doc}")
+
+                citations.append({
+                    "id": cite_id,
+                    "gem": gem,
+                    "file": file_path,
+                    "node_id": node.get("id", ""),
+                    "node_type": "method",
+                    "symbol": qname,
+                    "signature": sig,
+                    "summary": doc,
+                })
 
                 # Find associated doc_tags (parameters, returns) from edges
                 nid = node.get("id")
@@ -577,7 +603,7 @@ class GraphRAGService:
                             rtype = tdata.get("type", "")
                             rdesc = tdata.get("text", "")
                             type_str = f" [{rtype}]" if rtype else ""
-                            desc_str = f" - {rdesc}" if pdesc else ""
+                            desc_str = f" - {rdesc}" if rdesc else ""
                             symbols_sec.append(f"    - `@returns`{type_str}{desc_str}")
 
             elif ntype in ("class", "module"):
@@ -585,9 +611,20 @@ class GraphRAGService:
                 doc = data.get("docstring", "") or " ".join(data.get("comments", []))
                 super_cls = data.get("superclass")
                 super_info = f" < `{super_cls}`" if super_cls else ""
-                symbols_sec.append(f"- **{ntype.title()} `{qname}`**{super_info} (Gem: `{gem}`)")
+                symbols_sec.append(f"- **[{cite_id}] {ntype.title()} `{qname}`**{super_info} (Gem: `{gem}`{file_suffix})")
                 if doc:
                     symbols_sec.append(f"  - Summary: {doc}")
+
+                citations.append({
+                    "id": cite_id,
+                    "gem": gem,
+                    "file": file_path,
+                    "node_id": node.get("id", ""),
+                    "node_type": ntype,
+                    "symbol": qname,
+                    "signature": None,
+                    "summary": doc,
+                })
 
         if rendered_symbols:
             sections.append("\n".join(symbols_sec) + "\n")
@@ -597,13 +634,47 @@ class GraphRAGService:
             n for n in primary_nodes + expanded_nodes if n.get("type") == "example"
         ]
         if example_nodes:
-            ex_sec: List[str] = ["### Verified Code Examples & Usage Snippets"]
+            ex_sec: List[str] = ["### Verified Code Examples & Usage Snippets (with Citations)"]
             for ex in example_nodes:
+                cite_id = f"C{citation_counter}"
+                citation_counter += 1
                 data = ex.get("data", {})
                 target = data.get("target", ex.get("name", ""))
                 code = data.get("code", "")
                 gem = ex.get("gem", "")
-                ex_sec.append(f"```ruby\n# Example for {target} (gem: {gem})\n{code}\n```")
+                file_path = data.get("file", "")
+                if not file_path and target:
+                    target_node = self.nodes_by_id.get(f"method:{target}") or self.nodes_by_id.get(f"class:{target}")
+                    if target_node:
+                        file_path = target_node.get("data", {}).get("file", "")
+                file_suffix = f" | File: `{file_path}`" if file_path else ""
+                ex_sec.append(f"```ruby\n# [{cite_id}] Example for {target} (gem: {gem}{file_suffix})\n{code}\n```")
+
+                citations.append({
+                    "id": cite_id,
+                    "gem": gem,
+                    "file": file_path,
+                    "node_id": ex.get("id", ""),
+                    "node_type": "example",
+                    "symbol": target,
+                    "signature": None,
+                    "summary": f"Example for {target}",
+                })
             sections.append("\n".join(ex_sec) + "\n")
 
+        # 3. Grounded Citations Index Table
+        if citations:
+            cite_table: List[str] = [
+                "### Grounded Citations Index",
+                "| Citation | Gem | File | Symbol | Type |",
+                "|:---|:---|:---|:---|:---|",
+            ]
+            for c in citations:
+                f_str = f"`{c['file']}`" if c.get("file") else "*N/A*"
+                cite_table.append(
+                    f"| [{c['id']}] | `{c['gem']}` | {f_str} | `{c['symbol']}` | {c['node_type']} |"
+                )
+            sections.append("\n".join(cite_table) + "\n")
+
+        retrieval["citations"] = citations
         return "\n".join(sections)

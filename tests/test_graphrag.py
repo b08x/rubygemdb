@@ -223,6 +223,24 @@ def test_format_grounded_context(tmp_path: Path, sample_graph_data):
     assert "def start(given_args = ARGV, config = {})" in context
     assert "@parameter` `given_args` [Array(String)]" in context
     assert "MyCLI.start(ARGV)" in context
+    assert "[C1]" in context
+    assert "### Grounded Citations Index" in context
+    assert "citations" in retrieval
+    assert len(retrieval["citations"]) >= 2
+    assert any(c["symbol"] == "Thor.start" for c in retrieval["citations"])
+
+
+def test_get_citations(tmp_path: Path, sample_graph_data):
+    service = GraphRAGService(base_dir=tmp_path)
+    service.graph_data = sample_graph_data
+    service.active_gems = ["thor"]
+    service._index_graph_memory()
+
+    retrieval = service.retrieve("start", top_k=2)
+    citations = service.get_citations(retrieval)
+    assert len(citations) >= 2
+    assert citations[0]["id"] == "C1"
+    assert citations[0]["gem"] == "thor"
 
 
 def test_build_vector_index_chunk_progress(tmp_path: Path, sample_graph_data):

@@ -53,10 +53,19 @@ class SessionStorage:
                     content TEXT NOT NULL,
                     timestamp TEXT NOT NULL,
                     retrieved_nodes TEXT NOT NULL DEFAULT '[]',
+                    citations TEXT NOT NULL DEFAULT '[]',
                     trace_step TEXT,
                     FOREIGN KEY (session_id) REFERENCES rag_sessions(session_id) ON DELETE CASCADE
                 );
             """)
+
+            # Automatic migration for existing databases missing citations column
+            try:
+                cursor.execute(
+                    "ALTER TABLE rag_messages ADD COLUMN citations TEXT NOT NULL DEFAULT '[]'"
+                )
+            except sqlite3.OperationalError:
+                pass
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS rag_traces (
@@ -89,6 +98,12 @@ class SessionStorage:
 
     def _row_to_message(self, row: sqlite3.Row) -> RAGMessage:
         retrieved = json.loads(row["retrieved_nodes"]) if row["retrieved_nodes"] else []
+        citations = []
+        if "citations" in row.keys() and row["citations"]:
+            try:
+                citations = json.loads(row["citations"])
+            except Exception:
+                citations = []
         return RAGMessage(
             id=row["id"],
             session_id=row["session_id"],
@@ -96,6 +111,7 @@ class SessionStorage:
             content=row["content"],
             timestamp=row["timestamp"],
             retrieved_nodes=retrieved,
+            citations=citations,
             trace_step=row["trace_step"],
         )
 
@@ -244,6 +260,7 @@ class SessionStorage:
         role: str,
         content: str,
         retrieved_nodes: Optional[list[str]] = None,
+        citations: Optional[list[dict[str, Any]]] = None,
         trace_step: Optional[str] = None,
         timestamp: Optional[str] = None,
     ) -> RAGMessage:
@@ -253,12 +270,13 @@ class SessionStorage:
 
         now = timestamp or datetime.now().isoformat()
         nodes = retrieved_nodes or []
+        cites = citations or []
 
         with self._get_connection() as conn:
             cursor = conn.execute(
                 """
-                INSERT INTO rag_messages (session_id, role, content, timestamp, retrieved_nodes, trace_step)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO rag_messages (session_id, role, content, timestamp, retrieved_nodes, citations, trace_step)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -266,6 +284,7 @@ class SessionStorage:
                     content,
                     now,
                     json.dumps(nodes),
+                    json.dumps(cites),
                     trace_step,
                 ),
             )
@@ -283,6 +302,7 @@ class SessionStorage:
             content=content,
             timestamp=now,
             retrieved_nodes=nodes,
+            citations=cites,
             trace_step=trace_step,
         )
 
@@ -385,7 +405,17 @@ class SessionStorage:
                 role_label = msg.role.capitalize()
                 md_lines.append(f"### {role_label} ({msg.timestamp})")
                 md_lines.append(msg.content)
-                if msg.retrieved_nodes:
+                if msg.citations:
+                    md_lines.append("")
+                    md_lines.append("> **Grounded Citations:**")
+                    for c in msg.citations:
+                        c_id = c.get("id", "")
+                        gem = c.get("gem", "")
+                        file_p = c.get("file", "")
+                        sym = c.get("symbol", "")
+                        file_part = f" (`{file_p}`)" if file_p else ""
+                        md_lines.append(f"> - **[{c_id}]** `{gem}`{file_part}: `{sym}`")
+                elif msg.retrieved_nodes:
                     md_lines.append("")
                     md_lines.append(f"> **Retrieved AST Nodes:** {', '.join(f'`{n}`' for n in msg.retrieved_nodes)}")
                 md_lines.append("")
