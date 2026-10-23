@@ -4,9 +4,10 @@ This container packages a clean Ruby 4.0.4 runtime equipped with `rubydex`, `dec
 
 ## Image Specification
 
+- **Multi-Stage Build**:
+  - **Stage 1 (`builder`)**: Uses `ruby:4.0.4-slim` with build tools (`build-essential`, `cmake`, `gcc`) and library development headers (`*-dev`) to compile native C-extensions for `rubydex`, `decode`, and `bake` into `/usr/local/bundle`.
+  - **Stage 2 (`runner`)**: Lean runtime image containing document parsers, CLI utilities, and shared runtime libraries without build tools or header files. Pre-compiled gems are copied from the builder stage.
 - **Base Image**: `docker.io/library/ruby:4.0.4-slim`
-- **System Packages**: `git`, `build-essential`, `ca-certificates`
-- **Ruby Gems**: `rubydex`, `decode`, `bake`
 - **Entrypoint**: `ruby /app/extract_graph.rb`
 
 ## Building the Image
