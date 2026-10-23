@@ -11,7 +11,11 @@
 - Add `langfuse>=5.0.4` runtime dependency (pulls in the OpenTelemetry SDK family)
 - Add universal embedding cache (`services/embedding_cache.py`): a content-addressable SQLite vector cache at `data/cache/embeddings_cache.sqlite`, keyed by SHA-256 of model path + text, shared across GraphRAG indexing, classifier embedding scoring, and agent sessions via `wrap_embeddings()` wrapping txtai `Embeddings` instances
 - Repeat vectorization of previously-seen texts skips the embedding model entirely — only missed texts are encoded and written through, in the original order; GraphRAG vectorization progress messages now report cache hits/misses per chunk
-- Add settings field `embeddings_cache_file` (default `data/cache/embeddings_cache.sqlite`); currently declarative only — the cache defaults to the same path independently and does not read this setting
+- Add settings field `embeddings_cache_file` (default `data/cache/embeddings_cache.sqlite`)
+- Add embedding cache lifecycle and retention: a 180-day TTL purge and a 100,000-vector capacity trim (oldest first) via `prune()`, opportunistic inline pruning after every batch write when the capacity cap is exceeded, and physical disk reclamation via SQLite `VACUUM` — run automatically when a prune deletes more than 10% of entries. TTL is enforced at prune time, not on read — expired-but-unpruned entries still serve as cache hits — and re-putting a vector refreshes its TTL clock
+- Add `rubygemdb cache {stats, clear, prune}` CLI group: `stats` renders a Rich table of vector counts, models, and disk footprint (db/WAL/total bytes); `clear` wipes all or `--model`-scoped vectors (vacuum by default, `--no-vacuum` to skip); `prune` applies TTL/capacity limits with `--max-age-days` / `--max-entries` overrides and a prune-summary table
+- Add `reclassify --clear-embeddings-cache` to wipe and vacuum the embedding cache during fresh-start reclassification
+- Add retention settings `embeddings_cache_max_entries` (default 100,000) and `embeddings_cache_ttl_days` (default 180); wire `embeddings_cache_file` into `EmbeddingCache`'s default path (the setting was previously declarative only)
 
 ### 🐛 Bug Fixes
 
@@ -22,11 +26,14 @@
 - Add test suite `tests/test_tracing.py` covering the no-op fallback contract, span/generation creation, error capture, session-id propagation, and flush behavior
 - Add test suite `tests/test_embedding_cache.py` covering cache-key hashing, single/batch put/get roundtrips, stats and clear, the wrap lifecycle (an all-hit turn performs zero calls to the underlying model), and idempotent double-wrapping
 - Add `test_build_or_load_index_ghost_cache_rebuilds` to `tests/test_graphrag.py`: a ghost cache state (graph.json and `txtai/` present, `embeddings` file missing) must trigger a rebuild
+- Add test suite `tests/test_cli.py` covering `cache stats` / `cache clear` (with `--model` and `--no-vacuum`) / `cache prune` output and `reclassify --clear-embeddings-cache`
+- Extend `tests/test_embedding_cache.py` with retention coverage: TTL pruning of backdated rows, oldest-first capacity trimming, opportunistic inline pruning during `put_many`, the settings-driven db path, `stats()` disk-size fields, and the >10% auto-vacuum threshold
 
 ### 📚 Documentation
 
 - Document Langfuse configuration and tracing behavior in README.md, CLAUDE.md, and INSTALL.md (AGENTS.md and GEMINI.md were updated alongside the code in the same commit)
 - Document the universal embedding cache and the GraphRAG cache-validity fix in README.md, AGENTS.md, CLAUDE.md, GEMINI.md, and INSTALL.md
+- Document embedding cache retention, the `rubygemdb cache` CLI group, and `--clear-embeddings-cache` in AGENTS.md, CLAUDE.md, GEMINI.md, and README.md (updated alongside the code); correct the stale cache description in INSTALL.md and record the feature in CHANGELOG.md
 
 ## [0.8.0] - 2026-10-23
 

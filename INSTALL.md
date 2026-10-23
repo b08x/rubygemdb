@@ -169,6 +169,20 @@ print(response)
 
 Chat sessions persist across restarts: every turn is saved to `data/sessions.sqlite` and indexed for semantic search as a `session_turn` document. The TUI chat tab auto-restores the most recent session on open.
 
+### Embedding Cache Management
+
+Inspect, prune, and clear the shared vector embedding cache (`data/cache/embeddings_cache.sqlite`):
+
+```bash
+uv run rubygemdb cache stats                           # Rich table of vector counts, models, and disk footprint
+uv run rubygemdb cache clear                           # purge all vectors and reclaim disk space via VACUUM
+uv run rubygemdb cache clear --model "model_name"     # clear vectors for a specific model only
+uv run rubygemdb cache prune                           # prune expired vectors (>180d) and cap at 100k entries
+uv run rubygemdb cache prune --max-age-days 90 --max-entries 50000  # custom retention limits
+```
+
+Pass `--no-vacuum` on `clear` or `prune` to skip physical SQLite page reclamation. `uv run rubygemdb reclassify --clear-embeddings-cache` wipes and vacuums the cache during fresh-start reclassification. Retention defaults (TTL 180 days, 100,000 entries) are governed by `EMBEDDINGS_CACHE_TTL_DAYS` / `EMBEDDINGS_CACHE_MAX_ENTRIES` in `.env`.
+
 ---
 
 ## Keyboard Shortcuts
@@ -231,6 +245,10 @@ RERANKER_N_CTX=1024
 # RERANKER_N_THREADS=           # unset = llama.cpp default
 RERANKER_CANDIDATE_MULTIPLIER=3 # candidate pool = top_k × multiplier, clamped 15–50
 # MODELS_CACHE_DIR=             # unset = ./data/models
+
+# Embedding Cache Retention (universal vector cache, data/cache/embeddings_cache.sqlite)
+# EMBEDDINGS_CACHE_MAX_ENTRIES= # unset = 100000 (oldest vectors pruned above the cap)
+# EMBEDDINGS_CACHE_TTL_DAYS=    # unset = 180
 
 # Langfuse Observability (optional - tracing is a no-op until both keys are set)
 LANGFUSE_PUBLIC_KEY=
@@ -321,7 +339,7 @@ nokogiri,1.15.0,,HTML/XML parser,...
 | `output/cheatsheets/*.md` | Context7 documentation cheatsheets |
 | `data/cache/gem_cache.json` | RubyGems API response cache |
 | `data/cache/llm_cache.json` | LLM prompt/response cache |
-| `data/cache/embeddings_cache.sqlite` | Universal embedding vector cache (shared across GraphRAG, classification, and sessions; grows unbounded — no TTL) |
+| `data/cache/embeddings_cache.sqlite` | Universal embedding vector cache (shared across GraphRAG, classification, and sessions; 180-day TTL and 100,000-entry cap with inline pruning after batch writes — manage via `rubygemdb cache {stats, clear, prune}`) |
 | `data/txtai/` | Vector embedding index |
 | `data/models/` | Local GGUF model cache (query expansion & reranker weights, lazily downloaded from Hugging Face) |
 | `data/mcp.pid` | MCP daemon PID file (`data/mcp.json` sidecar records host/port) |
