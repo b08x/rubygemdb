@@ -75,3 +75,51 @@ def test_expected_slugs():
         "native_bindings", "core_extensions",
     }
     assert expected == set(VALID_CATEGORIES)
+
+
+def test_every_category_has_subcategories():
+    for c in CATEGORIES:
+        assert c.sub_categories, f"{c.slug} has no sub_categories defined"
+        assert len(c.sub_categories) >= 2, f"{c.slug} has fewer than 2 sub_categories"
+        for sub_slug, examples in c.sub_categories.items():
+            assert sub_slug.islower(), f"{c.slug} sub-category {sub_slug} not lowercase"
+            assert "_" in sub_slug or sub_slug.isalnum(), f"{c.slug} sub-category {sub_slug} invalid format"
+            assert len(examples) >= 1, f"{c.slug} sub-category {sub_slug} has no example gems"
+            for gem in examples:
+                assert isinstance(gem, str) and gem, f"Invalid gem in {c.slug}.{sub_slug}: {gem}"
+
+
+def test_subcategories_vocabulary_coverage():
+    expected_subs = {
+        "web_frameworks": ("full_stack_frameworks", "micro_frameworks", "rack_middleware", "templating_engines", "frontend_assets"),
+        "http_networking": ("http_clients", "api_sdks", "networking_protocols", "remote_storage_transfer"),
+        "servers_concurrency": ("application_servers", "async_evented", "concurrency_parallelism", "process_supervision"),
+        "background_jobs": ("job_queues", "workflow_dag_orchestration", "job_scheduling"),
+        "persistence": ("relational_orms", "database_drivers", "key_value_caches", "file_attachment_storage", "specialized_datastores"),
+        "document_parsing": ("html_xml_parsing", "json_yaml_serialization", "csv_tabular_formats", "markdown_prose_parsing", "code_ast_parsers", "structured_extractors", "archive_compression"),
+        "document_generation": ("pdf_generation", "api_doc_generators", "syntax_highlighting"),
+        "static_site_generation": ("site_generators", "jekyll_plugins", "site_themes"),
+        "testing_qa": ("test_frameworks", "mocking_stubbing", "fixtures_factories", "browser_integration", "test_tooling_reporting"),
+        "code_quality_typing": ("linters_formatters", "rubocop_extensions", "type_checkers", "language_servers", "security_static_analysis"),
+        "runtime_validation": ("schema_validation", "type_containers_structs", "object_mapping_attributes"),
+        "developer_tools": ("debugging_repl", "profiling_benchmarks", "logging_telemetry", "development_workflow"),
+        "mcp_tooling": ("mcp_servers", "mcp_clients"),
+        "text_search": ("nlp_tokenization", "string_similarity_fuzzy", "search_ranking_retrieval", "lexical_knowledge_bases"),
+        "security_auth": ("authentication_oauth", "authorization_policies", "cryptography_encryption"),
+        "media_processing": ("image_processing", "audio_music_processing", "video_transcoding"),
+        "gui_desktop": ("desktop_gui", "game_graphics_2d"),
+        "native_bindings": ("ffi_interop", "compilation_packaging", "binary_executable_tools"),
+        "core_extensions": ("language_core_extensions", "data_structures_collections", "environment_system_utilities", "data_standards_reference"),
+    }
+    for slug, subs in expected_subs.items():
+        cat_subs = CATEGORY_BY_SLUG[slug].sub_categories
+        for sub in subs:
+            assert sub in cat_subs, f"{slug} missing expected sub-category {sub}"
+
+
+def test_default_invasiveness_and_leak_within_valid_ranges():
+    valid_leaks = {"low", "medium", "high"}
+    for c in CATEGORIES:
+        assert 1 <= c.default_invasiveness <= 5, f"{c.slug} invasiveness {c.default_invasiveness} out of bounds"
+        assert c.default_abstraction_leak in valid_leaks, f"{c.slug} invalid leak {c.default_abstraction_leak}"
+

@@ -12,7 +12,7 @@ _TOKEN_RE = re.compile(r"[^a-z0-9]+")
 # Scoring weights: name hits dominate, dependency hits nudge, description
 # term hits break ties for quiet-named gems.
 _NAME_HIT_WEIGHT = 1.0
-_NAME_HIT_CAP = 3
+_NAME_HIT_CAP = 4.0
 _DEP_HIT_WEIGHT = 0.4
 _DEP_HIT_CAP = 2.0
 _DESC_HIT_WEIGHT = 0.06
@@ -27,6 +27,21 @@ _DEFAULT_RISKS = GemRisks(invasiveness=3, coupling=1, abstraction_leak="low")
 
 def _tokens(text: str) -> list[str]:
     return [t for t in _TOKEN_RE.split(text.lower()) if t]
+
+
+def _name_keyword_score(tokens: list[str], name_lower: str, keyword: str) -> float:
+    """Score a keyword match against a gem name. Exact full name match dominates,
+    multi-token compound matches rank next, and single token hits follow."""
+    k = keyword.lower()
+    norm_k = k.replace("-", "_")
+    norm_name = name_lower.replace("-", "_")
+    if norm_k == norm_name:
+        return 2.5
+    if k in tokens:
+        return 1.0
+    if not k.isalnum() and (k in name_lower or norm_k in norm_name):
+        return 1.5
+    return 0.0
 
 
 def _keyword_hits(tokens: list[str], text_lower: str, keyword: str) -> int:
@@ -75,14 +90,14 @@ class GemClassifier:
         dep_hit_counts: dict[str, int] = {}
 
         for cat in CATEGORIES:
-            n_hits = sum(_keyword_hits(name_token_set, name_l, kw) for kw in cat.keywords)
+            n_score = sum(_name_keyword_score(name_token_set, name_l, kw) for kw in cat.keywords)
             d_hits = sum(_keyword_hits(dep_tokens, dep_l, kw) for kw in cat.keywords) if dep_tokens else 0
             t_hits = sum(_keyword_hits(desc_tokens, desc_l, kw) for kw in cat.keywords) if desc_tokens else 0
 
-            name_hits[cat.slug] = n_hits
+            name_hits[cat.slug] = int(n_score)
             dep_hit_counts[cat.slug] = d_hits
             scores[cat.slug] = (
-                min(_NAME_HIT_WEIGHT * n_hits, _NAME_HIT_CAP)
+                min(n_score, _NAME_HIT_CAP)
                 + min(_DEP_HIT_WEIGHT * d_hits, _DEP_HIT_CAP)
                 + min(_DESC_HIT_WEIGHT * t_hits, _DESC_HIT_CAP)
             )
@@ -132,46 +147,72 @@ class GemClassifier:
         if any("rails" in d.lower() for d in deps):
             signals.rails = True
 
-        # ---- dependency-driven sub-category signals (kept from the old
-        # classifier; orthogonal to the 21-category taxonomy) ----
-        sub_cats = set()
-        for dep in deps:
-            dl = dep.lower()
-            if "rails" in dl:
-                sub_cats.add("rails")
-            if "sidekiq" in dl:
-                sub_cats.add("sidekiq")
-                sub_cats.add("background_jobs")
-            if "active_job" in dl or "activejob" in dl:
-                sub_cats.add("activejob")
-            if "puma" in dl or "unicorn" in dl:
-                sub_cats.add("server")
-            if "redis" in dl:
-                sub_cats.add("redis")
-            if "postgres" in dl or dl == "pg" or "mysql" in dl or "mariadb" in dl:
-                sub_cats.add("database")
-            if "elasticsearch" in dl or "search" in dl:
-                sub_cats.add("search")
-            if "jwt" in dl or "oauth" in dl:
-                sub_cats.add("auth")
-            if "graphql" in dl or "grape" in dl:
-                sub_cats.add("api")
-            if "json" in dl or "xml" in dl:
-                sub_cats.add("serialization")
-            if "csv" in dl or "xlsx" in dl or "excel" in dl:
-                sub_cats.add("spreadsheet")
-            if "pdf" in dl:
-                sub_cats.add("pdf")
-            if "aws" in dl or "gcp" in dl or "google" in dl or "azure" in dl or "s3" in dl:
-                sub_cats.add("cloud")
-            if "sentry" in dl or "datadog" in dl or "newrelic" in dl or "honeybadger" in dl:
-                sub_cats.add("monitoring")
-            if "delayed_job" in dl or "resque" in dl or "sidekiq" in dl:
-                sub_cats.add("background_jobs")
-            if "kafka" in dl or "bunny" in dl or "mqtt" in dl:
-                sub_cats.add("messaging")
+        # ---- taxonomy-driven sub-category detection ----
+        sub_cats = self.detect_sub_categories(name, info, deps, classification.primary)
+        classification.sub_categories = sub_cats
 
-        return classification, signals, deps, list(sub_cats)
+        return classification, signals, deps, sub_cats
+
+    def detect_sub_categories(self, name: str, info: dict, deps: list, primary_cat: str) -> List[str]:
+        cat = CATEGORY_BY_SLUG.get(primary_cat)
+        if not cat or not cat.sub_categories:
+            return []
+
+        name_l = name.lower()
+        name_tokens = set(_tokens(name))
+        description = str(info.get("info", "")) if info else ""
+        desc_l = description.lower()
+        desc_tokens = set(_tokens(description))
+        deps_l = [d.lower() for d in deps]
+
+        matches: list[tuple[str, float]] = []
+        for sub_slug, examples in cat.sub_categories.items():
+            score = 0.0
+            ex_lower = [e.lower() for e in examples]
+
+            # 1. Direct name match in example gems
+            if name_l in ex_lower:
+                score += 10.0
+
+            # 2. Substring / prefix match in example gems
+            for ex in ex_lower:
+                if ex in name_l:
+                    score += 3.0
+                    break
+
+            # 3. Sub-slug token match against name and description
+            sub_tokens = [t for t in sub_slug.split("_") if len(t) > 2 and t not in ("and", "for", "the")]
+            name_sub_hits = sum(1 for st in sub_tokens if st in name_tokens or st in name_l)
+            if name_sub_hits:
+                score += 2.0 * name_sub_hits
+
+            desc_sub_hits = sum(1 for st in sub_tokens if st in desc_tokens or st in desc_l)
+            if desc_sub_hits:
+                score += 0.5 * desc_sub_hits
+
+            # 4. Dependency match against example gems
+            dep_example_hits = sum(1 for ex in ex_lower if ex in deps_l or any(ex in d for d in deps_l))
+            if dep_example_hits:
+                score += 2.5 * dep_example_hits
+
+            if score >= 2.0:
+                matches.append((sub_slug, score))
+
+        if not matches:
+            # Fallback: if no score >= 2.0, check description tokens
+            best_sub = None
+            best_sc = 0
+            for sub_slug, _ in cat.sub_categories.items():
+                sub_tokens = [t for t in sub_slug.split("_") if len(t) > 2]
+                sc = sum(1 for st in sub_tokens if st in desc_tokens)
+                if sc > best_sc:
+                    best_sc = sc
+                    best_sub = sub_slug
+            if best_sub and best_sc > 0:
+                matches.append((best_sub, float(best_sc)))
+
+        matches.sort(key=lambda m: m[1], reverse=True)
+        return [m[0] for m in matches]
 
     def score_gem(self, primary_cat: str, deps: list) -> GemRisks:
         cat = CATEGORY_BY_SLUG.get(primary_cat)
@@ -209,6 +250,7 @@ class GemClassifier:
                 if llm_primary in VALID_CATEGORIES:
                     classification.primary = llm_primary
                     classification.confidence = llm_result["confidence"]
+                    classification.sub_categories = self.detect_sub_categories(name, info, deps, llm_primary)
             agent_desc = llm_result.get("agent_description", "")
 
         risks = self.score_gem(classification.primary, deps)

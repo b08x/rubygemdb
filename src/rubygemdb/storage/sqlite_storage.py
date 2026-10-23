@@ -56,6 +56,10 @@ class SQLiteStorage(StorageBase):
             if "preferred" not in columns:
                 cursor.execute("ALTER TABLE inventory ADD COLUMN preferred INTEGER DEFAULT 0")
 
+            classified_columns = {row[1] for row in cursor.execute("PRAGMA table_info(classified_gems)")}
+            if "sub_categories" not in classified_columns:
+                cursor.execute("ALTER TABLE classified_gems ADD COLUMN sub_categories TEXT DEFAULT '[]'")
+
             conn.commit()
 
     def load_inventory(self, path: str) -> List[GemInventoryItem]:
@@ -87,7 +91,7 @@ class SQLiteStorage(StorageBase):
                     source_code_uri = gem_info.get("source_code_uri") if gem_info else row.get("source_code_uri")
                     
                     # Verify context7_id
-                    context7_id = self.context7.verify_library(name)
+                    context7_id = self.context7.verify_library(name, source_code_uri=source_code_uri, homepage_uri=homepage)
                     
                     # Insert or update
                     cursor.execute("""
@@ -121,8 +125,8 @@ class SQLiteStorage(StorageBase):
             for gem in gems:
                 cursor.execute("""
                     INSERT INTO classified_gems (
-                        name, classification, role, capabilities, risks, signals, dependencies, description
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        name, classification, role, capabilities, risks, signals, dependencies, description, sub_categories
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(name) DO UPDATE SET
                         classification=excluded.classification,
                         role=excluded.role,
@@ -130,7 +134,8 @@ class SQLiteStorage(StorageBase):
                         risks=excluded.risks,
                         signals=excluded.signals,
                         dependencies=excluded.dependencies,
-                        description=excluded.description
+                        description=excluded.description,
+                        sub_categories=excluded.sub_categories
                 """, (
                     gem.name,
                     json.dumps(gem.classification.model_dump()),
@@ -139,7 +144,8 @@ class SQLiteStorage(StorageBase):
                     json.dumps(gem.risks.model_dump()),
                     json.dumps(gem.signals.model_dump()),
                     json.dumps(gem.dependencies),
-                    gem.description
+                    gem.description,
+                    json.dumps(gem.classification.sub_categories),
                 ))
             conn.commit()
 
@@ -257,9 +263,15 @@ class SQLiteStorage(StorageBase):
             """)
             rows = cursor.fetchall()
             for row in rows:
+                cls_data = json.loads(row["classification"])
+                if not cls_data.get("sub_categories") and "sub_categories" in row.keys() and row["sub_categories"]:
+                    try:
+                        cls_data["sub_categories"] = json.loads(row["sub_categories"])
+                    except Exception:
+                        pass
                 gems.append(GemEntry(
                     name=row["name"],
-                    classification=GemClassification(**json.loads(row["classification"])),
+                    classification=GemClassification(**cls_data),
                     role=json.loads(row["role"]),
                     capabilities=json.loads(row["capabilities"]),
                     risks=GemRisks(**json.loads(row["risks"])),
