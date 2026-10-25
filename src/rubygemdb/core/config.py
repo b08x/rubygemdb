@@ -9,6 +9,10 @@ class Settings(BaseSettings):
     mistral_api_key: Optional[str] = None
     openrouter_api_key: Optional[str] = None
     context7_api_key: Optional[str] = None
+    github_token: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("github_token", "GITHUB_TOKEN", "GH_TOKEN"),
+    )
     
     # Endpoints & Models
     rubygemdb_provider: str = Field(

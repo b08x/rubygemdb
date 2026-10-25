@@ -51,7 +51,8 @@ class SQLiteStorage(StorageBase):
                     homepage TEXT,
                     source_code_uri TEXT,
                     context7_id TEXT,
-                    verified INTEGER DEFAULT 0
+                    verified INTEGER DEFAULT 0,
+                    genai_uses TEXT
                 )
             """)
             
@@ -66,6 +67,7 @@ class SQLiteStorage(StorageBase):
                     signals TEXT,
                     dependencies TEXT,
                     description TEXT,
+                    genai_uses TEXT,
                     FOREIGN KEY(name) REFERENCES inventory(name)
                 )
             """)
@@ -74,10 +76,14 @@ class SQLiteStorage(StorageBase):
             columns = {row[1] for row in cursor.execute("PRAGMA table_info(inventory)")}
             if "preferred" not in columns:
                 cursor.execute("ALTER TABLE inventory ADD COLUMN preferred INTEGER DEFAULT 0")
+            if "genai_uses" not in columns:
+                cursor.execute("ALTER TABLE inventory ADD COLUMN genai_uses TEXT")
 
             classified_columns = {row[1] for row in cursor.execute("PRAGMA table_info(classified_gems)")}
             if "sub_categories" not in classified_columns:
                 cursor.execute("ALTER TABLE classified_gems ADD COLUMN sub_categories TEXT DEFAULT '[]'")
+            if "genai_uses" not in classified_columns:
+                cursor.execute("ALTER TABLE classified_gems ADD COLUMN genai_uses TEXT")
 
             conn.commit()
 
@@ -97,13 +103,14 @@ class SQLiteStorage(StorageBase):
                     continue
                 
                 # Check if already verified in DB
-                cursor.execute("SELECT verified, homepage, source_code_uri, context7_id FROM inventory WHERE name = ?", (name,))
+                cursor.execute("SELECT verified, homepage, source_code_uri, context7_id, genai_uses FROM inventory WHERE name = ?", (name,))
                 db_row = cursor.fetchone()
                 
                 if db_row and db_row[0] == 1 and db_row[2] is not None:
                     homepage = db_row[1]
                     source_code_uri = db_row[2]
                     context7_id = db_row[3]
+                    genai_uses = db_row[4] or row.get("genai_uses")
                 else:
                     logger.info(f"Verifying {name}...")
                     # Verify homepage and source_code_uri from RubyGems API
@@ -113,11 +120,12 @@ class SQLiteStorage(StorageBase):
                     
                     # Verify context7_id
                     context7_id = self.context7.verify_library(name, source_code_uri=source_code_uri, homepage_uri=homepage)
+                    genai_uses = row.get("genai_uses")
                     
                     # Insert or update
                     cursor.execute("""
-                        INSERT INTO inventory (name, version, category, description, homepage, source_code_uri, context7_id, verified)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                        INSERT INTO inventory (name, version, category, description, homepage, source_code_uri, context7_id, genai_uses, verified)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
                         ON CONFLICT(name) DO UPDATE SET
                             version=excluded.version,
                             category=excluded.category,
@@ -125,8 +133,9 @@ class SQLiteStorage(StorageBase):
                             homepage=excluded.homepage,
                             source_code_uri=excluded.source_code_uri,
                             context7_id=excluded.context7_id,
+                            genai_uses=COALESCE(excluded.genai_uses, inventory.genai_uses),
                             verified=1
-                    """, (name, row.get("version"), row.get("category"), row.get("description"), homepage, source_code_uri, context7_id))
+                    """, (name, row.get("version"), row.get("category"), row.get("description"), homepage, source_code_uri, context7_id, genai_uses))
                 
                 items.append(GemInventoryItem(
                     name=name,
@@ -135,7 +144,8 @@ class SQLiteStorage(StorageBase):
                     description=row.get("description"),
                     homepage=homepage,
                     source_code_uri=source_code_uri,
-                    context7_id=context7_id
+                    context7_id=context7_id,
+                    genai_uses=genai_uses
                 ))
             conn.commit()
         return items
@@ -148,8 +158,8 @@ class SQLiteStorage(StorageBase):
             for gem in gems:
                 cursor.execute("""
                     INSERT INTO classified_gems (
-                        name, classification, role, capabilities, risks, signals, dependencies, description, sub_categories
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        name, classification, role, capabilities, risks, signals, dependencies, description, sub_categories, genai_uses
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(name) DO UPDATE SET
                         classification=excluded.classification,
                         role=excluded.role,
@@ -158,7 +168,8 @@ class SQLiteStorage(StorageBase):
                         signals=excluded.signals,
                         dependencies=excluded.dependencies,
                         description=excluded.description,
-                        sub_categories=excluded.sub_categories
+                        sub_categories=excluded.sub_categories,
+                        genai_uses=COALESCE(excluded.genai_uses, classified_gems.genai_uses)
                 """, (
                     gem.name,
                     json.dumps(gem.classification.model_dump()),
@@ -169,6 +180,7 @@ class SQLiteStorage(StorageBase):
                     json.dumps(gem.dependencies),
                     gem.description,
                     json.dumps(gem.classification.sub_categories),
+                    gem.genai_uses,
                 ))
             conn.commit()
 
@@ -291,8 +303,20 @@ class SQLiteStorage(StorageBase):
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             # Join with inventory to get metadata
-            cursor.execute("""
-                SELECT c.*, i.homepage, i.source_code_uri, i.context7_id, i.preferred
+            cls_cols = {r[1] for r in cursor.execute("PRAGMA table_info(classified_gems)")}
+            inv_cols = {r[1] for r in cursor.execute("PRAGMA table_info(inventory)")}
+            if "genai_uses" in cls_cols and "genai_uses" in inv_cols:
+                genai_select = "COALESCE(c.genai_uses, i.genai_uses) AS resolved_genai_uses"
+            elif "genai_uses" in cls_cols:
+                genai_select = "c.genai_uses AS resolved_genai_uses"
+            elif "genai_uses" in inv_cols:
+                genai_select = "i.genai_uses AS resolved_genai_uses"
+            else:
+                genai_select = "NULL AS resolved_genai_uses"
+
+            cursor.execute(f"""
+                SELECT c.*, i.homepage, i.source_code_uri, i.context7_id, i.preferred,
+                       {genai_select}
                 FROM classified_gems c
                 LEFT JOIN inventory i ON c.name = i.name
             """)
@@ -316,7 +340,8 @@ class SQLiteStorage(StorageBase):
                     homepage=row["homepage"],
                     source_code_uri=row["source_code_uri"],
                     context7_id=row["context7_id"],
-                    preferred=bool(row["preferred"])
+                    preferred=bool(row["preferred"]),
+                    genai_uses=row["resolved_genai_uses"],
                 ))
         return gems
 
@@ -325,8 +350,20 @@ class SQLiteStorage(StorageBase):
         with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute("""
-                SELECT c.*, i.homepage, i.source_code_uri, i.context7_id, i.preferred
+            cls_cols = {r[1] for r in cursor.execute("PRAGMA table_info(classified_gems)")}
+            inv_cols = {r[1] for r in cursor.execute("PRAGMA table_info(inventory)")}
+            if "genai_uses" in cls_cols and "genai_uses" in inv_cols:
+                genai_select = "COALESCE(c.genai_uses, i.genai_uses) AS resolved_genai_uses"
+            elif "genai_uses" in cls_cols:
+                genai_select = "c.genai_uses AS resolved_genai_uses"
+            elif "genai_uses" in inv_cols:
+                genai_select = "i.genai_uses AS resolved_genai_uses"
+            else:
+                genai_select = "NULL AS resolved_genai_uses"
+
+            cursor.execute(f"""
+                SELECT c.*, i.homepage, i.source_code_uri, i.context7_id, i.preferred,
+                       {genai_select}
                 FROM classified_gems c
                 LEFT JOIN inventory i ON c.name = i.name
                 WHERE c.name = ?
@@ -352,7 +389,8 @@ class SQLiteStorage(StorageBase):
                 homepage=row["homepage"],
                 source_code_uri=row["source_code_uri"],
                 context7_id=row["context7_id"],
-                preferred=bool(row["preferred"])
+                preferred=bool(row["preferred"]),
+                genai_uses=row["resolved_genai_uses"],
             )
 
     def get_inventory_gem(self, name: str) -> Optional[dict]:
@@ -360,7 +398,7 @@ class SQLiteStorage(StorageBase):
         with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute("SELECT name, homepage, source_code_uri, description, context7_id, preferred FROM inventory WHERE name = ?", (name,))
+            cursor.execute("SELECT name, version, category, description, homepage, source_code_uri, context7_id, preferred, genai_uses FROM inventory WHERE name = ?", (name,))
             row = cursor.fetchone()
             return dict(row) if row else None
 
@@ -368,24 +406,118 @@ class SQLiteStorage(StorageBase):
         with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute("SELECT name, homepage, source_code_uri, description, context7_id FROM inventory")
+            cursor.execute("SELECT name, version, category, description, homepage, source_code_uri, context7_id, preferred, genai_uses FROM inventory")
             return [dict(row) for row in cursor.fetchall()]
 
-    def update_gem_verification(self, name: str, homepage: str, source_code_uri: str, description: str, context7_id: str):
+    def upsert_inventory_gem(
+        self,
+        name: str,
+        version: Optional[str] = None,
+        category: Optional[str] = None,
+        description: Optional[str] = None,
+        homepage: Optional[str] = None,
+        source_code_uri: Optional[str] = None,
+        context7_id: Optional[str] = None,
+        genai_uses: Optional[str] = None,
+        verified: int = 1,
+    ):
+        """Insert or update a gem inventory record."""
         if self.is_read_only:
             raise PermissionError("Storage is in read-only mode")
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                UPDATE inventory 
-                SET homepage = ?, source_code_uri = ?, description = ?, context7_id = ?, verified = 1 
-                WHERE name = ?
-            """, (homepage, source_code_uri, description, context7_id, name))
+                INSERT INTO inventory (name, version, category, description, homepage, source_code_uri, context7_id, genai_uses, verified)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    version=COALESCE(excluded.version, inventory.version),
+                    category=COALESCE(excluded.category, inventory.category),
+                    description=COALESCE(excluded.description, inventory.description),
+                    homepage=COALESCE(excluded.homepage, inventory.homepage),
+                    source_code_uri=COALESCE(excluded.source_code_uri, inventory.source_code_uri),
+                    context7_id=COALESCE(excluded.context7_id, inventory.context7_id),
+                    genai_uses=COALESCE(excluded.genai_uses, inventory.genai_uses),
+                    verified=MAX(excluded.verified, inventory.verified)
+            """, (name, version, category, description, homepage, source_code_uri, context7_id, genai_uses, verified))
+            conn.commit()
+
+    def enrich_inventory_gem(
+        self,
+        name: str,
+        homepage: Optional[str] = None,
+        source_code_uri: Optional[str] = None,
+        description: Optional[str] = None,
+        context7_id: Optional[str] = None,
+        genai_uses: Optional[str] = None,
+    ) -> bool:
+        """Backfill missing fields for an existing inventory gem without overwriting existing data.
+        
+        Returns True if any field was updated, False otherwise.
+        """
+        if self.is_read_only:
+            raise PermissionError("Storage is in read-only mode")
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT homepage, source_code_uri, description, context7_id, genai_uses FROM inventory WHERE name = ?", (name,))
+            row = cursor.fetchone()
+            if not row:
+                return False
             
-            cursor.execute("""
-                UPDATE classified_gems
-                SET description = ?
-                WHERE name = ?
-            """, (description, name))
-            
+            cur_home, cur_source, cur_desc, cur_c7, cur_genai = row
+            updates = {}
+            if not cur_home and homepage:
+                updates["homepage"] = homepage
+            if not cur_source and source_code_uri:
+                updates["source_code_uri"] = source_code_uri
+            if not cur_desc and description:
+                updates["description"] = description
+            if not cur_c7 and context7_id:
+                updates["context7_id"] = context7_id
+            if not cur_genai and genai_uses:
+                updates["genai_uses"] = genai_uses
+
+            if not updates:
+                return False
+
+            set_clause = ", ".join(f"{col} = ?" for col in updates.keys())
+            values = list(updates.values()) + [name]
+            cursor.execute(f"UPDATE inventory SET {set_clause} WHERE name = ?", values)
+            conn.commit()
+            return True
+
+    def update_gem_verification(
+        self,
+        name: str,
+        homepage: str,
+        source_code_uri: str,
+        description: str,
+        context7_id: str,
+        genai_uses: Optional[str] = None,
+    ):
+        if self.is_read_only:
+            raise PermissionError("Storage is in read-only mode")
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            if genai_uses is not None:
+                cursor.execute("""
+                    UPDATE inventory 
+                    SET homepage = ?, source_code_uri = ?, description = ?, context7_id = ?, genai_uses = ?, verified = 1 
+                    WHERE name = ?
+                """, (homepage, source_code_uri, description, context7_id, genai_uses, name))
+                cursor.execute("""
+                    UPDATE classified_gems
+                    SET description = ?, genai_uses = ?
+                    WHERE name = ?
+                """, (description, genai_uses, name))
+            else:
+                cursor.execute("""
+                    UPDATE inventory 
+                    SET homepage = ?, source_code_uri = ?, description = ?, context7_id = ?, verified = 1 
+                    WHERE name = ?
+                """, (homepage, source_code_uri, description, context7_id, name))
+                cursor.execute("""
+                    UPDATE classified_gems
+                    SET description = ?
+                    WHERE name = ?
+                """, (description, name))
             conn.commit()

@@ -12,6 +12,7 @@ from textual.widgets import (
 from textual.screen import ModalScreen
 from textual.timer import Timer
 from textual import on, work
+from rich.text import Text
 
 from rubygemdb.services.rubygems import RubyGemsService
 from rubygemdb.services.llm import LLMService
@@ -34,6 +35,12 @@ class TabConstants:
 class GemDetails(Vertical):
     """A widget to display detailed gem information."""
     
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.gem: Optional[GemEntry] = None
+        self.target_name: str = ""
+        self.is_expanded: bool = False
+
     def compose(self) -> ComposeResult:
         with ScrollableContainer(id="details-container"):
             yield Label("", id="details-name", classes="details-title")
@@ -57,11 +64,74 @@ class GemDetails(Vertical):
             
             yield Label("Bulk Actions", classes="section-title")
             yield Button("Fetch Combined Cheatsheet", id="fetch-combined-btn", variant="primary")
-            yield Button("Close", id="close-details-btn", variant="error")
+            with Horizontal(id="pane-control-buttons"):
+                yield Button("Expand (w)", id="toggle-width-btn", variant="default")
+                yield Button("Close", id="close-details-btn", variant="error")
+
+    def calculate_form_fit_width(self, gem: GemEntry) -> int:
+        source_line = f"Source: {gem.source_code_uri or 'N/A'}"
+        c7_line = f"Context7 ID: {gem.context7_id or 'Missing'}"
+        name_line = gem.name
+        sub_cats = ", ".join(gem.classification.sub_categories) if gem.classification.sub_categories else "None"
+        sub_cat_line = f"Sub-cats: {sub_cats}"
+        cat_line = f"Category: {gem.classification.primary} (Conf: {gem.classification.confidence:.2f})"
+        
+        longest = max(
+            len(source_line),
+            len(c7_line),
+            len(name_line) + 2,
+            len(sub_cat_line),
+            len(cat_line),
+            38,
+        )
+        # Add padding (1 2 -> 4 chars), border-left (1 char), scrollbar margin (2 chars), safety (1 char)
+        needed = longest + 8
+        
+        try:
+            app_width = self.app.size.width if self.app.size.width > 0 else 120
+        except Exception:
+            app_width = 120
+
+        # Allow pane to take up to 92 columns, leaving space for the table
+        max_fit = max(48, min(92, app_width - 32))
+        return max(46, min(needed, max_fit))
+
+    def apply_width(self) -> None:
+        if not self.gem:
+            return
+        try:
+            app_width = self.app.size.width if self.app.size.width > 0 else 120
+        except Exception:
+            app_width = 120
+
+        if self.is_expanded:
+            target_width = min(96, max(75, app_width - 32))
+            try:
+                btn = self.query_one("#toggle-width-btn", Button)
+                btn.label = "Narrow (w)"
+            except Exception:
+                pass
+        else:
+            target_width = self.calculate_form_fit_width(self.gem)
+            try:
+                btn = self.query_one("#toggle-width-btn", Button)
+                btn.label = "Expand (w)"
+            except Exception:
+                pass
+        self.styles.width = target_width
+
+    def toggle_expand(self) -> None:
+        self.is_expanded = not self.is_expanded
+        self.apply_width()
+
+    @on(Button.Pressed, "#toggle-width-btn")
+    def on_toggle_width_pressed(self) -> None:
+        self.toggle_expand()
 
     def update_gem(self, gem: GemEntry):
         self.gem = gem
         self.target_name = gem.name
+        self.apply_width()
         
         self.query_one("#details-name", Label).update(f"[b]{gem.name}[/b]")
         
@@ -73,7 +143,9 @@ class GemDetails(Vertical):
         
         metadata_text = f"Source: [blue]{gem.source_code_uri or 'N/A'}[/blue]\n"
         metadata_text += f"Context7 ID: [green]{gem.context7_id or 'Missing'}[/green]"
-        self.query_one("#details-metadata", Label).update(metadata_text)
+        t = Text.from_markup(metadata_text)
+        t.overflow = "fold"
+        self.query_one("#details-metadata", Label).update(t)
         
         risk_text = (
             f"Invasiveness: {gem.risks.invasiveness}/5\n"
@@ -911,14 +983,20 @@ class GemApp(App):
         ("plus", "add_gem", "Add"),
         ("slash", "focus_search", "Search"),
         ("t", "switch_tab", "Switch Tab"),
+        ("w", "toggle_details_expand", "Expand Details"),
+        ("b", "toggle_sidebar", "Toggle Sidebar"),
     ]
 
     CSS = """
     #sidebar {
-        width: 30;
-        padding: 1 2;
+        width: 28;
+        padding: 1 1;
         background: $surface;
         border-right: vkey $background;
+    }
+    #class_filter {
+        border: none;
+        padding: 0;
     }
     .section-title {
         text-style: bold;
@@ -936,10 +1014,22 @@ class GemApp(App):
     }
     #details-sidebar {
         width: 50;
+        min-width: 46;
+        max-width: 96;
         padding: 1 2;
         background: $surface;
         border-left: vkey $background;
         display: none;
+    }
+    #details-container {
+        overflow-x: hidden;
+    }
+    #details-metadata {
+        width: 100%;
+        margin-bottom: 1;
+    }
+    #details-classification {
+        width: 100%;
     }
     .details-title {
         text-style: bold;
@@ -964,9 +1054,17 @@ class GemApp(App):
         margin-top: 1;
         width: 50%;
     }
-    #close-details-btn {
+    #pane-control-buttons {
+        height: auto;
         margin-top: 1;
-        width: 100%;
+        margin-bottom: 1;
+    }
+    #toggle-width-btn {
+        width: 50%;
+    }
+    #close-details-btn {
+        width: 50%;
+        margin-left: 1;
     }
     #management-buttons {
         height: auto;
@@ -1661,6 +1759,33 @@ class GemApp(App):
     def close_details(self) -> None:
         self.query_one("#details-sidebar").display = False
 
+    @on(Button.Pressed, "#toggle-width-btn")
+    def trigger_toggle_details_expand(self) -> None:
+        self.action_toggle_details_expand()
+
+    def action_toggle_details_expand(self) -> None:
+        try:
+            sidebar = self.query_one("#details-sidebar", GemDetails)
+            if sidebar.display:
+                sidebar.toggle_expand()
+        except Exception as e:
+            self.log_debug(f"toggle_details_expand: {e}")
+
+    def action_toggle_sidebar(self) -> None:
+        try:
+            sidebar = self.query_one("#sidebar")
+            sidebar.display = not sidebar.display
+        except Exception as e:
+            self.log_debug(f"toggle_sidebar: {e}")
+
+    def on_resize(self, event: Any) -> None:
+        try:
+            sidebar = self.query_one("#details-sidebar", GemDetails)
+            if sidebar.display:
+                sidebar.apply_width()
+        except Exception:
+            pass
+
     @on(Button.Pressed, "#fetch-cheatsheet-btn")
     def trigger_fetch_cheatsheet(self) -> None:
         sidebar = self.query_one("#details-sidebar", GemDetails)
@@ -1679,8 +1804,9 @@ class GemApp(App):
     @on(Button.Pressed, "#lookup-c7-btn")
     def trigger_lookup_c7(self) -> None:
         sidebar = self.query_one("#details-sidebar", GemDetails)
-        gem_name = sidebar.gem.name
-        self.lookup_c7_id(gem_name)
+        if sidebar.gem:
+            gem_name = sidebar.gem.name
+            self.lookup_c7_id(gem_name)
 
     @on(Button.Pressed, "#edit-gem-btn")
     def trigger_edit_gem(self) -> None:
@@ -1833,7 +1959,7 @@ class GemApp(App):
         self.update_table()
 
         sidebar = self.query_one("#details-sidebar", GemDetails)
-        if sidebar.display and getattr(sidebar, "gem", None) and sidebar.gem.name == gem.name:
+        if sidebar.display and sidebar.gem and sidebar.gem.name == gem.name:
             sidebar.update_gem(gem)
 
     # Threaded workers
@@ -1856,7 +1982,7 @@ class GemApp(App):
                     if g.name == gem_name:
                         g.context7_id = selected_id
                         sidebar = self.query_one("#details-sidebar", GemDetails)
-                        if sidebar.display and sidebar.gem.name == gem_name:
+                        if sidebar.display and sidebar.gem and sidebar.gem.name == gem_name:
                             sidebar.update_gem(g)
                         break
                 

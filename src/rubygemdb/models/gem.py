@@ -30,6 +30,7 @@ class GemEntry(BaseModel):
     source_code_uri: Optional[str] = None
     context7_id: Optional[str] = None
     preferred: bool = False
+    genai_uses: Optional[str] = None
 
 class GemInventoryItem(BaseModel):
     name: str
@@ -39,3 +40,4 @@ class GemInventoryItem(BaseModel):
     homepage: Optional[str] = None
     source_code_uri: Optional[str] = None
     context7_id: Optional[str] = None
+    genai_uses: Optional[str] = None

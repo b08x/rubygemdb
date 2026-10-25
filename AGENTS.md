@@ -137,16 +137,43 @@ rubygemdb-tui [optional-gems-inventory.csv]
 uv run rubygemdb-tui [optional-gems-inventory.csv]
 ```
 
+### Import GitHub Starred Gems (`rubygemdb import-stars`)
+Fetch starred Ruby repositories for a user on GitHub, resolve them to published RubyGems via repo name matching or root `*.gemspec` inspection, enrich existing inventory records, backfill inferred GenAI backend tooling roles (`genai_uses`), and run an approval-gated prune audit:
+```bash
+uv run rubygemdb import-stars --dry-run                    # safe preview: inspect discovered gems and prune audit without writes
+uv run rubygemdb import-stars                              # import and enrich gems in inventory
+uv run rubygemdb import-stars --classify --embed           # import, classify into 21 categories, and rebuild vector index
+uv run rubygemdb import-stars --user username --language Ruby  # custom user or language filter
+uv run rubygemdb import-stars --select-prune              # launch interactive CLI multi-selector to choose audit gems to prune
+uv run rubygemdb import-stars --apply-prune               # auto-prune stale/overlapping gems identified in audit
+uv run rubygemdb import-stars --prune-list prune.txt      # prune only approved gems listed in text file
+```
+
+### Interactive Gem Pruning (`rubygemdb prune`)
+Audit inventory for stale (3+ years without release) or name-overlapping gems and interactively choose gems to remove using a dual-engine CLI multi-selector (`gum choose --no-limit` when available, falling back to a native Textual `SelectionList`). Accepts candidate lists from plain text files, markdown reports (e.g. `data/prune-report.md`), or an automated inventory audit:
+```bash
+uv run rubygemdb prune                                     # launch interactive multi-selector for audit candidates
+uv run rubygemdb prune data/prune-report.md                # launch multi-selector using candidates from markdown report
+uv run rubygemdb prune data/prune-report.md --all          # prune all gems listed in report without prompting
+uv run rubygemdb prune --backend textual                   # force Textual SelectionList TUI engine
+uv run rubygemdb prune --backend gum                       # force Charmbracelet gum engine
+uv run rubygemdb prune --dry-run                           # simulate selection and report without deleting
+uv run rubygemdb prune --all                               # prune all stale and overlapping candidates without prompting
+uv run rubygemdb prune --prune-list prune.txt              # prune approved gems from text or markdown file
+uv run rubygemdb prune --output-list approved.txt          # save interactive selections to file for reuse
+```
+
 ### Reclassification (fresh start under the current taxonomy)
 Produces an approval-gated prune report (`data/prune-report.md` listing overlapping and stale gems — no release in 3+ years), then wipes and rebuilds all classified data (SQLite `classified_gems` table, `classified_gems.json`, txtai index, per-category YAMLs) from the pruned inventory:
 ```bash
 # Review the prune report first, then apply it
-uv run rubygemdb reclassify --out output/          # interactive prune confirmation
+uv run rubygemdb reclassify --out output/          # interactive prune choice (all, multi-select, or skip)
+uv run rubygemdb reclassify --select-prune         # launch interactive multi-selector before reclassifying
 uv run rubygemdb reclassify --apply-prune --embed  # non-interactive: full report + rebuild txtai index
-uv run rubygemdb reclassify --prune-list prune.txt --embed  # prune only the gems named in the file
+uv run rubygemdb reclassify --prune-list data/prune-report.md --embed  # prune gems parsed from markdown report
 uv run rubygemdb reclassify --clear-embeddings-cache  # also purge and vacuum universal embedding cache
 ```
-The prune list file is plain text: one gem name per line, `#` comments allowed — use it to approve a subset instead of the whole report.
+The prune list file accepts markdown reports (tables and lists), plain text (one gem per line), and `#` comments.
 A dated SQLite backup (`data/rubygemdb.sqlite.bak-<date>`) is written before anything is wiped. Run with ollama up for best embedding-assisted classification.
 
 ### Universal Embedding Cache Management (`rubygemdb cache`)

@@ -121,3 +121,83 @@ Return JSON only:
                 gen.update(level="ERROR", status_message=str(e))
 
         return None
+
+    def infer_genai_uses(
+        self,
+        name: str,
+        description: str,
+        category: str,
+        sub_categories: Optional[list[str]] = None,
+    ) -> Optional[str]:
+        """Infer GenAI backend tooling use case via LLM, with persistent JSON caching."""
+        api_key = settings.llm_api_key
+        if not api_key:
+            return None
+
+        sub_cat_str = ", ".join(sub_categories) if sub_categories else "none"
+        prompt = f"""
+Infer the primary role and use case of this Ruby gem for GenAI backend tooling (such as AI agent memory, prompt tooling, tool calling / execution harness, RAG ETL / document preprocessing, structured output validation, or agent evaluation).
+
+Gem: {name}
+Category: {category} (sub-categories: {sub_cat_str})
+Description: {description}
+
+Return JSON only:
+{{"genai_uses": "Concise 1-2 sentence summary of its role in GenAI backend tooling"}}
+"""
+        key = self._prompt_hash(prompt)
+        if key in self.cache:
+            val = self.cache[key]
+            if isinstance(val, dict):
+                return val.get("genai_uses")
+            if isinstance(val, str):
+                return val
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        payload: dict[str, Any] = {
+            "model": settings.active_model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
+        }
+
+        with trace_generation(
+            name="infer-genai-uses-llm",
+            model=settings.active_model,
+            input={"messages": payload["messages"]},
+            model_parameters={"temperature": 0},
+            metadata={
+                "cache_hit": False,
+                "provider": settings.active_provider,
+                "endpoint": settings.active_llm_endpoint,
+            },
+        ) as gen:
+            try:
+                r = requests.post(settings.active_llm_endpoint, json=payload, headers=headers, timeout=15)
+                if r.status_code == 200:
+                    resp_data = r.json()
+                    text = resp_data["choices"][0]["message"]["content"]
+                    if "```json" in text:
+                        text = text.split("```json")[1].split("```")[0].strip()
+                    elif "```" in text:
+                        text = text.split("```")[1].split("```")[0].strip()
+
+                    result = json.loads(text)
+                    self.cache[key] = result
+                    self._save_cache()
+
+                    gen.update(output=result)
+                    if isinstance(result, dict):
+                        return result.get("genai_uses")
+                    return str(result)
+                else:
+                    gen.update(
+                        level="ERROR",
+                        status_message=f"HTTP {r.status_code}: {r.text[:200]}",
+                    )
+            except Exception as e:
+                gen.update(level="ERROR", status_message=str(e))
+
+        return None

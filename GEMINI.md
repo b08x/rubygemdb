@@ -63,10 +63,31 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
   ```
   *Note: The CSV is only required for the first run to populate the SQLite database.*
 - **Reclassification (fresh start)**:
-  Builds an approval-gated prune report (`data/prune-report.md`), then wipes and rebuilds all classified data under the 21-category taxonomy. A dated SQLite backup is written first. Pass `--clear-embeddings-cache` to also purge and vacuum the vector cache.
+  Builds an approval-gated prune report (`data/prune-report.md`), then wipes and rebuilds all classified data under the 21-category taxonomy. Supports interactive multi-selection of candidates via CLI. A dated SQLite backup is written first. Pass `--clear-embeddings-cache` to also purge and vacuum the vector cache.
   ```bash
+  uv run rubygemdb reclassify --select-prune --embed # interactive multi-select candidates to prune
   uv run rubygemdb reclassify --apply-prune --embed --out output/
   uv run rubygemdb reclassify --clear-embeddings-cache --apply-prune
+  ```
+- **Import GitHub Starred Gems (CLI)**:
+  Fetches starred Ruby repositories from GitHub, resolves them to published RubyGems, enriches existing records with source repositories/Context7 IDs, infers GenAI backend tooling roles (`genai_uses`), and runs an approval-gated prune audit:
+  ```bash
+  uv run rubygemdb import-stars --dry-run          # dry-run preview (no SQLite or disk modifications)
+  uv run rubygemdb import-stars --classify --embed # full import, taxonomy classification, and vector indexing
+  uv run rubygemdb import-stars --select-prune     # interactively multi-select prune candidates from audit
+  uv run rubygemdb import-stars --apply-prune      # import and prune stale/overlapping gems
+  ```
+- **Interactive Gem Pruning (`rubygemdb prune`)**:
+  Audit inventory for stale or overlapping gems and interactively choose gems to remove using a dual-engine CLI multi-selector (`gum choose --no-limit` or Textual `SelectionList` fallback). Accepts candidates from plain text files, markdown reports (`data/prune-report.md`), or an automated inventory audit:
+  ```bash
+  uv run rubygemdb prune                           # launch interactive multi-selector for audit candidates
+  uv run rubygemdb prune data/prune-report.md      # launch multi-selector using candidates from markdown report
+  uv run rubygemdb prune --backend textual         # force Textual SelectionList backend
+  uv run rubygemdb prune --backend gum             # force Charmbracelet gum backend
+  uv run rubygemdb prune --dry-run                 # simulate selection without deleting
+  uv run rubygemdb prune --all                     # prune all candidates without prompting
+  uv run rubygemdb prune --prune-list prune.txt    # prune gems listed in file or report
+  uv run rubygemdb prune --output-list saved.txt   # save chosen gems to file
   ```
 - **Embedding Cache Management (`rubygemdb cache`)**:
   Inspect, prune, and clear the shared vector embedding cache:
