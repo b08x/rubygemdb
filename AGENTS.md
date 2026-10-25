@@ -188,10 +188,11 @@ uv run rubygemdb cache prune --max-age-days 90 --max-entries 50000  # custom ret
 Use `--no-vacuum` on `clear` or `prune` to skip physical disk page reclamation. Reclassification also supports `--clear-embeddings-cache` to wipe and vacuum cached vectors during fresh-start taxonomical rebuilds.
 
 ### Gem-Stack Composition
-Turn a context query into a layered stack manifest (layer, category, gem, role) plus a Gemfile snippet, starting from the curated base picks (dotenv, drydock, pry, rubocop, journald-logger):
+Turn a context query into a curated, layered stack manifest (layer, category, gem, role) plus a Gemfile snippet using two-stage retrieval and second-pass curation (LLM synthesis or offline fallback), capped by `--max-gems`:
 ```bash
-uv run rubygemdb stack "CLI data pipeline tool"           # print to stdout
-uv run rubygemdb stack "CLI data pipeline tool" --out stacks/  # also write files
+uv run rubygemdb stack "CLI data pipeline tool"                  # print curated stack (default 10 gems)
+uv run rubygemdb stack "CLI data pipeline tool" --max-gems 6     # cap stack density to 6 gems
+uv run rubygemdb stack "CLI data pipeline tool" --out stacks/    # also write files
 ```
 Output is advisory, not a dependency resolver. Deeper Rubysmith project generation from a stack manifest is a follow-up goal.
 

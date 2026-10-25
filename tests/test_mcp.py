@@ -123,15 +123,18 @@ async def test_compose_stack_tool():
     """Verify compose_stack tool generates layered manifest and Gemfile snippet."""
     result = await mcp.call_tool(
         "compose_stack",
-        {"query": "High performance background job worker"},
+        {"query": "High performance background job worker with testing", "max_gems": 8},
     )
     stack = result[1]["result"]
     assert "layers" in stack
     assert len(stack["layers"]) > 0
 
     layers = [ly["layer"] for ly in stack["layers"]]
-    assert "substrate" in layers
+    assert all(ly in LAYERS for ly in layers)
+    assert "plumbing" in layers
     assert "quality" in layers
+    total_gems = sum(len(ly["entries"]) for ly in stack["layers"])
+    assert total_gems <= 8
 
     # Gemfile snippet
     assert "gemfile" in stack

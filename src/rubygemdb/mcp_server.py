@@ -217,7 +217,7 @@ def get_gem(name: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
-def compose_stack(query: str) -> Dict[str, Any]:
+def compose_stack(query: str, max_gems: int = 10) -> Dict[str, Any]:
     """Compose a layered Ruby gem stack manifest and Gemfile snippet for a context query.
 
     Organizes recommendations across architectural layers (substrate -> plumbing -> composition -> quality)
@@ -225,10 +225,11 @@ def compose_stack(query: str) -> Dict[str, Any]:
 
     Args:
         query: Description of the application or tooling being built (e.g. 'CLI data pipeline tool').
+        max_gems: Maximum number of gems to include in the curated stack (default: 10).
     """
     storage = _get_read_only_storage()
     service = StackService(storage=storage, read_only=True)
-    manifest = service.build_stack(query)
+    manifest = service.build_stack(query, max_gems=max_gems)
     gemfile = service.render_gemfile(manifest)
     manifest_yaml = service.render_manifest_yaml(manifest)
 

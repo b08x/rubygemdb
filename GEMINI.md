@@ -99,9 +99,9 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
   uv run rubygemdb cache prune --max-age-days 90 --max-entries 50000  # custom retention limits
   ```
 - **Gem-Stack Composition**:
-  Turns a context query into a layered stack manifest (substrate -> quality) plus a Gemfile snippet, starting from curated base picks (dotenv, drydock, pry, rubocop, journald-logger).
+  Turns a context query into a curated, layered stack manifest (substrate -> quality) plus a Gemfile snippet using two-stage retrieval and second-pass curation (LLM synthesis or offline fallback), capped by `--max-gems` (default 10).
   ```bash
-  uv run rubygemdb stack "CLI data pipeline tool" --out stacks/
+  uv run rubygemdb stack "CLI data pipeline tool" --max-gems 8 --out stacks/
   ```
 - **Model Context Protocol (MCP) Server**:
   Native MCP server running over stdio by default, or as a detached SSE daemon in the background. Exposes catalog tools (`search_gems`, `get_gem`, `compose_stack`, `list_categories`, `build_gem_graphrag`, `query_gem_graphrag`), session tools (`list_rag_sessions`, `get_rag_session`, `resume_rag_session`, `export_rag_session_transcript`, `delete_rag_session`), resources (`rubygemdb://taxonomy`, `rubygemdb://stack-seeds`), and prompts (`design-ruby-stack`, `gem-architect-rag`).

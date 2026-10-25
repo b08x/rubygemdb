@@ -429,7 +429,8 @@ def run_stack(args):
     """Turn a context query into a layered gem-stack manifest plus a Gemfile snippet."""
     storage = SQLiteStorage(rubygems_service=RubyGemsService(), context7_service=Context7Service())
     service = StackService(storage=storage)
-    manifest = service.build_stack(args.query)
+    max_gems = getattr(args, "max_gems", 10)
+    manifest = service.build_stack(args.query, max_gems=max_gems)
 
     manifest_yaml = StackService.render_manifest_yaml(manifest)
     gemfile = StackService.render_gemfile(manifest)
@@ -697,6 +698,7 @@ def run_cli():
     # Stack Subcommand
     stack_parser = subparsers.add_parser("stack", parents=[parent_parser], help="Turn a context query into a layered gem-stack manifest + Gemfile snippet")
     stack_parser.add_argument("query", help="Context query, e.g. 'CLI data pipeline tool'")
+    stack_parser.add_argument("--max-gems", type=int, default=10, help="Maximum number of gems to include in the curated stack (default: 10)")
     stack_parser.add_argument("--out", default=None, help="Optional directory to write stack-manifest.yaml and Gemfile")
 
     # Build Indexer Subcommand
