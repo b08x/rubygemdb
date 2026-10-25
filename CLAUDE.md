@@ -27,6 +27,7 @@ src/rubygemdb/
 ├── agent.py            # Contextual GraphRAG chat & tool-calling agent with persistent sessions
 ├── mcp_server.py       # Native MCP server & daemon lifecycle (FastMCP)
 ├── ui/tui.py          # Interactive Textual-based TUI with gem explorer + GraphRAG chat
+├── ui/selector.py     # Dual-engine CLI multi-select (gum choose --no-limit or Textual SelectionList)
 ├── core/config.py     # Settings and environment variable handling  
 ├── models/gem.py      # Pydantic data models for gem data
 ├── models/phases.py   # skeleton/input/processing/output phase mapping (search filters)
@@ -42,8 +43,10 @@ src/rubygemdb/
 │   ├── classifier.py  # Heuristic and LLM classification logic
 │   ├── embedding_scorer.py # txtai embedding similarity vs category descriptions
 │   ├── embedding_cache.py # SQLite-backed universal embedding cache (wrap_embeddings)
-│   ├── stack.py       # Layered gem-stack composition (read_only mode for MCP)
-│   ├── prune.py       # Overlap/stale gem prune reports
+│   ├── stack.py       # Two-stage stack retrieval + second-pass curation (read_only mode for MCP)
+│   ├── prune.py       # Stale/overlap prune reports + interactive multi-select backend
+│   ├── github_stars.py # GitHub starred-repo fetch & gem resolution (import-stars)
+│   ├── import_stars_pipeline.py # Starred-gem import, enrichment & prune audit pipeline
 │   ├── rubygems.py    # RubyGems API client with caching
 │   ├── llm.py         # Mistral LLM client for fallback classification
 │   ├── context7.py    # Context7 API client for cheatsheet generation
@@ -127,6 +130,34 @@ uv run rubygemdb gems-inventory.csv --out output/
 # Fresh start reclassification with embedding cache purge
 uv run rubygemdb reclassify --clear-embeddings-cache --apply-prune
 ```
+
+### Importing GitHub Starred Gems
+Fetch starred Ruby repositories, resolve them to published RubyGems (repo-name match or remote gemspec inspection), enrich inventory records with source repos and Context7 IDs, infer GenAI tooling roles, and run an approval-gated prune audit:
+```bash
+uv run rubygemdb import-stars --dry-run          # safe preview: no SQLite or disk writes
+uv run rubygemdb import-stars --classify --embed # import, classify, and build the vector index
+uv run rubygemdb import-stars --select-prune     # interactively multi-select prune candidates
+uv run rubygemdb import-stars --apply-prune      # import and auto-prune stale/overlapping gems
+```
+
+### Interactive Gem Pruning
+Audit the inventory for stale (3+ years without release) or overlapping gems and interactively choose which to remove — dual-engine selector (`gum choose --no-limit`, native Textual `SelectionList` fallback). Candidates come from an automated audit, a markdown report (`data/prune-report.md`), or a plain text list:
+```bash
+uv run rubygemdb prune                           # interactive multi-selector over audit candidates
+uv run rubygemdb prune data/prune-report.md      # use candidates from a markdown report
+uv run rubygemdb prune --backend gum             # force gum; --backend textual forces SelectionList
+uv run rubygemdb prune --dry-run                 # simulate selection without deleting
+uv run rubygemdb prune --all                     # prune all candidates without prompting
+uv run rubygemdb prune --prune-list prune.txt    # prune gems listed in a file or report
+uv run rubygemdb prune --output-list saved.txt   # save interactive selections for reuse
+```
+
+### Composing Gem Stacks
+Turn a context query into a curated, layered stack manifest (substrate -> quality) plus a Gemfile snippet — two-stage retrieval and second-pass curation (LLM synthesis or offline fallback) with category density limits and task-specific role descriptions, capped by `--max-gems` (default 10):
+```bash
+uv run rubygemdb stack "CLI data pipeline tool" --max-gems 6
+```
+The MCP `compose_stack(query, max_gems=10)` tool exposes the same refined selection.
 
 ### Managing the Universal Embedding Cache
 Inspect, prune, and clear vector entries:

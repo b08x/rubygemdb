@@ -26,6 +26,9 @@
 - **Optional Langfuse Observability** — Langfuse v5 tracing context managers wrap gem classification, LLM calls (with token usage), hybrid search, GraphRAG retrieval, agent chat turns, and MCP GraphRAG tools, grouping traces by session id; off unless `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY` are set, and `LANGFUSE_ENABLED=false` disables it even then — when disabled the tracer yields no-op observations and never initializes the client
 - **Interactive TUI** — Textual-based terminal UI for browsing, filtering, editing, and exporting classified gems with real-time classification
 - **Batch CLI Pipeline** — Headless processing of gem inventories with metadata verification, classification, and YAML report generation
+- **Curated Gem-Stack Composition** — `rubygemdb stack` turns a context query into a compact, layered stack manifest (substrate -> quality) plus a Gemfile snippet via two-stage retrieval and second-pass curation (LLM synthesis or offline fallback), with category density limits and task-specific role descriptions — base seeds only join the candidate pool when their category is relevant to the query; `--max-gems` (default 10) caps stack density
+- **GitHub Starred Gem Import** — `rubygemdb import-stars` fetches starred Ruby repositories, resolves them to published RubyGems via repo-name matching or remote gemspec inspection, enriches inventory records with source repos and Context7 IDs, infers GenAI tooling roles, and runs an approval-gated prune audit
+- **Interactive Gem Pruning** — `rubygemdb prune` audits the inventory for stale (3+ years without release) or overlapping gems and removes the ones you choose through a dual-engine CLI multi-selector (`gum choose --no-limit`, falling back to a native Textual `SelectionList`); candidates come from an automated audit, a markdown report, or a plain text list
 - **Risk Assessment** — Invasiveness, coupling, and abstraction leak scoring for architectural impact analysis
 
 ---
@@ -74,6 +77,7 @@ graph LR
     mcp-context7["Context7 MCP\n@upstash/context7-mcp"]
     mcp-cbm["Codebase Memory MCP\ncodebase-memory-mcp"]
     langfuse-api["Langfuse API\ncloud.langfuse.com (optional)"]
+    github-api["GitHub API\napi.github.com (import-stars)"]
 
     rubygems-service["RubyGems Service"] -->|"fetches gem info"| rubygems-api
     context7-service["Context7 Service"] -->|"searches libraries"| context7-api
@@ -82,6 +86,7 @@ graph LR
     agent -->|"retrieves docs"| mcp-context7
     agent -->|"searches code"| mcp-cbm
     tracing-service["Tracing Service\nservices/tracing.py"] -->|"reports spans & traces"| langfuse-api
+    github-stars["GitHub Stars Service\nservices/github_stars.py"] -->|"fetches starred repos"| github-api
 
     style rubygems-api fill:#585b70,stroke:#585b70,color:#cdd6f4
     style context7-api fill:#585b70,stroke:#585b70,color:#cdd6f4
@@ -90,6 +95,7 @@ graph LR
     style mcp-context7 fill:#585b70,stroke:#585b70,color:#cdd6f4
     style mcp-cbm fill:#585b70,stroke:#585b70,color:#cdd6f4
     style langfuse-api fill:#585b70,stroke:#585b70,color:#cdd6f4
+    style github-api fill:#585b70,stroke:#585b70,color:#cdd6f4
 ```
 
 ---
@@ -214,7 +220,7 @@ Daemon artifacts land in `data/`: `mcp.pid`, the `mcp.json` host/port sidecar, a
 - **Tools**:
   - `search_gems(query, category=None, phase=None, limit=10)`: Sub-millisecond SQLite FTS5 search. `category` takes one of the 21 category slugs; `phase` takes `skeleton`, `input`, `processing`, or `output`. The txtai vector index is consulted only when FTS5 returns zero hits.
   - `get_gem(name)`: Complete architectural metadata, layer, sub-categories, agent description, dependencies, signals, and risks. Gems present in the inventory but not yet classified return the same shape with `classified: false` and zero confidence; unknown names return an `error` object.
-  - `compose_stack(query)`: Composes layered gem stack manifest (substrate -> quality) and Gemfile snippet. Runs in read-only mode — curated seed gems are not written back to the inventory.
+  - `compose_stack(query, max_gems=10)`: Composes a compact, layered gem stack manifest (substrate -> quality) and Gemfile snippet via two-stage retrieval and second-pass curation (LLM synthesis or offline fallback), with category density limits and contextual, task-specific role descriptions; base seeds only enter the candidate pool when their category is relevant to the query, and `max_gems` (default 10) caps stack density. Runs in read-only mode — curated seed gems are not written back to the inventory.
   - `list_categories()`: Lists 21 architectural categories, stack layers, descriptions, and curated base gems.
   - `build_gem_graphrag(gems, intention="", session_id=None)`: Pre-warms and builds the containerized AST symbol and decode graph index for a set of gems; records the build in a session and returns its `session_id`.
   - `query_gem_graphrag(gems, query, intention=None, session_id=None)`: Executes 2-stage GraphRAG retrieval over indexed gem graphs, returning exact AST signatures, decode parameter types, and code examples, plus a top-level `citations` list (id, gem, file, node_id, node_type, symbol, signature, summary) for every retrieved symbol and code example. Each turn is persisted with its retrieved-node citations to the session store; the response carries the `session_id`.
@@ -288,7 +294,7 @@ uv sync --extra cuda
 
 To force a specific accelerator at runtime, use `--cuda` or `--cpu`:
 ```bash
-uv run rubygemdb --cuda stack "CLI data pipeline tool"
+uv run rubygemdb --cuda stack "CLI data pipeline tool" --max-gems 6
 uv run rubygemdb --cpu process gems.csv --embed
 ```
 Alternatively, set `CUDA_ENABLED=true` / `CUDA_ENABLED=false` or `DEVICE=cuda` in `.env`.
@@ -344,8 +350,10 @@ rubygemdb/
 │   │   ├── classifier.py   # Heuristic + LLM classification with sub-category faceting
 │   │   ├── embedding_scorer.py # txtai embedding similarity vs category descriptions
 │   │   ├── embedding_cache.py # SQLite-backed universal embedding cache (wrap_embeddings)
-│   │   ├── stack.py        # Layered gem-stack composition
-│   │   ├── prune.py        # Overlap/stale gem prune reports
+│   │   ├── stack.py        # Two-stage stack retrieval + second-pass curation
+│   │   ├── prune.py        # Stale/overlap prune reports + interactive multi-select backend
+│   │   ├── github_stars.py # GitHub starred-repo fetch & gem resolution (import-stars)
+│   │   ├── import_stars_pipeline.py # Starred-gem import, enrichment & prune audit
 │   │   ├── rubygems.py     # RubyGems API client
 │   │   ├── llm.py          # Mistral LLM client
 │   │   ├── context7.py     # Context7 API client with repo-anchored ID verification
@@ -356,7 +364,8 @@ rubygemdb/
 │   │   ├── sqlite_storage.py # SQLite storage
 │   │   └── session_storage.py # Persistent GraphRAG session store (data/sessions.sqlite)
 │   └── ui/
-│       └── tui.py          # Textual TUI application
+│       ├── tui.py          # Textual TUI application
+│       └── selector.py     # Dual-engine CLI multi-select (gum or Textual SelectionList)
 ├── docker/
 │   ├── indexer.Dockerfile  # Ruby 4.0.4 runtime packaging rubydex, decode, bake
 │   └── extract_graph.rb    # AST symbol and documentation extraction script

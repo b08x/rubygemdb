@@ -143,6 +143,39 @@ uv run rubygemdb gems-inventory.csv --out output/ --embed
 2. **Phase 2: Classification** — Applies heuristic matching with LLM fallback for low-confidence cases
 3. **Phase 3: Embeddings** — Builds txtai vector index for semantic search (optional)
 
+### CLI: Import GitHub Starred Gems
+
+Fetch starred Ruby repositories from GitHub, resolve them to published RubyGems (repo-name matching or remote gemspec inspection), enrich inventory records with source repositories and Context7 IDs, infer GenAI tooling roles, and run an approval-gated prune audit:
+
+```bash
+uv run rubygemdb import-stars --dry-run          # safe preview: no SQLite or disk writes
+uv run rubygemdb import-stars --classify --embed # import, classify, and build the vector index
+uv run rubygemdb import-stars --select-prune     # interactively multi-select prune candidates
+uv run rubygemdb import-stars --apply-prune      # import and auto-prune stale/overlapping gems
+```
+
+### CLI: Interactive Gem Pruning
+
+Audit the inventory for stale (3+ years without release) or overlapping gems and interactively choose which to remove — a dual-engine multi-selector (`gum choose --no-limit`, falling back to a native Textual `SelectionList`). Candidates come from an automated audit, a markdown report (`data/prune-report.md`), or a plain text list:
+
+```bash
+uv run rubygemdb prune                           # interactive multi-selector over audit candidates
+uv run rubygemdb prune data/prune-report.md      # use candidates from a markdown report
+uv run rubygemdb prune --backend textual         # force the Textual SelectionList engine
+uv run rubygemdb prune --dry-run                 # simulate selection without deleting
+uv run rubygemdb prune --all                     # prune all candidates without prompting
+uv run rubygemdb prune --prune-list prune.txt    # prune gems listed in a file or report
+uv run rubygemdb prune --output-list saved.txt   # save interactive selections for reuse
+```
+
+### CLI: Gem-Stack Composition
+
+Turn a context query into a curated, layered stack manifest (substrate -> quality) plus a Gemfile snippet — two-stage retrieval and second-pass curation (LLM synthesis or offline fallback), with category density limits and task-specific role descriptions, capped by `--max-gems` (default 10):
+
+```bash
+uv run rubygemdb stack "CLI data pipeline tool" --max-gems 6
+```
+
 ### TUI: Interactive Explorer
 
 Launch the terminal UI for browsing and managing classified gems:

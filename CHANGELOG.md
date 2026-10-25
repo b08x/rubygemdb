@@ -1,7 +1,14 @@
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-25
+
 ### 🚀 Features
 
+- Add refined gem stack selection (`services/stack.py`): two-stage hierarchical retrieval and second-pass curation pipeline. Replaces unconditional seed dumps with category relevance gating based on semantic search hits and lexical query tokens; base seeds and user-preferred gems only enter the candidate pool if their category is relevant to the query.
+- Add second-pass curation engine (`services/llm.py`, `services/stack.py`): curates candidate pool down to a compact stack of 5–12 gems with category density limits (max 1–3 gems per category) and assigns contextual, task-specific architectural role descriptions via LLM synthesis when available or local scoring offline.
+- Add `--max-gems` parameter (default 10) to `rubygemdb stack` CLI and MCP `compose_stack` tool to govern stack density.
+- Add interactive CLI multi-select gem pruning (`rubygemdb prune`, `ui/selector.py`): dual-engine interactive selector (`gum choose --no-limit` with native Textual `SelectionList` fallback) supporting candidate lists from automated audits or markdown reports.
+- Add GitHub starred gems importer (`rubygemdb import-stars`, `services/github_stars.py`, `services/import_stars_pipeline.py`): fetch starred Ruby repos, resolve to published gems via API or remote gemspec, enrich inventory metadata, infer GenAI tooling roles, and execute approval-gated prune audits.
 - Add optional Langfuse observability and tracing (`services/tracing.py`): context-manager spans over gem classification, LLM calls (with token usage), hybrid search, GraphRAG retrieval stages, agent chat turns, and MCP GraphRAG tools
 - Add settings `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST` (alias `LANGFUSE_BASE_URL`), and `LANGFUSE_ENABLED`; the host defaults to `https://cloud.langfuse.com`
 - Tracing is disabled unless both keys are set; `LANGFUSE_ENABLED=false` disables it even with keys present. When disabled, traced blocks yield no-op observations and the Langfuse client is never initialized (the SDK imports lazily, only when enabled)
@@ -42,6 +49,7 @@
 - Document the universal embedding cache and the GraphRAG cache-validity fix in README.md, AGENTS.md, CLAUDE.md, GEMINI.md, and INSTALL.md
 - Document embedding cache retention, the `rubygemdb cache` CLI group, and `--clear-embeddings-cache` in AGENTS.md, CLAUDE.md, GEMINI.md, and README.md (updated alongside the code); correct the stale cache description in INSTALL.md and record the feature in CHANGELOG.md
 - Document GraphRAG structured citations, the anti-hallucination prompt contract, the `AGENT_MAX_TOKENS` setting, and the `rag_messages.citations` column in README.md, AGENTS.md, CLAUDE.md, GEMINI.md, and INSTALL.md; note the `citations` return of `query_gem_graphrag` in the MCP tool docstring
+- Document refined stack selection (`--max-gems`), the interactive `rubygemdb prune` command, and the `rubygemdb import-stars` importer in README.md, CLAUDE.md, and INSTALL.md (AGENTS.md and GEMINI.md were updated alongside the code); refresh the stale `prune.py`/`stack.py` module-tree descriptions and add the GitHub API node to the README External Integrations diagram
 
 ## [0.8.0] - 2026-10-23
 
