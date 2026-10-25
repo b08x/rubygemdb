@@ -49,6 +49,7 @@
 - Document the universal embedding cache and the GraphRAG cache-validity fix in README.md, AGENTS.md, CLAUDE.md, GEMINI.md, and INSTALL.md
 - Document embedding cache retention, the `rubygemdb cache` CLI group, and `--clear-embeddings-cache` in AGENTS.md, CLAUDE.md, GEMINI.md, and README.md (updated alongside the code); correct the stale cache description in INSTALL.md and record the feature in CHANGELOG.md
 - Document GraphRAG structured citations, the anti-hallucination prompt contract, the `AGENT_MAX_TOKENS` setting, and the `rag_messages.citations` column in README.md, AGENTS.md, CLAUDE.md, GEMINI.md, and INSTALL.md; note the `citations` return of `query_gem_graphrag` in the MCP tool docstring
+- Document refined stack selection (`--max-gems`), the interactive `rubygemdb prune` command, and the `rubygemdb import-stars` importer in README.md, CLAUDE.md, and INSTALL.md (AGENTS.md and GEMINI.md were updated alongside the code); refresh the stale `prune.py`/`stack.py` module-tree descriptions and add the GitHub API node to the README External Integrations diagram
 
 ## [0.8.0] - 2026-10-23
 
