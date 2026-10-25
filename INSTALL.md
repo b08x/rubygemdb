@@ -68,6 +68,7 @@ $ rubygemdb-tui gems-inventory.csv
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
 - Ollama with `embeddinggemma` model (for agent features; the MCP server runs FTS5-first without Ollama and loads embeddings lazily only when keyword search returns nothing)
 - Optional: local GGUF models for query expansion and cross-encoder reranking — no manual setup; when `QUERY_EXPANSION_ENABLED` or `RERANKER_ENABLED` is set, the models (~1.1 GB and ~640 MB) download lazily from Hugging Face into `data/models/`
+- Optional: a Langfuse instance (Langfuse Cloud or self-hosted) for observability — no setup needed to skip it; tracing stays a no-op until `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are set
 
 <details>
 <summary><strong>uv (Recommended)</strong></summary>
@@ -142,6 +143,39 @@ uv run rubygemdb gems-inventory.csv --out output/ --embed
 2. **Phase 2: Classification** — Applies heuristic matching with LLM fallback for low-confidence cases
 3. **Phase 3: Embeddings** — Builds txtai vector index for semantic search (optional)
 
+### CLI: Import GitHub Starred Gems
+
+Fetch starred Ruby repositories from GitHub, resolve them to published RubyGems (repo-name matching or remote gemspec inspection), enrich inventory records with source repositories and Context7 IDs, infer GenAI tooling roles, and run an approval-gated prune audit:
+
+```bash
+uv run rubygemdb import-stars --dry-run          # safe preview: no SQLite or disk writes
+uv run rubygemdb import-stars --classify --embed # import, classify, and build the vector index
+uv run rubygemdb import-stars --select-prune     # interactively multi-select prune candidates
+uv run rubygemdb import-stars --apply-prune      # import and auto-prune stale/overlapping gems
+```
+
+### CLI: Interactive Gem Pruning
+
+Audit the inventory for stale (3+ years without release) or overlapping gems and interactively choose which to remove — a dual-engine multi-selector (`gum choose --no-limit`, falling back to a native Textual `SelectionList`). Candidates come from an automated audit, a markdown report (`data/prune-report.md`), or a plain text list:
+
+```bash
+uv run rubygemdb prune                           # interactive multi-selector over audit candidates
+uv run rubygemdb prune data/prune-report.md      # use candidates from a markdown report
+uv run rubygemdb prune --backend textual         # force the Textual SelectionList engine
+uv run rubygemdb prune --dry-run                 # simulate selection without deleting
+uv run rubygemdb prune --all                     # prune all candidates without prompting
+uv run rubygemdb prune --prune-list prune.txt    # prune gems listed in a file or report
+uv run rubygemdb prune --output-list saved.txt   # save interactive selections for reuse
+```
+
+### CLI: Gem-Stack Composition
+
+Turn a context query into a curated, layered stack manifest (substrate -> quality) plus a Gemfile snippet — two-stage retrieval and second-pass curation (LLM synthesis or offline fallback), with category density limits and task-specific role descriptions, capped by `--max-gems` (default 10):
+
+```bash
+uv run rubygemdb stack "CLI data pipeline tool" --max-gems 6
+```
+
 ### TUI: Interactive Explorer
 
 Launch the terminal UI for browsing and managing classified gems:
@@ -167,6 +201,22 @@ print(response)
 ```
 
 Chat sessions persist across restarts: every turn is saved to `data/sessions.sqlite` and indexed for semantic search as a `session_turn` document. The TUI chat tab auto-restores the most recent session on open.
+
+GraphRAG-grounded turns are citation-tagged: each retrieved symbol and code example carries a `[C1]`-style tag with its source file, replies close with a `### Citations` summary, and the answer is prompt-constrained to the APIs the citations contain — unsupported capabilities are stated explicitly and missing logic is supplied as clearly-distinguished custom Ruby. Turns without a grounded context run as ordinary ungrounded chat. Citations persist with each turn (the `rag_messages` table gains its `citations` column automatically on existing stores) and render in markdown/JSON transcript exports. Agent response length is capped by `AGENT_MAX_TOKENS` (default: 4096).
+
+### Embedding Cache Management
+
+Inspect, prune, and clear the shared vector embedding cache (`data/cache/embeddings_cache.sqlite`):
+
+```bash
+uv run rubygemdb cache stats                           # Rich table of vector counts, models, and disk footprint
+uv run rubygemdb cache clear                           # purge all vectors and reclaim disk space via VACUUM
+uv run rubygemdb cache clear --model "model_name"     # clear vectors for a specific model only
+uv run rubygemdb cache prune                           # prune expired vectors (>180d) and cap at 100k entries
+uv run rubygemdb cache prune --max-age-days 90 --max-entries 50000  # custom retention limits
+```
+
+Pass `--no-vacuum` on `clear` or `prune` to skip physical SQLite page reclamation. `uv run rubygemdb reclassify --clear-embeddings-cache` wipes and vacuums the cache during fresh-start reclassification. Retention defaults (TTL 180 days, 100,000 entries) are governed by `EMBEDDINGS_CACHE_TTL_DAYS` / `EMBEDDINGS_CACHE_MAX_ENTRIES` in `.env`.
 
 ---
 
@@ -211,6 +261,7 @@ RATE_LIMIT_DELAY=0.5
 
 # Agent Configuration
 RUBYGEMDB_AGENT_MODEL=mistral/mistral-small-latest
+AGENT_MAX_TOKENS=4096               # cap on agent response tokens; raise if long grounded answers truncate
 
 # Storage Paths
 PROJECT_ROOT=./
@@ -230,6 +281,16 @@ RERANKER_N_CTX=1024
 # RERANKER_N_THREADS=           # unset = llama.cpp default
 RERANKER_CANDIDATE_MULTIPLIER=3 # candidate pool = top_k × multiplier, clamped 15–50
 # MODELS_CACHE_DIR=             # unset = ./data/models
+
+# Embedding Cache Retention (universal vector cache, data/cache/embeddings_cache.sqlite)
+# EMBEDDINGS_CACHE_MAX_ENTRIES= # unset = 100000 (oldest vectors pruned above the cap)
+# EMBEDDINGS_CACHE_TTL_DAYS=    # unset = 180
+
+# Langfuse Observability (optional - tracing is a no-op until both keys are set)
+LANGFUSE_PUBLIC_KEY=
+LANGFUSE_SECRET_KEY=
+# LANGFUSE_HOST=                # unset = https://cloud.langfuse.com (LANGFUSE_BASE_URL also accepted)
+# LANGFUSE_ENABLED=             # unset = enabled when keys present; false disables even with keys
 ```
 
 Legacy aliases (`EXPANDER_*`, `CROSS_ENCODER_*`, `CANDIDATE_MULTIPLIER`, `MODEL_CACHE_DIR`) are also accepted. Both stages fall back to baseline retrieval when the models are disabled, missing, or fail at runtime.
@@ -276,6 +337,7 @@ uv run mypy src/rubygemdb/
 - `mcp` >= 1.29.0 — Model Context Protocol server (official SDK; provides `mcp.server.fastmcp`)
 - `huggingface_hub` >= 0.28.0 — Hugging Face Hub GGUF model download (query expansion & reranking)
 - `llama-cpp-python` >= 0.3.0 — Local GGUF inference for query expansion and cross-encoder reranking
+- `langfuse` >= 5.0.4 — Langfuse v5 observability tracing (optional; degrades to a no-op without keys)
 
 ### Development
 
@@ -313,6 +375,7 @@ nokogiri,1.15.0,,HTML/XML parser,...
 | `output/cheatsheets/*.md` | Context7 documentation cheatsheets |
 | `data/cache/gem_cache.json` | RubyGems API response cache |
 | `data/cache/llm_cache.json` | LLM prompt/response cache |
+| `data/cache/embeddings_cache.sqlite` | Universal embedding vector cache (shared across GraphRAG, classification, and sessions; 180-day TTL and 100,000-entry cap with inline pruning after batch writes — manage via `rubygemdb cache {stats, clear, prune}`) |
 | `data/txtai/` | Vector embedding index |
 | `data/models/` | Local GGUF model cache (query expansion & reranker weights, lazily downloaded from Hugging Face) |
 | `data/mcp.pid` | MCP daemon PID file (`data/mcp.json` sidecar records host/port) |

@@ -10,11 +10,11 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
   - `core/config.py`: Centralized settings using `pydantic-settings` and `.env` support.
   - `models/gem.py`: Robust data models for gem entries, classifications, and risks.
   - `models/session.py`: GraphRAG session models (`RAGSession`, `RAGMessage`, `RAGTrace`).
-  - `services/`: Specialized services for RubyGems API, LLM classification, and Context7 integration.
+  - `services/`: Specialized services for RubyGems API, LLM classification, Context7 integration, Langfuse tracing (`services/tracing.py`), and a universal SQLite embedding cache (`services/embedding_cache.py`).
   - `storage/`: Multi-backend storage (SQLite + JSON) for inventory and results, plus a persistent GraphRAG session store (`storage/session_storage.py`).
 - **Persistent GraphRAG Sessions**: Conversations, retrieved-node citations, and execution traces persist in `data/sessions.sqlite` (`rag_sessions`, `rag_messages`, `rag_traces` tables, auto-created on first use). The TUI chat tab auto-restores the most recent session on open and offers New Session / Delete Session buttons; every turn is indexed into txtai as a `session_turn` document.
 - **Interactive Explorer (TUI)**: A feature-rich Textual-based UI for browsing, filtering, and managing gem classifications.
-- **Contextual GraphRAG (TUI Chat)**: Spins up an ephemeral container (`rubygemdb-indexer:latest`) to extract AST symbol hierarchies (`rubydex`) and structured documentation (`decode`) from shallow-cloned gem repositories (with `.gem` unpack fallback), embedding results into ephemeral `txtai` vector stores with two-stage grounded retrieval (optionally local-GGUF query expansion and cross-encoder reranking, both off by default), persistent sessions, and markdown/JSON transcript export.
+- **Contextual GraphRAG (TUI Chat)**: Spins up an ephemeral container (`rubygemdb-indexer:latest`) to extract AST symbol hierarchies (`rubydex`) and structured documentation (`decode`) from shallow-cloned gem repositories (with `.gem` unpack fallback), embedding results into ephemeral `txtai` vector stores with two-stage grounded retrieval (optionally local-GGUF query expansion and cross-encoder reranking, both off by default), persistent sessions, and markdown/JSON transcript export. Grounded answers are citation-tagged (`[C1]`-style, source file included) and prompt-constrained to the APIs the citations contain — unsupported capabilities are stated explicitly and missing logic is supplied as clearly-distinguished custom Ruby; turns without a grounded context run as ordinary ungrounded chat. Agent output is capped by `AGENT_MAX_TOKENS` (default 4096).
 
 - **Codebase Memory MCP**: Native integration with the codebase-memory-mcp server to ground LLM-generated integration plans in the actual architectural structure of target projects.
 - **Other Steve Prompt Architect**: A highly aggressive system persona that intercepts raw user queries, strips out conversational slop, and generates concrete, SFL-compliant queries for the txtai vector database.
@@ -37,9 +37,17 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
     ```bash
     MISTRAL_API_KEY="your_mistral_key" # For LLM classification (read by core/config.py)
     CONTEXT7_API_KEY="your_context7_key" # For cheatsheet generation in TUI
+    LANGFUSE_PUBLIC_KEY="pk-lf-..." # Optional Langfuse tracing & observability
+    LANGFUSE_SECRET_KEY="sk-lf-..."
+    LANGFUSE_BASE_URL="http://localhost:3000" # or LANGFUSE_HOST
+    LANGFUSE_ENABLED="true"
     ```
 
     Optional retrieval-quality stages (both off by default): set `QUERY_EXPANSION_ENABLED` / `RERANKER_ENABLED` to enable local GGUF query expansion and cross-encoder reranking. Models download lazily from Hugging Face into `data/models/`; retrieval degrades to baseline when they are unavailable.
+
+    Optional embedding cache retention: configure `EMBEDDINGS_CACHE_MAX_ENTRIES` (default: 100,000) and `EMBEDDINGS_CACHE_TTL_DAYS` (default: 180) to govern universal vector cache retention.
+
+    Optional agent output cap: `AGENT_MAX_TOKENS` (default: 4096) limits GraphRAG agent response length — raise it when long, citation-tagged implementations truncate.
 
 ### Execution Commands
 
@@ -55,14 +63,45 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
   ```
   *Note: The CSV is only required for the first run to populate the SQLite database.*
 - **Reclassification (fresh start)**:
-  Builds an approval-gated prune report (`data/prune-report.md`), then wipes and rebuilds all classified data under the 21-category taxonomy. A dated SQLite backup is written first.
+  Builds an approval-gated prune report (`data/prune-report.md`), then wipes and rebuilds all classified data under the 21-category taxonomy. Supports interactive multi-selection of candidates via CLI. A dated SQLite backup is written first. Pass `--clear-embeddings-cache` to also purge and vacuum the vector cache.
   ```bash
+  uv run rubygemdb reclassify --select-prune --embed # interactive multi-select candidates to prune
   uv run rubygemdb reclassify --apply-prune --embed --out output/
+  uv run rubygemdb reclassify --clear-embeddings-cache --apply-prune
+  ```
+- **Import GitHub Starred Gems (CLI)**:
+  Fetches starred Ruby repositories from GitHub, resolves them to published RubyGems, enriches existing records with source repositories/Context7 IDs, infers GenAI backend tooling roles (`genai_uses`), and runs an approval-gated prune audit:
+  ```bash
+  uv run rubygemdb import-stars --dry-run          # dry-run preview (no SQLite or disk modifications)
+  uv run rubygemdb import-stars --classify --embed # full import, taxonomy classification, and vector indexing
+  uv run rubygemdb import-stars --select-prune     # interactively multi-select prune candidates from audit
+  uv run rubygemdb import-stars --apply-prune      # import and prune stale/overlapping gems
+  ```
+- **Interactive Gem Pruning (`rubygemdb prune`)**:
+  Audit inventory for stale or overlapping gems and interactively choose gems to remove using a dual-engine CLI multi-selector (`gum choose --no-limit` or Textual `SelectionList` fallback). Accepts candidates from plain text files, markdown reports (`data/prune-report.md`), or an automated inventory audit:
+  ```bash
+  uv run rubygemdb prune                           # launch interactive multi-selector for audit candidates
+  uv run rubygemdb prune data/prune-report.md      # launch multi-selector using candidates from markdown report
+  uv run rubygemdb prune --backend textual         # force Textual SelectionList backend
+  uv run rubygemdb prune --backend gum             # force Charmbracelet gum backend
+  uv run rubygemdb prune --dry-run                 # simulate selection without deleting
+  uv run rubygemdb prune --all                     # prune all candidates without prompting
+  uv run rubygemdb prune --prune-list prune.txt    # prune gems listed in file or report
+  uv run rubygemdb prune --output-list saved.txt   # save chosen gems to file
+  ```
+- **Embedding Cache Management (`rubygemdb cache`)**:
+  Inspect, prune, and clear the shared vector embedding cache:
+  ```bash
+  uv run rubygemdb cache stats                           # formatted table of vector counts, models, and disk sizes
+  uv run rubygemdb cache clear                           # purge all vectors and reclaim host disk space via VACUUM
+  uv run rubygemdb cache clear --model "model_name"     # clear vectors for a specific model only
+  uv run rubygemdb cache prune                           # prune expired vectors (>180d) and cap at 100k entries
+  uv run rubygemdb cache prune --max-age-days 90 --max-entries 50000  # custom retention limits
   ```
 - **Gem-Stack Composition**:
-  Turns a context query into a layered stack manifest (substrate -> quality) plus a Gemfile snippet, starting from curated base picks (dotenv, drydock, pry, rubocop, journald-logger).
+  Turns a context query into a curated, layered stack manifest (substrate -> quality) plus a Gemfile snippet using two-stage retrieval and second-pass curation (LLM synthesis or offline fallback), capped by `--max-gems` (default 10).
   ```bash
-  uv run rubygemdb stack "CLI data pipeline tool" --out stacks/
+  uv run rubygemdb stack "CLI data pipeline tool" --max-gems 8 --out stacks/
   ```
 - **Model Context Protocol (MCP) Server**:
   Native MCP server running over stdio by default, or as a detached SSE daemon in the background. Exposes catalog tools (`search_gems`, `get_gem`, `compose_stack`, `list_categories`, `build_gem_graphrag`, `query_gem_graphrag`), session tools (`list_rag_sessions`, `get_rag_session`, `resume_rag_session`, `export_rag_session_transcript`, `delete_rag_session`), resources (`rubygemdb://taxonomy`, `rubygemdb://stack-seeds`), and prompts (`design-ruby-stack`, `gem-architect-rag`).
@@ -76,7 +115,7 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
   uv run rubygemdb-mcp --daemon stop
   uv run rubygemdb-mcp --sse                 # shortcut for --daemon start
   ```
-  Other flags: `--transport stdio|sse` (default `stdio`), `--host` (default `127.0.0.1`), `--port` (default `8000`), `--foreground`, `--pid-file` (default `data/mcp.pid`), `--log-file` (default `data/mcp.log`). Catalog tools are strictly read-only: SQLite `mode=ro` connections; mutating storage methods raise `PermissionError`. Session tools write only to the separate `data/sessions.sqlite` store. `build_gem_graphrag` and `query_gem_graphrag` accept an optional `session_id` (auto-generated when omitted) and return the `session_id` they recorded the turn in.
+  Other flags: `--transport stdio|sse` (default `stdio`), `--host` (default `127.0.0.1`), `--port` (default `8000`), `--foreground`, `--pid-file` (default `data/mcp.pid`), `--log-file` (default `data/mcp.log`). Catalog tools are strictly read-only: SQLite `mode=ro` connections; mutating storage methods raise `PermissionError`. Session tools write only to the separate `data/sessions.sqlite` store. `build_gem_graphrag` and `query_gem_graphrag` accept an optional `session_id` (auto-generated when omitted) and return the `session_id` they recorded the turn in; `query_gem_graphrag` results also carry a top-level `citations` list for every retrieved symbol and example.
 
 ## Development Conventions
 
@@ -84,6 +123,7 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
 - `rubygemdb.sqlite`: Central SQLite database for inventory, verified results, and manual metadata updates (Source URIs, Context7 IDs).
 - `data/cache/gem_cache.json`: Caches raw responses from the RubyGems API.
 - `data/cache/llm_cache.json`: Caches prompts and responses from the LLM classifier.
+- `data/cache/embeddings_cache.sqlite`: Universal content-addressable vector cache (SHA-256 of model path + text) shared by GraphRAG indexing, classifier embedding scoring, and agent sessions — repeat vectorization of known texts skips the embedding model entirely. Configurable capacity (default 100,000) and TTL retention (default 180 days), opportunistic inline eviction during `put_many`, and operator CLI lifecycle management (`rubygemdb cache`).
 - `classified_gems.json`: A unified JSON export of all classified gems for TUI consumption.
 - `sessions.sqlite`: Persistent GraphRAG session store (`data/sessions.sqlite`; `rag_sessions`, `rag_messages`, `rag_traces` tables, auto-created on first use).
 - `data/models/`: Local GGUF model cache for query expansion and reranking (lazily downloaded from Hugging Face).

@@ -6,6 +6,7 @@ from rubygemdb.models.categories import CATEGORIES, CATEGORY_BY_SLUG, VALID_CATE
 from rubygemdb.services.rubygems import RubyGemsService
 from rubygemdb.services.llm import LLMService
 from rubygemdb.services.embedding_scorer import EmbeddingScorer
+from rubygemdb.services.tracing import trace_span
 
 _TOKEN_RE = re.compile(r"[^a-z0-9]+")
 
@@ -233,44 +234,199 @@ class GemClassifier:
 
     def classify(self, name: str, category: Optional[str] = None, homepage: Optional[str] = None,
                  source_code_uri: Optional[str] = None, context7_id: Optional[str] = None) -> GemEntry:
-        info = self.rubygems.fetch_gem_info(name) or {}
-        classification, signals, deps, sub_cats = self.heuristic_classify(name, info, category)
-
-        classification.sub_categories = sub_cats
-
-        # Unconditionally call the LLM to generate an agent-optimized description
-        prompt = self.llm.build_prompt(name, info, deps)
-        llm_result = self.llm.call_llm(prompt)
-        agent_desc = ""
-
-        if llm_result:
-            # Only override heuristic classification if LLM is confident and heuristics weren't
-            if classification.confidence < 0.7 and llm_result.get("confidence", 0) > 0.6:
-                llm_primary = llm_result.get("primary")
-                if llm_primary in VALID_CATEGORIES:
-                    classification.primary = llm_primary
-                    classification.confidence = llm_result["confidence"]
-                    classification.sub_categories = self.detect_sub_categories(name, info, deps, llm_primary)
-            agent_desc = llm_result.get("agent_description", "")
-
-        risks = self.score_gem(classification.primary, deps)
-
-        cat = CATEGORY_BY_SLUG.get(classification.primary)
-        attaches_to = cat.slug.split("_")[0] if cat else classification.primary.split("_")[0]
-
-        return GemEntry(
-            name=name,
-            classification=classification,
-            role={
-                "description": str(info.get("info", "")) if info else "",
-                "agent_description": agent_desc,
-                "attaches_to": attaches_to
+        with trace_span(
+            name="classify-gem",
+            input={"name": name, "category_hint": category},
+            metadata={
+                "homepage": homepage,
+                "source_code_uri": source_code_uri,
+                "context7_id": context7_id,
             },
-            risks=risks,
-            signals=signals,
-            dependencies=deps,
-            description=info.get("info") if info else "",
-            homepage=homepage,
-            source_code_uri=source_code_uri,
-            context7_id=context7_id
-        )
+            tags=["rubygemdb", "classifier"],
+        ) as span:
+            info = self.rubygems.fetch_gem_info(name) or {}
+
+            with trace_span(
+                name="heuristic-classify",
+                input={"name": name, "category_hint": category},
+            ) as h_span:
+                classification, signals, deps, sub_cats = self.heuristic_classify(name, info, category)
+                classification.sub_categories = sub_cats
+                h_span.update(output={
+                    "primary": classification.primary,
+                    "confidence": classification.confidence,
+                    "sub_categories": sub_cats,
+                })
+
+            # Unconditionally call the LLM to generate an agent-optimized description
+            prompt = self.llm.build_prompt(name, info, deps)
+            llm_result = self.llm.call_llm(prompt)
+            agent_desc = ""
+
+            if llm_result:
+                # Only override heuristic classification if LLM is confident and heuristics weren't
+                if classification.confidence < 0.7 and llm_result.get("confidence", 0) > 0.6:
+                    llm_primary = llm_result.get("primary")
+                    if llm_primary in VALID_CATEGORIES:
+                        classification.primary = llm_primary
+                        classification.confidence = llm_result["confidence"]
+                        with trace_span(
+                            name="detect-subcategories",
+                            input={"primary": llm_primary, "deps_count": len(deps)},
+                        ) as sc_span:
+                            sub_cats = self.detect_sub_categories(name, info, deps, llm_primary)
+                            classification.sub_categories = sub_cats
+                            sc_span.update(output={"sub_categories": sub_cats})
+
+                agent_desc = llm_result.get("agent_description", "")
+
+            risks = self.score_gem(classification.primary, deps)
+
+            cat = CATEGORY_BY_SLUG.get(classification.primary)
+            attaches_to = cat.slug.split("_")[0] if cat else classification.primary.split("_")[0]
+
+            span.update(output={
+                "name": name,
+                "primary": classification.primary,
+                "confidence": classification.confidence,
+                "sub_categories": classification.sub_categories,
+            })
+
+            genai_uses = self.infer_genai_tooling_uses(
+                name=name,
+                description=str(info.get("info", "")) if info else "",
+                category=classification.primary,
+                sub_categories=classification.sub_categories,
+                use_llm=True,
+            )
+
+            return GemEntry(
+                name=name,
+                classification=classification,
+                role={
+                    "description": str(info.get("info", "")) if info else "",
+                    "agent_description": agent_desc,
+                    "attaches_to": attaches_to,
+                },
+                risks=risks,
+                signals=signals,
+                dependencies=deps,
+                description=info.get("info") if info else "",
+                homepage=homepage,
+                source_code_uri=source_code_uri,
+                context7_id=context7_id,
+                genai_uses=genai_uses,
+            )
+
+    def infer_genai_tooling_uses(
+        self,
+        name: str,
+        description: str,
+        category: str,
+        sub_categories: Optional[List[str]] = None,
+        use_llm: bool = True,
+    ) -> str:
+        """Infer GenAI backend tooling role and use cases via heuristic analysis + LLM fallback."""
+        sub_cats = sub_categories or []
+        name_l = name.lower()
+        desc_l = description.lower()
+        text = f"{name_l} {desc_l}"
+
+        # 1. First consult LLM if requested and service is configured
+        if use_llm and self.llm:
+            try:
+                if hasattr(self.llm, "infer_genai_uses"):
+                    llm_use = self.llm.infer_genai_uses(name, description, category, sub_cats)
+                    if isinstance(llm_use, str) and llm_use.strip():
+                        return llm_use.strip()
+            except Exception:
+                pass
+
+        # 2. Contextual / semantic token heuristics
+        if any(w in text for w in ("split", "chunk", "segmenter", "chunking")):
+            return "Document Chunking & Token Preprocessing for RAG"
+        if any(w in text for w in ("prompt", "template", "mustache", "liquid")):
+            return "Prompt Engineering & Template Management"
+        if any(w in text for w in ("embed", "vector", "similarity", "annoy", "hnsw", "cosine")):
+            return "Vector Embeddings & Semantic Search"
+        if any(w in text for w in ("eval", "benchmark", "judge", "metric")):
+            return "Agent Evaluation & Benchmark Harness"
+        if any(w in text for w in ("mcp", "protocol server", "protocol client", "tool call")):
+            return "MCP Tool Harness & Protocol Server/Client"
+        if any(w in text for w in ("multi-agent", "agent", "workflow", "dag", "orchestrat")):
+            return "Agent Harness & Multi-Agent Orchestration"
+        if any(w in text for w in ("memory", "state machine", "session cache")):
+            return "Agent Working Memory & State Persistence"
+
+        # 3. Category & sub-category taxonomy heuristics
+        if category == "ai_llm":
+            if "llm_clients" in sub_cats:
+                return "LLM Client & Model Provider Interface"
+            if "agent_frameworks" in sub_cats:
+                return "Agent Harness & Multi-Agent Orchestration"
+            if "embeddings_vector" in sub_cats:
+                return "Vector Embeddings & Semantic Search"
+            if "prompt_tooling" in sub_cats:
+                return "Prompt Engineering & Template Management"
+            return "LLM Application & Agent Framework"
+
+        if category == "mcp_tooling":
+            return "MCP Tool Harness & Protocol Server/Client"
+
+        if category == "document_parsing":
+            return "ETL & Unstructured Data Ingestion for RAG"
+
+        if category == "document_generation":
+            return "Artifact & Report Generation for Agent Output"
+
+        if category == "text_search":
+            return "Lexical & Hybrid Retrieval for RAG / Agent Memory"
+
+        if category == "runtime_validation":
+            return "Structured Tool Output Validation & Agent Schema Enforcement"
+
+        if category == "persistence":
+            if any(k in name_l for k in ("redis", "sqlite", "cache", "store", "db")):
+                return "Agent Working Memory & State Persistence"
+            return "State Persistence & Agent Memory Storage"
+
+        if category == "servers_concurrency":
+            return "Async Execution & Concurrent Agent Task Runner"
+
+        if category == "background_jobs":
+            return "Asynchronous Agent Workflow & Background Job Worker"
+
+        if category == "cli_libraries":
+            return "CLI Agent Interface & Terminal Tooling"
+
+        if category == "gui_desktop":
+            return "Desktop Interface & Interactive Agent GUI"
+
+        if category == "static_site_generation":
+            return "Documentation & Knowledge Base Generation"
+
+        if category == "testing_qa":
+            return "Agent Evaluation, Testing & Benchmark Harness"
+
+        if category == "code_quality_typing":
+            return "Code Analysis & Linting Harness for AI Code Agents"
+
+        if category == "developer_tools":
+            return "Agent Debugging, Profiling & Tracing Harness"
+
+        if category == "http_networking":
+            return "External Tool Calling & API Integration Client"
+
+        if category == "security_auth":
+            return "Agent Sandbox Security, Auth & Credential Management"
+
+        if category == "media_processing":
+            return "Multimodal Asset Processing & Media Extraction"
+
+        if category == "native_bindings":
+            return "High-Performance Native Extensions for AI Workloads"
+
+        if category == "core_extensions":
+            return "Substrate Utilities for Agent Tooling"
+
+        return "Backend Tooling Utility"

@@ -134,20 +134,23 @@ def test_session_storage_messages_and_traces(session_storage: SessionStorage):
     assert msg1.role == "user"
     assert msg1.content == "What is Thor?"
 
-    # Append agent turn with retrieved nodes
+    # Append agent turn with retrieved nodes and citations
     msg2 = session_storage.append_message(
         s.session_id,
         role="agent",
         content="Thor is a CLI library.",
         retrieved_nodes=["method:Thor#start", "class:Thor"],
+        citations=[{"id": "C1", "gem": "thor", "file": "lib/thor.rb", "symbol": "Thor.start"}],
     )
     assert msg2.role == "agent"
     assert msg2.retrieved_nodes == ["method:Thor#start", "class:Thor"]
+    assert msg2.citations == [{"id": "C1", "gem": "thor", "file": "lib/thor.rb", "symbol": "Thor.start"}]
 
     messages = session_storage.get_messages(s.session_id)
     assert len(messages) == 2
     assert messages[0].content == "What is Thor?"
     assert messages[1].retrieved_nodes == ["method:Thor#start", "class:Thor"]
+    assert messages[1].citations == [{"id": "C1", "gem": "thor", "file": "lib/thor.rb", "symbol": "Thor.start"}]
 
     # Append traces
     for i in range(10):
@@ -174,6 +177,7 @@ def test_session_storage_export_transcript(session_storage: SessionStorage):
         role="agent",
         content="Use `Thor::Group`.",
         retrieved_nodes=["class:Thor::Group"],
+        citations=[{"id": "C1", "gem": "thor", "file": "lib/thor/group.rb", "symbol": "Thor::Group"}],
     )
     session_storage.append_trace(s.session_id, "Extracted 42 AST nodes from thor")
 
@@ -185,7 +189,9 @@ def test_session_storage_export_transcript(session_storage: SessionStorage):
     assert "thor, gli" in md_text
     assert "How do I structure CLI commands?" in md_text
     assert "Use `Thor::Group`." in md_text
-    assert "class:Thor::Group" in md_text
+    assert "Grounded Citations:" in md_text
+    assert "[C1]" in md_text
+    assert "lib/thor/group.rb" in md_text
     assert "Extracted 42 AST nodes from thor" in md_text
 
     # Verify JSON structure

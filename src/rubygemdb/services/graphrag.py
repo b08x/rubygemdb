@@ -18,6 +18,7 @@ from rubygemdb.services.container_runner import ContainerRunner
 from rubygemdb.services.gem_fetcher import GemFetcher
 from rubygemdb.services.query_expander import QueryExpander, default_query_expander
 from rubygemdb.services.reranker import CrossEncoderReranker, default_reranker
+from rubygemdb.services.tracing import trace_retriever, trace_span
 
 logger = logging.getLogger("rubygemdb.graphrag")
 
@@ -63,6 +64,7 @@ class GraphRAGService:
             return self._embeddings
 
         from txtai import Embeddings  # type: ignore
+        from rubygemdb.services.embedding_cache import wrap_embeddings
 
         embeddings = Embeddings(
             path=settings.embedding_model_path,
@@ -70,6 +72,7 @@ class GraphRAGService:
             content=True,
             gpu=settings.txtai_gpu,
         )
+        wrap_embeddings(embeddings, model_name=settings.embedding_model_path)
         return embeddings
 
     def build_or_load_index(
@@ -87,12 +90,13 @@ class GraphRAGService:
         cache_dir = self.base_dir / gem_hash
         graph_file = cache_dir / "graph.json"
         txtai_dir = cache_dir / "txtai"
+        embeddings_file = txtai_dir / "embeddings"
 
         self.active_gems = cleaned_gems
         self.active_hash = gem_hash
 
-        # Check if already cached
-        if not force_rebuild and graph_file.exists() and txtai_dir.exists():
+        # Check if already cached (requires valid graph.json AND non-empty txtai embeddings)
+        if not force_rebuild and graph_file.exists() and embeddings_file.exists():
             msg = f"Loading cached GraphRAG index for [{', '.join(cleaned_gems)}] (hash {gem_hash})..."
             logger.info(msg)
             if progress_callback:
@@ -103,7 +107,7 @@ class GraphRAGService:
 
             self._index_graph_memory()
             embeddings = self._get_or_create_embeddings(txtai_dir)
-            if hasattr(embeddings, "load") and (txtai_dir / "embeddings").exists():
+            if hasattr(embeddings, "load") and embeddings_file.exists():
                 try:
                     embeddings.load(str(txtai_dir))
                 except Exception as e:
@@ -281,9 +285,13 @@ class GraphRAGService:
                 chunk_slice = documents[i : i + batch_size]
                 chunk_start = i + 1
                 chunk_end = min(i + batch_size, total_docs)
+                stats = getattr(embeddings, "_embedding_cache_stats", None)
+                cache_suffix = ""
+                if isinstance(stats, dict) and stats.get("total_texts", 0) > 0:
+                    cache_suffix = f" [cache hits: {stats.get('hits', 0)}, misses: {stats.get('misses', 0)}]"
                 chunk_msg = (
                     f"Vectorizing chunk {chunk_num}/{total_chunks} "
-                    f"({chunk_start}-{chunk_end} of {total_docs} symbols & doc tags)..."
+                    f"({chunk_start}-{chunk_end} of {total_docs} symbols & doc tags){cache_suffix}..."
                 )
                 logger.info(chunk_msg)
                 if progress_callback:
@@ -293,6 +301,14 @@ class GraphRAGService:
 
         if hasattr(embeddings, "index"):
             embeddings.index(document_stream())
+            stats = getattr(embeddings, "_embedding_cache_stats", None)
+            if isinstance(stats, dict):
+                logger.info(
+                    "GraphRAG vectorization complete: %d hits, %d misses (total: %d)",
+                    stats.get("hits", 0),
+                    stats.get("misses", 0),
+                    stats.get("total_texts", 0),
+                )
             if hasattr(embeddings, "save"):
                 try:
                     embeddings.save(str(txtai_dir))
@@ -311,153 +327,203 @@ class GraphRAGService:
         if not self.nodes_by_id:
             return {"primary_nodes": [], "expanded_nodes": [], "edges": []}
 
-        active_expander = query_expander or self.query_expander or default_query_expander
-        active_reranker = reranker or self.reranker or default_reranker
+        with trace_retriever(
+            name="graphrag-retrieve",
+            input={"query": query, "top_k": top_k, "expand_hops": expand_hops},
+            metadata={
+                "active_gems": self.active_gems,
+                "hash": self.active_hash,
+                "total_nodes": len(self.nodes_by_id),
+            },
+            tags=["rubygemdb", "graphrag", "retrieval"],
+        ) as ret_span:
+            active_expander = query_expander or self.query_expander or default_query_expander
+            active_reranker = reranker or self.reranker or default_reranker
 
-        # Dynamic candidate pool size clamped between 15 and 50
-        candidate_k = max(15, min(50, top_k * settings.reranker_candidate_multiplier))
+            # Dynamic candidate pool size clamped between 15 and 50
+            candidate_k = max(15, min(50, top_k * settings.reranker_candidate_multiplier))
 
-        expansion = None
-        if active_expander.is_enabled:
-            try:
-                expansion = active_expander.expand(query)
-            except Exception as e:
-                logger.warning("GraphRAG query expansion failed: %s", e)
+            expansion = None
+            if active_expander.is_enabled:
+                with trace_span(name="query-expansion", input={"query": query}) as exp_span:
+                    try:
+                        expansion = active_expander.expand(query)
+                        exp_span.update(output={
+                            "lexical": expansion.lexical,
+                            "vector": expansion.vector,
+                        })
+                    except Exception as e:
+                        logger.warning("GraphRAG query expansion failed: %s", e)
+                        exp_span.update(level="WARNING", status_message=str(e))
 
-        candidate_node_ids: List[str] = []
+            candidate_node_ids: List[str] = []
 
-        # Stage 1: Vector search
-        if self._embeddings is not None and hasattr(self._embeddings, "search"):
-            vector_queries = [query]
-            if expansion and expansion.vector:
-                for vq in expansion.vector:
-                    if vq and vq not in vector_queries:
-                        vector_queries.append(vq)
+            # Stage 1: Vector search
+            if self._embeddings is not None and hasattr(self._embeddings, "search"):
+                vector_queries = [query]
+                if expansion and expansion.vector:
+                    for vq in expansion.vector:
+                        if vq and vq not in vector_queries:
+                            vector_queries.append(vq)
 
-            for vq in vector_queries:
-                try:
-                    hits = self._embeddings.search(vq, candidate_k)
-                    for h in hits:
-                        parent_nid = None
-                        raw_id = ""
-                        if isinstance(h, (tuple, list)) and len(h) >= 1:
-                            raw_id = str(h[0])
-                        elif isinstance(h, dict):
-                            parent_nid = h.get("parent_node_id") or h.get("node_id")
-                            raw_id = str(h.get("id") or "")
-                        else:
-                            continue
+                with trace_retriever(
+                    name="vector-search-nodes",
+                    input={"queries": vector_queries, "candidate_k": candidate_k},
+                ) as vs_span:
+                    for vq in vector_queries:
+                        try:
+                            hits = self._embeddings.search(vq, candidate_k)
+                            for h in hits:
+                                parent_nid = None
+                                raw_id = ""
+                                if isinstance(h, (tuple, list)) and len(h) >= 1:
+                                    raw_id = str(h[0])
+                                elif isinstance(h, dict):
+                                    parent_nid = h.get("parent_node_id") or h.get("node_id")
+                                    raw_id = str(h.get("id") or "")
+                                else:
+                                    continue
 
-                        nid = parent_nid or raw_id
-                        if nid not in self.nodes_by_id:
-                            for candidate_nid in self.nodes_by_id:
-                                if raw_id.startswith(f"{candidate_nid}_"):
-                                    nid = candidate_nid
+                                nid = parent_nid or raw_id
+                                if nid not in self.nodes_by_id:
+                                    for candidate_nid in self.nodes_by_id:
+                                        if raw_id.startswith(f"{candidate_nid}_"):
+                                            nid = candidate_nid
+                                            break
+
+                                if nid in self.nodes_by_id and nid not in candidate_node_ids:
+                                    candidate_node_ids.append(nid)
+                                if len(candidate_node_ids) >= candidate_k:
                                     break
-
-                        if nid in self.nodes_by_id and nid not in candidate_node_ids:
-                            candidate_node_ids.append(nid)
+                        except Exception as e:
+                            logger.warning("Vector search fallback to keyword scan: %s", e)
                         if len(candidate_node_ids) >= candidate_k:
                             break
-                except Exception as e:
-                    logger.warning("Vector search fallback to keyword scan: %s", e)
-                if len(candidate_node_ids) >= candidate_k:
-                    break
+                    vs_span.update(output={"candidate_count": len(candidate_node_ids)})
 
-        # Fallback keyword scan if vector search returns no results or is unavailable
-        if not candidate_node_ids:
-            query_terms = [t.lower() for t in query.split() if len(t) > 2]
-            if expansion and expansion.lexical:
-                for lt in expansion.lexical:
-                    query_terms.extend([t.lower() for t in lt.split() if len(t) > 2])
-            scored = []
-            for nid, node in self.nodes_by_id.items():
-                text_blob = f"{node.get('name', '')} {json.dumps(node.get('data', {}))}".lower()
-                score = sum(1 for term in query_terms if term in text_blob)
-                if score > 0:
-                    scored.append((score, nid))
-            scored.sort(reverse=True)
-            candidate_node_ids = [nid for _, nid in scored[:candidate_k]]
+            # Fallback keyword scan if vector search returns no results or is unavailable
+            if not candidate_node_ids:
+                with trace_span(name="keyword-scan-fallback", input={"query": query}) as kw_span:
+                    query_terms = [t.lower() for t in query.split() if len(t) > 2]
+                    if expansion and expansion.lexical:
+                        for lt in expansion.lexical:
+                            query_terms.extend([t.lower() for t in lt.split() if len(t) > 2])
+                    scored = []
+                    for nid, node in self.nodes_by_id.items():
+                        text_blob = f"{node.get('name', '')} {json.dumps(node.get('data', {}))}".lower()
+                        score = sum(1 for term in query_terms if term in text_blob)
+                        if score > 0:
+                            scored.append((score, nid))
+                    scored.sort(reverse=True)
+                    candidate_node_ids = [nid for _, nid in scored[:candidate_k]]
+                    kw_span.update(output={"candidate_count": len(candidate_node_ids)})
 
-        # If still empty, take top symbol nodes
-        if not candidate_node_ids:
-            candidate_node_ids = list(self.nodes_by_id.keys())[:candidate_k]
+            # If still empty, take top symbol nodes
+            if not candidate_node_ids:
+                candidate_node_ids = list(self.nodes_by_id.keys())[:candidate_k]
 
-        # Stage 1.5: Cross-Encoder Reranking
-        primary_node_ids: List[str] = []
-        if active_reranker.is_enabled and candidate_node_ids:
-            candidate_nodes = [
-                self.nodes_by_id[nid] for nid in candidate_node_ids if nid in self.nodes_by_id
-            ]
+            # Stage 1.5: Cross-Encoder Reranking
+            primary_node_ids: List[str] = []
+            if active_reranker.is_enabled and candidate_node_ids:
+                with trace_span(
+                    name="cross-encoder-rerank",
+                    input={"candidate_count": len(candidate_node_ids), "top_k": top_k},
+                ) as rr_span:
+                    candidate_nodes = [
+                        self.nodes_by_id[nid] for nid in candidate_node_ids if nid in self.nodes_by_id
+                    ]
 
-            def _node_to_passage(node: Dict[str, Any]) -> str:
-                name = node.get("name", "")
-                data = node.get("data", {})
-                sig = data.get("signature", "")
-                doc = data.get("docstring", "") or " ".join(data.get("comments", []))
-                qname = data.get("qualified_name", name)
-                gem = node.get("gem", "")
-                return f"{qname} (gem: {gem}) {sig} {doc}".strip()
+                    def _node_to_passage(node: Dict[str, Any]) -> str:
+                        name = node.get("name", "")
+                        data = node.get("data", {})
+                        sig = data.get("signature", "")
+                        doc = data.get("docstring", "") or " ".join(data.get("comments", []))
+                        qname = data.get("qualified_name", name)
+                        gem = node.get("gem", "")
+                        return f"{qname} (gem: {gem}) {sig} {doc}".strip()
 
-            try:
-                reranked = active_reranker.rerank(
-                    query=query,
-                    items=candidate_nodes,
-                    text_extractor=_node_to_passage,
-                    top_k=top_k,
-                )
-                primary_node_ids = [item.get("id", "") for item in reranked if item.get("id")]
-                reranked_nodes_by_id = {item["id"]: item for item in reranked if "id" in item}
-            except Exception as e:
-                logger.warning("GraphRAG reranking failed, falling back: %s", e)
+                    try:
+                        reranked = active_reranker.rerank(
+                            query=query,
+                            items=candidate_nodes,
+                            text_extractor=_node_to_passage,
+                            top_k=top_k,
+                        )
+                        primary_node_ids = [item.get("id", "") for item in reranked if item.get("id")]
+                        reranked_nodes_by_id = {item["id"]: item for item in reranked if "id" in item}
+                        rr_span.update(output={"primary_count": len(primary_node_ids)})
+                    except Exception as e:
+                        logger.warning("GraphRAG reranking failed, falling back: %s", e)
+                        primary_node_ids = candidate_node_ids[:top_k]
+                        reranked_nodes_by_id = {}
+                        rr_span.update(level="WARNING", status_message=str(e))
+            else:
                 primary_node_ids = candidate_node_ids[:top_k]
                 reranked_nodes_by_id = {}
-        else:
-            primary_node_ids = candidate_node_ids[:top_k]
-            reranked_nodes_by_id = {}
 
-        # Stage 2: 1-hop graph neighborhood expansion
-        expanded_node_ids: Set[str] = set()
-        matched_edges: List[Dict[str, Any]] = []
+            # Stage 2: 1-hop graph neighborhood expansion
+            with trace_span(
+                name="graph-neighborhood-expansion",
+                input={"primary_nodes_count": len(primary_node_ids), "expand_hops": expand_hops},
+            ) as exp_hop_span:
+                expanded_node_ids: Set[str] = set()
+                matched_edges: List[Dict[str, Any]] = []
 
-        for nid in primary_node_ids:
-            # Outbound edges
-            for edge in self.edges_by_source.get(nid, []):
-                tgt = edge.get("target")
-                if tgt and tgt in self.nodes_by_id:
-                    expanded_node_ids.add(tgt)
-                    matched_edges.append(edge)
+                for nid in primary_node_ids:
+                    # Outbound edges
+                    for edge in self.edges_by_source.get(nid, []):
+                        tgt = edge.get("target")
+                        if tgt and tgt in self.nodes_by_id:
+                            expanded_node_ids.add(tgt)
+                            matched_edges.append(edge)
 
-            # Inbound edges
-            for edge in self.edges_by_target.get(nid, []):
-                src = edge.get("source")
-                if src and src in self.nodes_by_id:
-                    expanded_node_ids.add(src)
-                    matched_edges.append(edge)
+                    # Inbound edges
+                    for edge in self.edges_by_target.get(nid, []):
+                        src = edge.get("source")
+                        if src and src in self.nodes_by_id:
+                            expanded_node_ids.add(src)
+                            matched_edges.append(edge)
 
-        # Remove primary from expanded set to distinguish tiers
-        expanded_node_ids.difference_update(primary_node_ids)
+                # Remove primary from expanded set to distinguish tiers
+                expanded_node_ids.difference_update(primary_node_ids)
+                exp_hop_span.update(output={
+                    "expanded_count": len(expanded_node_ids),
+                    "matched_edges_count": len(matched_edges),
+                })
 
-        primary_nodes = [
-            reranked_nodes_by_id.get(nid, self.nodes_by_id[nid])
-            for nid in primary_node_ids
-            if nid in self.nodes_by_id
-        ]
-        expanded_nodes = [self.nodes_by_id[nid] for nid in sorted(expanded_node_ids) if nid in self.nodes_by_id]
+            primary_nodes = [
+                reranked_nodes_by_id.get(nid, self.nodes_by_id[nid])
+                for nid in primary_node_ids
+                if nid in self.nodes_by_id
+            ]
+            expanded_nodes = [self.nodes_by_id[nid] for nid in sorted(expanded_node_ids) if nid in self.nodes_by_id]
 
-        return {
-            "query": query,
-            "primary_nodes": primary_nodes,
-            "expanded_nodes": expanded_nodes,
-            "edges": matched_edges,
-        }
+            ret_span.update(output={
+                "primary_nodes_count": len(primary_nodes),
+                "expanded_nodes_count": len(expanded_nodes),
+                "edges_count": len(matched_edges),
+            })
+
+            return {
+                "query": query,
+                "primary_nodes": primary_nodes,
+                "expanded_nodes": expanded_nodes,
+                "edges": matched_edges,
+            }
+
+    def get_citations(self, retrieval: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Return structured citations from retrieval result, formatting context if not already done."""
+        if "citations" in retrieval:
+            return retrieval["citations"]
+        self.format_grounded_context(retrieval)
+        return retrieval.get("citations", [])
 
     def format_grounded_context(
         self,
         retrieval: Dict[str, Any],
         intention: Optional[str] = None,
     ) -> str:
-        """Assemble retrieved AST symbols, parameters, decode tags, and examples into a prompt context."""
+        """Assemble retrieved AST symbols, parameters, decode tags, and examples into a prompt context with explicit citations."""
         sections: List[str] = []
 
         if intention and intention.strip():
@@ -470,8 +536,11 @@ class GraphRAGService:
         expanded_nodes: List[Dict[str, Any]] = retrieval.get("expanded_nodes", [])
         edges: List[Dict[str, Any]] = retrieval.get("edges", [])
 
+        citations: List[Dict[str, Any]] = []
+        citation_counter = 1
+
         # 1. Signatures & Documentation
-        symbols_sec: List[str] = ["### Grounded Ruby API Signatures & Documentation"]
+        symbols_sec: List[str] = ["### Grounded Ruby API Signatures & Documentation (with Citations)"]
         rendered_symbols = False
 
         all_nodes = primary_nodes + [n for n in expanded_nodes if n.get("type") in ("method", "class", "module")]
@@ -483,19 +552,35 @@ class GraphRAGService:
             name = node.get("name", "")
             qname = data.get("qualified_name", name)
             gem = node.get("gem", "")
+            file_path = data.get("file", "")
 
             if qname in seen_qnames:
                 continue
             seen_qnames.add(qname)
 
+            cite_id = f"C{citation_counter}"
+            citation_counter += 1
+            file_suffix = f" | File: `{file_path}`" if file_path else ""
+
             if ntype == "method":
                 rendered_symbols = True
                 sig = data.get("signature", f"def {name}")
                 doc = data.get("docstring", "")
-                symbols_sec.append(f"- **Method `{qname}`** (Gem: `{gem}`)")
+                symbols_sec.append(f"- **[{cite_id}] Method `{qname}`** (Gem: `{gem}`{file_suffix})")
                 symbols_sec.append(f"  - Signature: `{sig}`")
                 if doc:
                     symbols_sec.append(f"  - Summary: {doc}")
+
+                citations.append({
+                    "id": cite_id,
+                    "gem": gem,
+                    "file": file_path,
+                    "node_id": node.get("id", ""),
+                    "node_type": "method",
+                    "symbol": qname,
+                    "signature": sig,
+                    "summary": doc,
+                })
 
                 # Find associated doc_tags (parameters, returns) from edges
                 nid = node.get("id")
@@ -518,7 +603,7 @@ class GraphRAGService:
                             rtype = tdata.get("type", "")
                             rdesc = tdata.get("text", "")
                             type_str = f" [{rtype}]" if rtype else ""
-                            desc_str = f" - {rdesc}" if pdesc else ""
+                            desc_str = f" - {rdesc}" if rdesc else ""
                             symbols_sec.append(f"    - `@returns`{type_str}{desc_str}")
 
             elif ntype in ("class", "module"):
@@ -526,9 +611,20 @@ class GraphRAGService:
                 doc = data.get("docstring", "") or " ".join(data.get("comments", []))
                 super_cls = data.get("superclass")
                 super_info = f" < `{super_cls}`" if super_cls else ""
-                symbols_sec.append(f"- **{ntype.title()} `{qname}`**{super_info} (Gem: `{gem}`)")
+                symbols_sec.append(f"- **[{cite_id}] {ntype.title()} `{qname}`**{super_info} (Gem: `{gem}`{file_suffix})")
                 if doc:
                     symbols_sec.append(f"  - Summary: {doc}")
+
+                citations.append({
+                    "id": cite_id,
+                    "gem": gem,
+                    "file": file_path,
+                    "node_id": node.get("id", ""),
+                    "node_type": ntype,
+                    "symbol": qname,
+                    "signature": None,
+                    "summary": doc,
+                })
 
         if rendered_symbols:
             sections.append("\n".join(symbols_sec) + "\n")
@@ -538,13 +634,47 @@ class GraphRAGService:
             n for n in primary_nodes + expanded_nodes if n.get("type") == "example"
         ]
         if example_nodes:
-            ex_sec: List[str] = ["### Verified Code Examples & Usage Snippets"]
+            ex_sec: List[str] = ["### Verified Code Examples & Usage Snippets (with Citations)"]
             for ex in example_nodes:
+                cite_id = f"C{citation_counter}"
+                citation_counter += 1
                 data = ex.get("data", {})
                 target = data.get("target", ex.get("name", ""))
                 code = data.get("code", "")
                 gem = ex.get("gem", "")
-                ex_sec.append(f"```ruby\n# Example for {target} (gem: {gem})\n{code}\n```")
+                file_path = data.get("file", "")
+                if not file_path and target:
+                    target_node = self.nodes_by_id.get(f"method:{target}") or self.nodes_by_id.get(f"class:{target}")
+                    if target_node:
+                        file_path = target_node.get("data", {}).get("file", "")
+                file_suffix = f" | File: `{file_path}`" if file_path else ""
+                ex_sec.append(f"```ruby\n# [{cite_id}] Example for {target} (gem: {gem}{file_suffix})\n{code}\n```")
+
+                citations.append({
+                    "id": cite_id,
+                    "gem": gem,
+                    "file": file_path,
+                    "node_id": ex.get("id", ""),
+                    "node_type": "example",
+                    "symbol": target,
+                    "signature": None,
+                    "summary": f"Example for {target}",
+                })
             sections.append("\n".join(ex_sec) + "\n")
 
+        # 3. Grounded Citations Index Table
+        if citations:
+            cite_table: List[str] = [
+                "### Grounded Citations Index",
+                "| Citation | Gem | File | Symbol | Type |",
+                "|:---|:---|:---|:---|:---|",
+            ]
+            for c in citations:
+                f_str = f"`{c['file']}`" if c.get("file") else "*N/A*"
+                cite_table.append(
+                    f"| [{c['id']}] | `{c['gem']}` | {f_str} | `{c['symbol']}` | {c['node_type']} |"
+                )
+            sections.append("\n".join(cite_table) + "\n")
+
+        retrieval["citations"] = citations
         return "\n".join(sections)

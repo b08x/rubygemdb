@@ -17,6 +17,19 @@ class RAGSession(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class RAGCitation(BaseModel):
+    """Citation metadata for an AST symbol or code snippet in GraphRAG context."""
+
+    id: str
+    gem: str
+    node_id: str
+    node_type: str
+    symbol: str
+    file: Optional[str] = None
+    signature: Optional[str] = None
+    summary: Optional[str] = None
+
+
 class RAGMessage(BaseModel):
     """Represents a single message turn in a GraphRAG session."""
 
@@ -26,6 +39,7 @@ class RAGMessage(BaseModel):
     content: str
     timestamp: str
     retrieved_nodes: list[str] = Field(default_factory=list)
+    citations: list[dict[str, Any]] = Field(default_factory=list)
     trace_step: Optional[str] = None
 
 

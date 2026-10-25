@@ -50,7 +50,7 @@ Each category also carries curated `base_gems` stack seeds (e.g. dotenv, drydock
 
 ### Data Flow
 1. Read gem inventory from CSV → Fetch RubyGems API data → Heuristic classification → LLM enhancement (optional) → Save results to YAML/SQLite
-2. Caching layers to minimize redundant API/LLM calls
+2. Caching layers to minimize redundant API/LLM/embedding calls
 3. Persistent storage for classified gem results
 
 ### Core Component Directory Structure
@@ -71,18 +71,20 @@ src/rubygemdb/
 ├── services/
 │   ├── container_runner.py # Podman/Docker runner for indexer container
 │   ├── gem_fetcher.py  # Git shallow-cloner with .gem unpack fallback
-│   ├── graphrag.py     # Two-stage GraphRAG retrieval & prompt synthesizer
+│   ├── graphrag.py     # Two-stage GraphRAG retrieval & grounded-citation prompt synthesizer
 │   ├── hybrid_search.py # SQLite FTS5 + txtai vector search, RRF fusion
 │   ├── query_expander.py # Local GGUF query expansion → lexical/vector variations (off by default)
 │   ├── reranker.py     # Local GGUF cross-encoder reranking of candidates (off by default)
 │   ├── model_manager.py # Hugging Face GGUF download + llama.cpp instance cache (data/models/)
 │   ├── classifier.py   # Keyword/description/embedding classification + sub-category faceting
 │   ├── embedding_scorer.py # txtai embedding similarity vs category descriptions
+│   ├── embedding_cache.py # SQLite-backed universal embedding cache (wrap_embeddings)
 │   ├── prune.py        # Overlap/stale gem prune reports
 │   ├── stack.py        # Layered gem-stack composition
 │   ├── rubygems.py     # RubyGems API client with caching
 │   ├── llm.py          # Mistral LLM client for fallback classification
-│   └── context7.py     # Context7 API client; repo-anchored library-ID verification
+│   ├── context7.py     # Context7 API client; repo-anchored library-ID verification
+│   └── tracing.py      # Langfuse v5 observability context managers & graceful no-op fallback
 └── storage/
     ├── base.py         # Storage interface
     ├── json_storage.py # JSON file storage implementation
@@ -135,22 +137,62 @@ rubygemdb-tui [optional-gems-inventory.csv]
 uv run rubygemdb-tui [optional-gems-inventory.csv]
 ```
 
+### Import GitHub Starred Gems (`rubygemdb import-stars`)
+Fetch starred Ruby repositories for a user on GitHub, resolve them to published RubyGems via repo name matching or root `*.gemspec` inspection, enrich existing inventory records, backfill inferred GenAI backend tooling roles (`genai_uses`), and run an approval-gated prune audit:
+```bash
+uv run rubygemdb import-stars --dry-run                    # safe preview: inspect discovered gems and prune audit without writes
+uv run rubygemdb import-stars                              # import and enrich gems in inventory
+uv run rubygemdb import-stars --classify --embed           # import, classify into 21 categories, and rebuild vector index
+uv run rubygemdb import-stars --user username --language Ruby  # custom user or language filter
+uv run rubygemdb import-stars --select-prune              # launch interactive CLI multi-selector to choose audit gems to prune
+uv run rubygemdb import-stars --apply-prune               # auto-prune stale/overlapping gems identified in audit
+uv run rubygemdb import-stars --prune-list prune.txt      # prune only approved gems listed in text file
+```
+
+### Interactive Gem Pruning (`rubygemdb prune`)
+Audit inventory for stale (3+ years without release) or name-overlapping gems and interactively choose gems to remove using a dual-engine CLI multi-selector (`gum choose --no-limit` when available, falling back to a native Textual `SelectionList`). Accepts candidate lists from plain text files, markdown reports (e.g. `data/prune-report.md`), or an automated inventory audit:
+```bash
+uv run rubygemdb prune                                     # launch interactive multi-selector for audit candidates
+uv run rubygemdb prune data/prune-report.md                # launch multi-selector using candidates from markdown report
+uv run rubygemdb prune data/prune-report.md --all          # prune all gems listed in report without prompting
+uv run rubygemdb prune --backend textual                   # force Textual SelectionList TUI engine
+uv run rubygemdb prune --backend gum                       # force Charmbracelet gum engine
+uv run rubygemdb prune --dry-run                           # simulate selection and report without deleting
+uv run rubygemdb prune --all                               # prune all stale and overlapping candidates without prompting
+uv run rubygemdb prune --prune-list prune.txt              # prune approved gems from text or markdown file
+uv run rubygemdb prune --output-list approved.txt          # save interactive selections to file for reuse
+```
+
 ### Reclassification (fresh start under the current taxonomy)
 Produces an approval-gated prune report (`data/prune-report.md` listing overlapping and stale gems — no release in 3+ years), then wipes and rebuilds all classified data (SQLite `classified_gems` table, `classified_gems.json`, txtai index, per-category YAMLs) from the pruned inventory:
 ```bash
 # Review the prune report first, then apply it
-uv run rubygemdb reclassify --out output/          # interactive prune confirmation
+uv run rubygemdb reclassify --out output/          # interactive prune choice (all, multi-select, or skip)
+uv run rubygemdb reclassify --select-prune         # launch interactive multi-selector before reclassifying
 uv run rubygemdb reclassify --apply-prune --embed  # non-interactive: full report + rebuild txtai index
-uv run rubygemdb reclassify --prune-list prune.txt --embed  # prune only the gems named in the file
+uv run rubygemdb reclassify --prune-list data/prune-report.md --embed  # prune gems parsed from markdown report
+uv run rubygemdb reclassify --clear-embeddings-cache  # also purge and vacuum universal embedding cache
 ```
-The prune list file is plain text: one gem name per line, `#` comments allowed — use it to approve a subset instead of the whole report.
+The prune list file accepts markdown reports (tables and lists), plain text (one gem per line), and `#` comments.
 A dated SQLite backup (`data/rubygemdb.sqlite.bak-<date>`) is written before anything is wiped. Run with ollama up for best embedding-assisted classification.
 
-### Gem-Stack Composition
-Turn a context query into a layered stack manifest (layer, category, gem, role) plus a Gemfile snippet, starting from the curated base picks (dotenv, drydock, pry, rubocop, journald-logger):
+### Universal Embedding Cache Management (`rubygemdb cache`)
+Inspect, prune, and clear the shared vector embedding cache (`data/cache/embeddings_cache.sqlite`):
 ```bash
-uv run rubygemdb stack "CLI data pipeline tool"           # print to stdout
-uv run rubygemdb stack "CLI data pipeline tool" --out stacks/  # also write files
+uv run rubygemdb cache stats                           # display Rich table of vector counts, models, and disk sizes
+uv run rubygemdb cache clear                           # wipe all vectors and reclaim host disk space via VACUUM
+uv run rubygemdb cache clear --model "model_name"     # clear vectors for a specific model only
+uv run rubygemdb cache prune                           # prune expired vectors (>180d) and cap at 100k entries
+uv run rubygemdb cache prune --max-age-days 90 --max-entries 50000  # custom retention limits
+```
+Use `--no-vacuum` on `clear` or `prune` to skip physical disk page reclamation. Reclassification also supports `--clear-embeddings-cache` to wipe and vacuum cached vectors during fresh-start taxonomical rebuilds.
+
+### Gem-Stack Composition
+Turn a context query into a curated, layered stack manifest (layer, category, gem, role) plus a Gemfile snippet using two-stage retrieval and second-pass curation (LLM synthesis or offline fallback), capped by `--max-gems`:
+```bash
+uv run rubygemdb stack "CLI data pipeline tool"                  # print curated stack (default 10 gems)
+uv run rubygemdb stack "CLI data pipeline tool" --max-gems 6     # cap stack density to 6 gems
+uv run rubygemdb stack "CLI data pipeline tool" --out stacks/    # also write files
 ```
 Output is advisory, not a dependency resolver. Deeper Rubysmith project generation from a stack manifest is a follow-up goal.
 
@@ -168,7 +210,7 @@ uv run rubygemdb-mcp --sse          # shortcut for --daemon start
 ```
 Other flags: `--transport stdio|sse` (default `stdio`), `--host` (default `127.0.0.1`), `--port` (default `8000`), `--foreground` (SSE in the foreground; used by the daemon worker), `--pid-file` (default `data/mcp.pid`), `--log-file` (default `data/mcp.log`). Daemon artifacts: `data/mcp.pid`, `data/mcp.json` (host/port sidecar), `data/mcp.log`.
 
-`search_gems` filters: `category` — one of the 21 slugs; `phase` — `skeleton`/`input`/`processing`/`output`. FTS5 first; the txtai vector index loads lazily and only when FTS returns zero hits. Catalog tools open the gem database read-only (`mode=ro`); mutating storage methods raise `PermissionError` in that mode. Session tools write only to the separate `data/sessions.sqlite` store — the gem catalog is never modified. `build_gem_graphrag` and `query_gem_graphrag` accept an optional `session_id` (auto-generated when omitted) and return the `session_id` they recorded the turn in; `resume_rag_session` pre-warms the session's gem index and returns the last 5 messages (full context restore happens in the TUI).
+`search_gems` filters: `category` — one of the 21 slugs; `phase` — `skeleton`/`input`/`processing`/`output`. FTS5 first; the txtai vector index loads lazily and only when FTS returns zero hits. Catalog tools open the gem database read-only (`mode=ro`); mutating storage methods raise `PermissionError` in that mode. Session tools write only to the separate `data/sessions.sqlite` store — the gem catalog is never modified. `build_gem_graphrag` and `query_gem_graphrag` accept an optional `session_id` (auto-generated when omitted) and return the `session_id` they recorded the turn in; `query_gem_graphrag` results also carry a top-level `citations` list (id, gem, file, node_id, node_type, symbol, signature, summary) for every retrieved symbol and code example. `resume_rag_session` pre-warms the session's gem index and returns the last 5 messages (full context restore happens in the TUI).
 
 ### Linting & Type Checking
 ```bash
@@ -190,6 +232,12 @@ export MISTRAL_API_KEY="your_mistral_key"
 
 # Context7 API key for generating gem usage cheatsheets
 export CONTEXT7_API_KEY="your_context7_key"
+
+# Optional Langfuse tracing & observability (disabled when unset or LANGFUSE_ENABLED=false)
+export LANGFUSE_PUBLIC_KEY="pk-lf-..."
+export LANGFUSE_SECRET_KEY="sk-lf-..."
+export LANGFUSE_BASE_URL="http://localhost:3000"  # or LANGFUSE_HOST
+export LANGFUSE_ENABLED="true"
 ```
 
 Optional retrieval-quality stages (both off by default; GGUF models download lazily from Hugging Face into `data/models/` on first use):
@@ -198,6 +246,18 @@ export QUERY_EXPANSION_ENABLED="true"  # expand queries into lexical/vector vari
 export RERANKER_ENABLED="true"         # cross-encoder rerank of the candidate pool (ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF)
 ```
 Further knobs: `QUERY_EXPANDER_REPO_ID` / `QUERY_EXPANDER_FILENAME` / `QUERY_EXPANDER_N_CTX` / `QUERY_EXPANDER_N_THREADS`, `RERANKER_REPO_ID` / `RERANKER_FILENAME` / `RERANKER_N_CTX` / `RERANKER_N_THREADS`, `RERANKER_CANDIDATE_MULTIPLIER` (default 3; candidate pool = top_k × multiplier, clamped 15–50), and `MODELS_CACHE_DIR` (default `data/models/`). Legacy aliases `EXPANDER_*`, `CROSS_ENCODER_*`, `CANDIDATE_MULTIPLIER`, and `MODEL_CACHE_DIR` are also accepted. Both stages degrade to baseline retrieval when disabled, missing, or failing — no exceptions surface to callers.
+
+Optional embedding cache retention policies:
+```bash
+export EMBEDDINGS_CACHE_MAX_ENTRIES="100000"  # maximum cached vectors before oldest entries are pruned (default: 100,000)
+export EMBEDDINGS_CACHE_TTL_DAYS="180"         # vector time-to-live in days (default: 180)
+```
+
+Agent output cap:
+```bash
+export AGENT_MAX_TOKENS="4096"                 # max tokens for GraphRAG agent responses (default: 4096)
+```
+Responses were previously uncapped; raise the setting when long, citation-tagged implementations truncate.
 
 ---
 
@@ -212,6 +272,8 @@ Further knobs: `QUERY_EXPANDER_REPO_ID` / `QUERY_EXPANDER_FILENAME` / `QUERY_EXP
 5. If a target project is selected, the agent calls `get_architecture` and `search_graph` via Codebase Memory MCP to inspect the target structure.
 6. The agent synthesizes the Context7 cheatsheets, semantic gem matches, and actual codebase structure to output a strict Pragmatic Implementation Backlog.
 7. Chat sessions persist across restarts: every turn is saved to `data/sessions.sqlite` and indexed into txtai as a `session_turn` document tagged with its session id; the TUI restores the most recent session (active gems, intention, chat history, last 200 execution traces) on open.
+
+Grounded chat-tab turns are citation-tagged and prompt-constrained: every retrieved method, class, module, and code example carries a sequential `[C1]`-style tag with its source file, replies must cite those tags inline and close with a `### Citations` summary, and only APIs present in the citations may be used — unsupported capabilities are stated explicitly, with missing logic supplied as clearly-distinguished custom application Ruby. Turns without a grounded context (no gems selected) run as ordinary ungrounded chat; the contract binds grounded answers, it does not refuse ungrounded ones. `query_gem_graphrag` returns the same citation-tagged context and `citations` list raw — the calling agent consumes them under its own prompt discipline.
 
 ### Classification Pipeline
 Classification combines three scoring signals; the best-scoring category wins:
@@ -244,8 +306,9 @@ Local cache files:
 6. `data/cache/category_vectors/`: Cached category-description vectors for embedding scoring
 7. `data/prune-report.md`: Approval-gated overlap/stale gem report
 8. `data/mcp.pid` + `data/mcp.json` + `data/mcp.log`: MCP daemon PID file, host/port sidecar, and daemon log
-9. `data/sessions.sqlite`: Persistent GraphRAG session store (`rag_sessions`, `rag_messages`, `rag_traces` tables, auto-created on first use via `SessionStorage`; separate from the gem catalog, which stays read-only)
+9. `data/sessions.sqlite`: Persistent GraphRAG session store (`rag_sessions`, `rag_messages`, `rag_traces` tables, auto-created on first use via `SessionStorage`; separate from the gem catalog, which stays read-only). `rag_messages` carries a `citations` column, auto-added by `ALTER TABLE` migration on existing stores; turns persist their citation records alongside the message text
 10. `data/models/`: Local GGUF model cache for query expansion and reranking (lazily downloaded from Hugging Face via `services/model_manager.py`; the directory is auto-created at startup)
+11. `data/cache/embeddings_cache.sqlite`: Universal content-addressable vector cache keyed by SHA-256 of model path + text, shared by GraphRAG indexing, classifier embedding scoring, and agent sessions (`services/embedding_cache.py`). Repeat vectorization of known texts skips the embedding model entirely. Configurable capacity and TTL retention policies (`settings.embeddings_cache_max_entries` default 100,000; `settings.embeddings_cache_ttl_days` default 180), opportunistic inline eviction during `put_many`, auto-vacuum on >10% prune, and operator management via `rubygemdb cache {stats, clear, prune}` and `rubygemdb reclassify --clear-embeddings-cache`
 
 ---
 
@@ -295,10 +358,11 @@ Per-category YAML files contain structured gem classification data:
 ## Gotchas & Non-Obvious Patterns
 
 1. **Confidence Thresholds**: Heuristic results <0.7 trigger LLM processing; LLM results must have >0.6 confidence to override heuristics
-2. **Cache Persistence**: Cache files are automatically saved after successful API/LLM calls
-3. **Rate Limiting**: Built-in delays between API requests: 0.5s between RubyGems calls, 0.5s between LLM calls
-4. **Batch Size**: Default LLM batch size is 10 for efficient bulk processing
-5. **TUI Requirements**: CSV input only required for first run to populate SQLite database
+2. **Agent Output Cap**: `agent_max_tokens` (env `AGENT_MAX_TOKENS`, default 4096) caps GraphRAG agent responses — previously uncapped; long grounded implementations may truncate mid-answer, which sits in tension with the prompt contract's completeness rule, so raise the setting when answers cut off
+3. **Cache Persistence**: Cache files are automatically saved after successful API/LLM calls
+4. **Rate Limiting**: Built-in delays between API requests: 0.5s between RubyGems calls, 0.5s between LLM calls
+5. **Batch Size**: Default LLM batch size is 10 for efficient bulk processing
+6. **TUI Requirements**: CSV input only required for first run to populate SQLite database
 
 ---
 

@@ -22,8 +22,13 @@
 - **Native MCP Server** — `rubygemdb-mcp` serves the taxonomy, gem metadata, stack composition, and GraphRAG sessions to coding agents (Claude Code, Antigravity, Cursor) over stdio or a background SSE daemon — the gem catalog is strictly read-only
 - **Contextual GraphRAG Pipeline** — On-demand containerized extraction of AST symbol hierarchies (`rubydex`) and structured documentation (`decode`) from gem source repositories, embedded into ephemeral `txtai` vector stores with 2-stage retrieval for deeply grounded coding agent chat and MCP queries
 - **Persistent GraphRAG Sessions** — Conversations, retrieved-node citations, and execution traces persist in a dedicated `data/sessions.sqlite` store; the TUI auto-restores the most recent session on open, and MCP clients can list, inspect, resume, export, and delete sessions
+- **Grounded Citations & Anti-Hallucination Contract** — Every method, class, module, and code example in the retrieved GraphRAG context carries a sequential `[C1]`-style citation tag with its source file, and grounded answers are prompt-constrained to the APIs those citations actually contain: replies cite inline, close with a `### Citations` summary, state unsupported capabilities explicitly, and supply missing logic as clearly-distinguished custom Ruby rather than invented gem APIs
+- **Optional Langfuse Observability** — Langfuse v5 tracing context managers wrap gem classification, LLM calls (with token usage), hybrid search, GraphRAG retrieval, agent chat turns, and MCP GraphRAG tools, grouping traces by session id; off unless `LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY` are set, and `LANGFUSE_ENABLED=false` disables it even then — when disabled the tracer yields no-op observations and never initializes the client
 - **Interactive TUI** — Textual-based terminal UI for browsing, filtering, editing, and exporting classified gems with real-time classification
 - **Batch CLI Pipeline** — Headless processing of gem inventories with metadata verification, classification, and YAML report generation
+- **Curated Gem-Stack Composition** — `rubygemdb stack` turns a context query into a compact, layered stack manifest (substrate -> quality) plus a Gemfile snippet via two-stage retrieval and second-pass curation (LLM synthesis or offline fallback), with category density limits and task-specific role descriptions — base seeds only join the candidate pool when their category is relevant to the query; `--max-gems` (default 10) caps stack density
+- **GitHub Starred Gem Import** — `rubygemdb import-stars` fetches starred Ruby repositories, resolves them to published RubyGems via repo-name matching or remote gemspec inspection, enriches inventory records with source repos and Context7 IDs, infers GenAI tooling roles, and runs an approval-gated prune audit
+- **Interactive Gem Pruning** — `rubygemdb prune` audits the inventory for stale (3+ years without release) or overlapping gems and removes the ones you choose through a dual-engine CLI multi-selector (`gum choose --no-limit`, falling back to a native Textual `SelectionList`); candidates come from an automated audit, a markdown report, or a plain text list
 - **Risk Assessment** — Invasiveness, coupling, and abstraction leak scoring for architectural impact analysis
 
 ---
@@ -71,6 +76,8 @@ graph LR
     ollama["Ollama\nembeddinggemma model"]
     mcp-context7["Context7 MCP\n@upstash/context7-mcp"]
     mcp-cbm["Codebase Memory MCP\ncodebase-memory-mcp"]
+    langfuse-api["Langfuse API\ncloud.langfuse.com (optional)"]
+    github-api["GitHub API\napi.github.com (import-stars)"]
 
     rubygems-service["RubyGems Service"] -->|"fetches gem info"| rubygems-api
     context7-service["Context7 Service"] -->|"searches libraries"| context7-api
@@ -78,6 +85,8 @@ graph LR
     agent["AI Agent"] -->|"generates embeddings"| ollama
     agent -->|"retrieves docs"| mcp-context7
     agent -->|"searches code"| mcp-cbm
+    tracing-service["Tracing Service\nservices/tracing.py"] -->|"reports spans & traces"| langfuse-api
+    github-stars["GitHub Stars Service\nservices/github_stars.py"] -->|"fetches starred repos"| github-api
 
     style rubygems-api fill:#585b70,stroke:#585b70,color:#cdd6f4
     style context7-api fill:#585b70,stroke:#585b70,color:#cdd6f4
@@ -85,6 +94,8 @@ graph LR
     style ollama fill:#585b70,stroke:#585b70,color:#cdd6f4
     style mcp-context7 fill:#585b70,stroke:#585b70,color:#cdd6f4
     style mcp-cbm fill:#585b70,stroke:#585b70,color:#cdd6f4
+    style langfuse-api fill:#585b70,stroke:#585b70,color:#cdd6f4
+    style github-api fill:#585b70,stroke:#585b70,color:#cdd6f4
 ```
 
 ---
@@ -145,10 +156,10 @@ The chat tab provides an on-demand, containerized GraphRAG pipeline for deep Rub
 1. **Gem Selection & Sync** — Gems selected in the Explorer tab sync dynamically into the Chat tab, displaying interactive badges.
 2. **Project Intention** — Define your architectural requirements or project context in the intention input field.
 3. **Containerized Extraction** — Clicking `Build GraphRAG Context` spins up the ephemeral `rubygemdb-indexer:latest` container (prioritizing Podman, fallback to Docker), running `Rubydex::Graph` (AST, class hierarchy, method calls) and `Decode::Index` (docstrings, `@parameter`, `@returns`, and `@example` code snippets) over mounted shallow-cloned gem repositories. If git cloning fails, the system automatically falls back to unpacking released `.gem` archives.
-4. **Ephemeral Vector Store** — Host Python ingests the normalized `graph.json` artifact into an ephemeral `txtai` index, caching the graph and vector embeddings by a deterministic hash of the selected gem set.
-5. **Two-Stage Grounded Retrieval** — Queries execute semantic vector search for top-K symbol and example nodes, followed by 1-hop graph neighborhood expansion across inheritance, call relations, parameter types, and attached code examples. With query expansion enabled, vector search runs over the original query plus its generated variations; with the reranker enabled, the candidate nodes are re-scored by the local cross-encoder before the neighborhood expansion. Both stages are off by default and fall back to baseline retrieval when their models are unavailable.
-6. **Session Persistence** — Each conversation lives in a persistent session in `data/sessions.sqlite`: every turn is saved as it happens and indexed into txtai as a `session_turn` document, and the chat tab auto-restores the most recent session — active gems, intention, chat history, and the last 200 execution traces — on startup. New Session and Delete Session buttons manage the session list.
-7. **Transcript Export** — Export writes the session transcript to `output/chat_exports/graphrag_chat_<timestamp>.md` and `.json` containing active intention, indexed gems, full conversation history, and grounded symbol summaries.
+4. **Ephemeral Vector Store** — Host Python ingests the normalized `graph.json` artifact into an ephemeral `txtai` index, caching the graph and vector embeddings by a deterministic hash of the selected gem set. A cache hit requires the saved txtai `embeddings` file — a partially-written cache rebuilds instead of loading empty — and vectorization itself draws on a universal embedding cache (`data/cache/embeddings_cache.sqlite`), so re-embedding known texts skips the embedding model.
+5. **Two-Stage Grounded Retrieval** — Queries execute semantic vector search for top-K symbol and example nodes, followed by 1-hop graph neighborhood expansion across inheritance, call relations, parameter types, and attached code examples. With query expansion enabled, vector search runs over the original query plus its generated variations; with the reranker enabled, the candidate nodes are re-scored by the local cross-encoder before the neighborhood expansion. Both stages are off by default and fall back to baseline retrieval when their models are unavailable. Each retrieved symbol and example is assigned a sequential `[C1]`-style citation tag (source file included) and the assembled context ends with a Grounded Citations Index table.
+6. **Session Persistence** — Each conversation lives in a persistent session in `data/sessions.sqlite`: every turn — message and citations — is saved as it happens and indexed into txtai as a `session_turn` document, and the chat tab auto-restores the most recent session — active gems, intention, chat history, and the last 200 execution traces — on startup. New Session and Delete Session buttons manage the session list. Existing stores migrate in place: the `rag_messages` table gains its `citations` column automatically on next launch.
+7. **Transcript Export** — Export writes the session transcript to `output/chat_exports/graphrag_chat_<timestamp>.md` and `.json` containing active intention, indexed gems, full conversation history, and grounded symbol summaries. Cited turns render a `> **Grounded Citations:**` list in markdown and a `citations` array per message in JSON.
 
 ### MCP Tool Integration
 
@@ -165,7 +176,9 @@ Chat turns made through these tools persist to the session store — `build_gem_
 
 ### Agent Prompt Structure
 
-The assistant grounds its answers in the exact method signatures, decode parameter types, verified code examples, and call relationships retrieved from the gem's source code graph. Answers cite exact symbol names, module nesting, and integration patterns rather than hallucinating APIs.
+The assistant grounds its answers in the exact method signatures, decode parameter types, verified code examples, and call relationships retrieved from the gem's source code graph. Grounded turns run under a strict anti-hallucination prompt contract: every class, module, method, and pattern in the reply must be cited with its `[Cn]` tag, only APIs that appear in the retrieved citations may be used — no invented namespaces or parameters — and each answer closes with a `### Citations` summary section. When a gem lacks a needed capability, the contract requires the answer to say so explicitly, cite the methods that do exist, and supply the missing logic as clearly-distinguished custom application Ruby.
+
+One boundary worth stating plainly: the contract binds grounded turns. Turns without a grounded context — no gems selected — run as ordinary ungrounded chat; the guardrail constrains answers that have sources, and it never refuses an answer outright. Agent output length is capped by `AGENT_MAX_TOKENS` (default: 4096); raise it if long grounded implementations truncate.
 
 ---
 
@@ -207,10 +220,10 @@ Daemon artifacts land in `data/`: `mcp.pid`, the `mcp.json` host/port sidecar, a
 - **Tools**:
   - `search_gems(query, category=None, phase=None, limit=10)`: Sub-millisecond SQLite FTS5 search. `category` takes one of the 21 category slugs; `phase` takes `skeleton`, `input`, `processing`, or `output`. The txtai vector index is consulted only when FTS5 returns zero hits.
   - `get_gem(name)`: Complete architectural metadata, layer, sub-categories, agent description, dependencies, signals, and risks. Gems present in the inventory but not yet classified return the same shape with `classified: false` and zero confidence; unknown names return an `error` object.
-  - `compose_stack(query)`: Composes layered gem stack manifest (substrate -> quality) and Gemfile snippet. Runs in read-only mode — curated seed gems are not written back to the inventory.
+  - `compose_stack(query, max_gems=10)`: Composes a compact, layered gem stack manifest (substrate -> quality) and Gemfile snippet via two-stage retrieval and second-pass curation (LLM synthesis or offline fallback), with category density limits and contextual, task-specific role descriptions; base seeds only enter the candidate pool when their category is relevant to the query, and `max_gems` (default 10) caps stack density. Runs in read-only mode — curated seed gems are not written back to the inventory.
   - `list_categories()`: Lists 21 architectural categories, stack layers, descriptions, and curated base gems.
   - `build_gem_graphrag(gems, intention="", session_id=None)`: Pre-warms and builds the containerized AST symbol and decode graph index for a set of gems; records the build in a session and returns its `session_id`.
-  - `query_gem_graphrag(gems, query, intention=None, session_id=None)`: Executes 2-stage GraphRAG retrieval over indexed gem graphs, returning exact AST signatures, decode parameter types, and code examples. Each turn is persisted with its retrieved-node citations to the session store; the response carries the `session_id`.
+  - `query_gem_graphrag(gems, query, intention=None, session_id=None)`: Executes 2-stage GraphRAG retrieval over indexed gem graphs, returning exact AST signatures, decode parameter types, and code examples, plus a top-level `citations` list (id, gem, file, node_id, node_type, symbol, signature, summary) for every retrieved symbol and code example. Each turn is persisted with its retrieved-node citations to the session store; the response carries the `session_id`.
   - `list_rag_sessions(limit=20)`: Lists sessions, most recently updated first.
   - `get_rag_session(session_id)`: Full session metadata plus its messages and execution traces.
   - `resume_rag_session(session_id)`: Resumes a session — pre-warms its gems' GraphRAG index and returns the last 5 messages. Full context restore happens in the TUI; this tool is a pre-warm plus summary.
@@ -281,12 +294,31 @@ uv sync --extra cuda
 
 To force a specific accelerator at runtime, use `--cuda` or `--cpu`:
 ```bash
-uv run rubygemdb --cuda stack "CLI data pipeline tool"
+uv run rubygemdb --cuda stack "CLI data pipeline tool" --max-gems 6
 uv run rubygemdb --cpu process gems.csv --embed
 ```
 Alternatively, set `CUDA_ENABLED=true` / `CUDA_ENABLED=false` or `DEVICE=cuda` in `.env`.
 
 Optional retrieval-quality models: enabling `QUERY_EXPANSION_ENABLED` or `RERANKER_ENABLED` lazily downloads GGUF models (~1.1 GB and ~640 MB) from Hugging Face into `data/models/` on first use. No model setup is needed to run the baseline pipeline — both stages are off by default.
+
+Optional Langfuse observability: set `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` to enable tracing (plus `LANGFUSE_HOST` or `LANGFUSE_BASE_URL` for a self-hosted instance — the default is `https://cloud.langfuse.com`). Tracing is off unless both keys are set, and `LANGFUSE_ENABLED=false` disables it even when they are. No keys, no client: the tracer degrades to no-op observations and never initializes the Langfuse SDK. Traced operations cover classification, LLM calls, hybrid search, GraphRAG retrieval, agent chat turns, and MCP GraphRAG tools; the CLI flushes buffered traces when a command finishes.
+
+Optional embedding cache retention: configure `EMBEDDINGS_CACHE_MAX_ENTRIES` (default: 100,000) and `EMBEDDINGS_CACHE_TTL_DAYS` (default: 180) to govern universal vector cache capacity and TTL retention.
+
+Agent output cap: `AGENT_MAX_TOKENS` (default: 4096) limits GraphRAG agent response length — raise it when long, citation-tagged implementations truncate.
+
+### Embedding Cache Management
+
+Manage and reclaim disk space from the shared vector embedding cache (`data/cache/embeddings_cache.sqlite`):
+```bash
+uv run rubygemdb cache stats                           # inspect vector counts, models, and file sizes
+uv run rubygemdb cache clear                           # purge all vectors and reclaim disk space via VACUUM
+uv run rubygemdb cache clear --model "model_name"     # clear vectors for a specific model only
+uv run rubygemdb cache prune                           # prune expired vectors (>180d) and cap at 100k entries
+uv run rubygemdb cache prune --max-age-days 90 --max-entries 50000  # custom retention limits
+uv run rubygemdb reclassify --clear-embeddings-cache  # purge cache during fresh-start reclassification
+```
+Pass `--no-vacuum` on `clear` or `prune` to skip physical SQLite page reclamation. Opportunistic inline pruning triggers during `put_many` batch writes when capacity thresholds are exceeded.
 
 ---
 
@@ -317,18 +349,23 @@ rubygemdb/
 │   │   ├── model_manager.py # Hugging Face GGUF download & llama.cpp instance cache
 │   │   ├── classifier.py   # Heuristic + LLM classification with sub-category faceting
 │   │   ├── embedding_scorer.py # txtai embedding similarity vs category descriptions
-│   │   ├── stack.py        # Layered gem-stack composition
-│   │   ├── prune.py        # Overlap/stale gem prune reports
+│   │   ├── embedding_cache.py # SQLite-backed universal embedding cache (wrap_embeddings)
+│   │   ├── stack.py        # Two-stage stack retrieval + second-pass curation
+│   │   ├── prune.py        # Stale/overlap prune reports + interactive multi-select backend
+│   │   ├── github_stars.py # GitHub starred-repo fetch & gem resolution (import-stars)
+│   │   ├── import_stars_pipeline.py # Starred-gem import, enrichment & prune audit
 │   │   ├── rubygems.py     # RubyGems API client
 │   │   ├── llm.py          # Mistral LLM client
-│   │   └── context7.py     # Context7 API client with repo-anchored ID verification
+│   │   ├── context7.py     # Context7 API client with repo-anchored ID verification
+│   │   └── tracing.py      # Langfuse v5 observability context managers (optional; no-op fallback)
 │   ├── storage/
 │   │   ├── base.py         # Storage interface
 │   │   ├── json_storage.py # JSON file storage
 │   │   ├── sqlite_storage.py # SQLite storage
 │   │   └── session_storage.py # Persistent GraphRAG session store (data/sessions.sqlite)
 │   └── ui/
-│       └── tui.py          # Textual TUI application
+│       ├── tui.py          # Textual TUI application
+│       └── selector.py     # Dual-engine CLI multi-select (gum or Textual SelectionList)
 ├── docker/
 │   ├── indexer.Dockerfile  # Ruby 4.0.4 runtime packaging rubydex, decode, bake
 │   └── extract_graph.rb    # AST symbol and documentation extraction script

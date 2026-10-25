@@ -55,6 +55,7 @@ async def test_query_gem_graphrag_tool():
         assert data["intention"] == "CLI app"
         assert len(data["primary_nodes"]) == 1
         assert len(data["expanded_nodes"]) == 1
+        assert "citations" in data
         assert "def start()" in data["grounded_context"]
         mock_service.build_or_load_index.assert_called_once_with(["thor"])
         mock_service.retrieve.assert_called_once_with("How to invoke CLI?", top_k=5)

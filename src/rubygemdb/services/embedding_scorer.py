@@ -35,12 +35,14 @@ class EmbeddingScorer:
 
         try:
             from txtai import Embeddings  # type: ignore
+            from rubygemdb.services.embedding_cache import wrap_embeddings
 
             self.embeddings_cls = Embeddings
             os.makedirs(self.cache_dir, exist_ok=True)
             index_path = os.path.join(self.cache_dir, "category_index")
 
             embeddings = Embeddings(path=self.model_path, content=True, gpu=settings.txtai_gpu)
+            wrap_embeddings(embeddings, model_name=self.model_path)
             if os.path.exists(index_path):
                 embeddings.load(index_path)
             else:

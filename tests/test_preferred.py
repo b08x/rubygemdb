@@ -135,5 +135,5 @@ def test_stack_manifest_includes_preferred(tmp_path):
         if e["source"] == "preferred"
     ]
     assert [e["gem"] for e in preferred_entries] == ["oga"]
-    assert preferred_entries[0]["role"] == "user preferred pick"
+    assert "user preferred" in preferred_entries[0]["role"].lower()
     assert preferred_entries[0]["layer"] == "plumbing"

@@ -9,6 +9,10 @@ class Settings(BaseSettings):
     mistral_api_key: Optional[str] = None
     openrouter_api_key: Optional[str] = None
     context7_api_key: Optional[str] = None
+    github_token: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("github_token", "GITHUB_TOKEN", "GH_TOKEN"),
+    )
     
     # Endpoints & Models
     rubygemdb_provider: str = Field(
@@ -24,6 +28,10 @@ class Settings(BaseSettings):
         default="openrouter/z-ai/glm-5.3-flash",
         validation_alias=AliasChoices("rubygemdb_agent_model", "agent_model"),
     )
+    agent_max_tokens: int = Field(
+        default=4096,
+        validation_alias=AliasChoices("agent_max_tokens", "AGENT_MAX_TOKENS"),
+    )
 
     rubygemdb_embedding_provider: Optional[str] = Field(
         default="ollama",
@@ -34,6 +42,18 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("rubygemdb_embedding_model", "embedding_model"),
     )
     embedding_chunk_size: int = 500
+    embeddings_cache_max_entries: int = Field(
+        default=100_000,
+        validation_alias=AliasChoices(
+            "embeddings_cache_max_entries", "EMBEDDINGS_CACHE_MAX_ENTRIES"
+        ),
+    )
+    embeddings_cache_ttl_days: int = Field(
+        default=180,
+        validation_alias=AliasChoices(
+            "embeddings_cache_ttl_days", "EMBEDDINGS_CACHE_TTL_DAYS"
+        ),
+    )
     rubygems_api_url: str = "https://rubygems.org/api/v1/gems/{name}.json"
     rubygems_search_url: str = "https://rubygems.org/api/v1/search.json?query={query}"
 
@@ -98,6 +118,38 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("models_cache_dir", "model_cache_dir"),
     )
+
+    # Langfuse Observability
+    langfuse_public_key: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("langfuse_public_key", "LANGFUSE_PUBLIC_KEY"),
+    )
+    langfuse_secret_key: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("langfuse_secret_key", "LANGFUSE_SECRET_KEY"),
+    )
+    langfuse_host: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "langfuse_host", "langfuse_base_url", "LANGFUSE_HOST", "LANGFUSE_BASE_URL"
+        ),
+    )
+    langfuse_enabled: Optional[bool] = Field(
+        default=None,
+        validation_alias=AliasChoices("langfuse_enabled", "LANGFUSE_ENABLED"),
+    )
+
+    @property
+    def is_langfuse_configured(self) -> bool:
+        """True if Langfuse credentials are present and not explicitly disabled."""
+        if self.langfuse_enabled is False:
+            return False
+        return bool(self.langfuse_public_key and self.langfuse_secret_key)
+
+    @property
+    def resolved_langfuse_host(self) -> str:
+        """Resolved Langfuse host / base URL."""
+        return self.langfuse_host or "https://cloud.langfuse.com"
 
     @property
     def resolved_models_dir(self) -> Path:
@@ -196,6 +248,10 @@ class Settings(BaseSettings):
     
     gem_cache_file: Path = cache_dir / "gem_cache.json"
     llm_cache_file: Path = cache_dir / "llm_cache.json"
+    embeddings_cache_file: Path = Field(
+        default=cache_dir / "embeddings_cache.sqlite",
+        validation_alias=AliasChoices("embeddings_cache_file", "EMBEDDINGS_CACHE_FILE"),
+    )
     classified_gems_file: Path = data_dir / "classified_gems.json"
     sqlite_db_file: Path = data_dir / "rubygemdb.sqlite"
     session_db_file: Path = data_dir / "sessions.sqlite"
@@ -214,3 +270,12 @@ settings.cache_dir.mkdir(exist_ok=True)
 settings.gem_repos_dir.mkdir(parents=True, exist_ok=True)
 settings.graphrag_dir.mkdir(parents=True, exist_ok=True)
 settings.resolved_models_dir.mkdir(parents=True, exist_ok=True)
+
+# Synchronize Langfuse environment variables for third-party SDKs and OTel
+if settings.langfuse_public_key:
+    os.environ.setdefault("LANGFUSE_PUBLIC_KEY", settings.langfuse_public_key)
+if settings.langfuse_secret_key:
+    os.environ.setdefault("LANGFUSE_SECRET_KEY", settings.langfuse_secret_key)
+if settings.langfuse_host:
+    os.environ.setdefault("LANGFUSE_HOST", settings.langfuse_host)
+    os.environ.setdefault("LANGFUSE_BASE_URL", settings.langfuse_host)

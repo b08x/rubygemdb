@@ -30,6 +30,7 @@ from rubygemdb.models.categories import CATEGORIES, CATEGORY_BY_SLUG, LAYERS
 from rubygemdb.services.hybrid_search import SearchCallable, hybrid_search
 from rubygemdb.services.stack import StackService, guess_category, seed_gems
 from rubygemdb.storage.sqlite_storage import SQLiteStorage
+from rubygemdb.services.tracing import trace_span
 
 logger = logging.getLogger("rubygemdb.mcp")
 
@@ -216,7 +217,7 @@ def get_gem(name: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
-def compose_stack(query: str) -> Dict[str, Any]:
+def compose_stack(query: str, max_gems: int = 10) -> Dict[str, Any]:
     """Compose a layered Ruby gem stack manifest and Gemfile snippet for a context query.
 
     Organizes recommendations across architectural layers (substrate -> plumbing -> composition -> quality)
@@ -224,10 +225,11 @@ def compose_stack(query: str) -> Dict[str, Any]:
 
     Args:
         query: Description of the application or tooling being built (e.g. 'CLI data pipeline tool').
+        max_gems: Maximum number of gems to include in the curated stack (default: 10).
     """
     storage = _get_read_only_storage()
     service = StackService(storage=storage, read_only=True)
-    manifest = service.build_stack(query)
+    manifest = service.build_stack(query, max_gems=max_gems)
     gemfile = service.render_gemfile(manifest)
     manifest_yaml = service.render_manifest_yaml(manifest)
 
@@ -404,29 +406,42 @@ def build_gem_graphrag(
     Returns:
         Dictionary with session_id, active gems, hash, node counts, and edge statistics.
     """
-    storage = _get_session_storage()
     sid = session_id or str(uuid.uuid4())
-    session = storage.get_session(sid)
-    if not session:
-        storage.create_session(
-            session_id=sid,
-            active_gems=gems,
-            intention=intention,
-        )
-    else:
-        storage.update_session(sid, active_gems=gems, intention=intention)
+    with trace_span(
+        name="mcp-build-gem-graphrag",
+        session_id=sid,
+        input={"gems": gems, "intention": intention},
+        tags=["rubygemdb", "mcp", "indexing"],
+    ) as span:
+        storage = _get_session_storage()
+        session = storage.get_session(sid)
+        if not session:
+            storage.create_session(
+                session_id=sid,
+                active_gems=gems,
+                intention=intention,
+            )
+        else:
+            storage.update_session(sid, active_gems=gems, intention=intention)
 
-    service = _get_graphrag_service()
-    data = service.build_or_load_index(gems)
-    return {
-        "session_id": sid,
-        "gems": service.active_gems,
-        "hash": service.active_hash,
-        "intention": intention,
-        "nodes_count": len(service.nodes_by_id),
-        "edges_count": len(data.get("edges", [])),
-        "status": "ready",
-    }
+        service = _get_graphrag_service()
+        data = service.build_or_load_index(gems)
+        res = {
+            "session_id": sid,
+            "gems": service.active_gems,
+            "hash": service.active_hash,
+            "intention": intention,
+            "nodes_count": len(service.nodes_by_id),
+            "edges_count": len(data.get("edges", [])),
+            "status": "ready",
+        }
+        span.update(output={
+            "session_id": sid,
+            "nodes_count": res["nodes_count"],
+            "edges_count": res["edges_count"],
+            "status": "ready",
+        })
+        return res
 
 
 @mcp.tool()
@@ -445,55 +460,72 @@ def query_gem_graphrag(
         session_id: Optional session UUID to track conversation turns.
 
     Returns:
-        Dictionary with session_id, retrieval results (primary nodes, expanded nodes, matched edges, and formatted markdown context).
+        Dictionary with session_id, retrieval results (primary nodes, expanded nodes, matched edges, and formatted markdown context), and a top-level `citations` list — one record (id, gem, file, node_id, node_type, symbol, signature, summary) per retrieved symbol and code example, matching the [Cn] tags in the grounded context.
     """
-    storage = _get_session_storage()
     sid = session_id or str(uuid.uuid4())
-    session = storage.get_session(sid)
-    if not session:
-        storage.create_session(
-            session_id=sid,
-            active_gems=gems,
-            intention=intention or "",
+    with trace_span(
+        name="mcp-query-gem-graphrag",
+        session_id=sid,
+        input={"gems": gems, "query": query, "intention": intention},
+        tags=["rubygemdb", "mcp", "graphrag"],
+    ) as span:
+        storage = _get_session_storage()
+        session = storage.get_session(sid)
+        if not session:
+            storage.create_session(
+                session_id=sid,
+                active_gems=gems,
+                intention=intention or "",
+            )
+        elif gems:
+            storage.update_session(sid, active_gems=gems, intention=intention or session.intention)
+
+        service = _get_graphrag_service()
+        service.build_or_load_index(gems)
+        retrieval = service.retrieve(query, top_k=5)
+        grounded_context = service.format_grounded_context(retrieval, intention=intention)
+        citations = retrieval.get("citations", [])
+
+        retrieved_node_ids: List[str] = []
+        for n in retrieval.get("primary_nodes", []):
+            if isinstance(n, dict) and "id" in n:
+                retrieved_node_ids.append(str(n["id"]))
+            elif isinstance(n, str):
+                retrieved_node_ids.append(n)
+        for n in retrieval.get("expanded_nodes", []):
+            if isinstance(n, dict) and "id" in n:
+                retrieved_node_ids.append(str(n["id"]))
+            elif isinstance(n, str):
+                retrieved_node_ids.append(n)
+
+        storage.append_message(sid, role="user", content=query)
+        storage.append_message(
+            sid,
+            role="agent",
+            content=grounded_context,
+            retrieved_nodes=retrieved_node_ids,
+            citations=citations,
         )
-    elif gems:
-        storage.update_session(sid, active_gems=gems, intention=intention or session.intention)
 
-    service = _get_graphrag_service()
-    service.build_or_load_index(gems)
-    retrieval = service.retrieve(query, top_k=5)
-    grounded_context = service.format_grounded_context(retrieval, intention=intention)
-
-    retrieved_node_ids: List[str] = []
-    for n in retrieval.get("primary_nodes", []):
-        if isinstance(n, dict) and "id" in n:
-            retrieved_node_ids.append(str(n["id"]))
-        elif isinstance(n, str):
-            retrieved_node_ids.append(n)
-    for n in retrieval.get("expanded_nodes", []):
-        if isinstance(n, dict) and "id" in n:
-            retrieved_node_ids.append(str(n["id"]))
-        elif isinstance(n, str):
-            retrieved_node_ids.append(n)
-
-    storage.append_message(sid, role="user", content=query)
-    storage.append_message(
-        sid,
-        role="agent",
-        content=grounded_context,
-        retrieved_nodes=retrieved_node_ids,
-    )
-
-    return {
-        "session_id": sid,
-        "gems": service.active_gems,
-        "query": query,
-        "intention": intention,
-        "primary_nodes": retrieval.get("primary_nodes", []),
-        "expanded_nodes": retrieval.get("expanded_nodes", []),
-        "edges": retrieval.get("edges", []),
-        "grounded_context": grounded_context,
-    }
+        res = {
+            "session_id": sid,
+            "gems": service.active_gems,
+            "query": query,
+            "intention": intention,
+            "primary_nodes": retrieval.get("primary_nodes", []),
+            "expanded_nodes": retrieval.get("expanded_nodes", []),
+            "edges": retrieval.get("edges", []),
+            "citations": citations,
+            "grounded_context": grounded_context,
+        }
+        span.update(output={
+            "session_id": sid,
+            "primary_nodes_count": len(res["primary_nodes"]),
+            "expanded_nodes_count": len(res["expanded_nodes"]),
+            "edges_count": len(res["edges"]),
+            "citations_count": len(citations),
+        })
+        return res
 
 
 # --- MCP Resources ---

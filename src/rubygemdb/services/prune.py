@@ -17,7 +17,8 @@ approves via `rubygemdb reclassify --apply-prune`.
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import List, Optional
+from pathlib import Path
+from typing import List, Optional, Union
 
 from rubygemdb.core.config import settings
 from rubygemdb.services.rubygems import RubyGemsService
@@ -265,3 +266,99 @@ class PruneService:
         with open(path, "w") as f:
             f.write(content)
         return str(path)
+
+
+_GEM_NAME_RE = re.compile(r"^[a-zA-Z0-9_\-\.]+$")
+_HEADER_WORDS = {
+    "gem", "gems", "detail", "reason", "name", "action", "inventory uri",
+    "api uri", "stale gems", "overlap prunables", "metadata mismatches", "shared-uri groups",
+}
+
+
+def clean_gem_token(token: str) -> str:
+    """Clean markdown styling (backticks, bold asterisks, brackets) from a gem token."""
+    return re.sub(r"[`*\[\]]", "", token).strip()
+
+
+def parse_prune_candidates(path_or_content: Union[str, Path]) -> List[PruneCandidate]:
+    """Parse prune candidates (names and optional reasons/details) from a file or text string.
+
+    Supports:
+    - Markdown tables: | Gem | Reason | Detail | or | Gem | Detail |
+    - Markdown lists: - gem, * gem, 1. gem, with optional descriptions
+    - Plain text: one gem per line, '#' comments allowed
+    - Comma-separated gem names
+    """
+    if isinstance(path_or_content, Path) or (
+        isinstance(path_or_content, str)
+        and "\n" not in path_or_content
+        and Path(path_or_content).exists()
+    ):
+        text = Path(path_or_content).read_text(encoding="utf-8")
+    else:
+        text = str(path_or_content)
+
+    candidates: List[PruneCandidate] = []
+    seen: set[str] = set()
+
+    def add_candidate(name: str, reason: str = "", detail: str = "") -> None:
+        cleaned_name = clean_gem_token(name)
+        if not cleaned_name or not _GEM_NAME_RE.match(cleaned_name):
+            return
+        if cleaned_name.lower() in _HEADER_WORDS:
+            return
+        if cleaned_name not in seen:
+            seen.add(cleaned_name)
+            candidates.append(PruneCandidate(name=cleaned_name, reason=reason.strip(), detail=detail.strip()))
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        # Comment line
+        if line.startswith("#"):
+            continue
+        # Strip inline comment
+        if " #" in line:
+            line = line.split(" #", 1)[0].strip()
+
+        # Markdown table row: | cell1 | cell2 | ... |
+        if line.startswith("|") and line.endswith("|"):
+            cells = [c.strip() for c in line.split("|")[1:-1]]
+            if cells:
+                col1 = clean_gem_token(cells[0])
+                if not col1 or re.match(r"^:?-+:?$", col1):
+                    continue
+                reason = cells[1] if len(cells) > 1 else ""
+                detail = cells[2] if len(cells) > 2 else ""
+                add_candidate(col1, reason=reason, detail=detail)
+            continue
+
+        # Markdown list item: - gem, * gem, 1. gem
+        list_match = re.match(r"^(?:[-*]|\d+\.)\s+(.+)$", line)
+        if list_match:
+            item_body = list_match.group(1).strip()
+            # Ignore summary lines like "Stale gems (no release...): **212**"
+            if re.match(r"^[A-Z][a-zA-Z\s]+.*:\s*\*\*\d+\*\*", item_body):
+                continue
+            reason = ""
+            if "—" in item_body:
+                gem_part, reason = item_body.split("—", 1)
+            elif ":" in item_body and not item_body.startswith("http"):
+                gem_part, reason = item_body.split(":", 1)
+            else:
+                gem_part = item_body
+            for token in gem_part.split(","):
+                add_candidate(token, reason=reason)
+            continue
+
+        # Comma-separated or whitespace tokens
+        for token in line.split(","):
+            add_candidate(token)
+
+    return candidates
+
+
+def parse_prune_file(path_or_content: Union[str, Path]) -> List[str]:
+    """Extract list of unique gem names from a prune file or text string."""
+    return [c.name for c in parse_prune_candidates(path_or_content)]
