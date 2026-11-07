@@ -18,7 +18,6 @@ data/
 
 *.html
 *.json
-.trackboi/
 
 patch_*
 RESEARCH-QUERIES.md

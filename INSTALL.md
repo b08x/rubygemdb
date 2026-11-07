@@ -13,60 +13,11 @@ uv run rubygemdb gems-inventory.csv --out output/
 uv run rubygemdb-tui gems-inventory.csv
 ```
 
-## Demo
-
-<table>
-<tr>
-<td><h4>CLI Pipeline</h4></td>
-<td><h4>TUI Explorer</h4></td>
-</tr>
-<tr>
-<td>
-
-```bash
-$ rubygemdb gems-inventory.csv --out output/
-
---- PHASE 1: Metadata Verification (247 gems) ---
-Verifying rails... ✓
-Verifying nokogiri... ✓
-
---- PHASE 2: Heuristic & LLM Classification ---
-Classifying gems... ━━━━━━━━━━━━━━━━━━━━━━━━ 100%
-
-| Category                    | Count |
-|-----------------------------|-------|
-| web_frameworks              |    42 |
-| document_parsing            |    38 |
-| cli_libraries               |    29 |
-| background_jobs             |    31 |
-```
-
-</td>
-<td>
-
-```bash
-$ rubygemdb-tui gems-inventory.csv
-
-┌─ RubyGemDB Explorer ─────────────────────────────┐
-│ Filter Classification          │ Name  │ Category │
-│ ○ All Categories               │ rails │ web_fram │
-│ ● web_frameworks               │ pg    │ persiste │
-│ ● cli_libraries                │ side..│ cli_lib..│
-│ ...                           │       │          │
-└────────────────────────────────┴───────┴──────────┘
-```
-
-</td>
-</tr>
-</table>
-
----
-
 ## Prerequisites
 
 - Python 3.14+
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
-- Ollama with `embeddinggemma` model (for agent features; the MCP server runs FTS5-first without Ollama and loads embeddings lazily only when keyword search returns nothing)
+- Ollama with an embedding model (RUBYGEMDB_EMBEDDING_MODEL, default embeddinggemma-2:440m) — vector features only; MCP FTS5 search runs without it
 - Optional: local GGUF models for query expansion and cross-encoder reranking — no manual setup; when `QUERY_EXPANSION_ENABLED` or `RERANKER_ENABLED` is set, the models (~1.1 GB and ~640 MB) download lazily from Hugging Face into `data/models/`
 - Optional: a Langfuse instance (Langfuse Cloud or self-hosted) for observability — no setup needed to skip it; tracing stays a no-op until `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are set
 
@@ -120,7 +71,86 @@ uv run pytest
 
 ---
 
+## Input/Output
+
+### CSV Input Format
+
+```csv
+name,version,category,description,homepage,source_code_uri,context7_id
+rails,7.1.0,framework,Ruby on Rails,...
+nokogiri,1.15.0,,HTML/XML parser,...
+```
+
+**Required columns:** `name` or `gem`
+
+### Output Files
+
+| File | Description |
+|------|-------------|
+| `data/rubygemdb.sqlite` | Primary SQLite database |
+| `data/sessions.sqlite` | Persistent GraphRAG session store (chat history, citations, traces) |
+| `output/{category}.yaml` | Classification reports by category |
+| `output/cheatsheets/*.md` | Context7 documentation cheatsheets |
+| `data/cache/gem_cache.json` | RubyGems API response cache |
+| `data/cache/llm_cache.json` | LLM prompt/response cache |
+| `data/cache/embeddings_cache.sqlite` | Universal embedding vector cache (shared across GraphRAG, classification, and sessions; 180-day TTL and 100,000-entry cap with inline pruning after batch writes — manage via `rubygemdb cache {stats, clear, prune}`) |
+| `data/txtai/` | Vector embedding index |
+| `data/models/` | Local GGUF model cache (query expansion & reranker weights, lazily downloaded from Hugging Face) |
+| `data/mcp.pid` | MCP daemon PID file (`data/mcp.json` sidecar records host/port) |
+| `data/mcp.log` | MCP daemon log |
+
+---
+
 ## Usage
+
+### Sample Output
+
+Illustrative output from a sample run (not a benchmark):
+
+<table>
+<tr>
+<td><h4>CLI Pipeline</h4></td>
+<td><h4>TUI Explorer</h4></td>
+</tr>
+<tr>
+<td>
+
+```bash
+$ rubygemdb gems-inventory.csv --out output/
+
+--- PHASE 1: Metadata Verification (247 gems) ---
+Verifying rails... ✓
+Verifying nokogiri... ✓
+
+--- PHASE 2: Heuristic & LLM Classification ---
+Classifying gems... ━━━━━━━━━━━━━━━━━━━━━━━━ 100%
+
+| Category                    | Count |
+|-----------------------------|-------|
+| web_frameworks              |    42 |
+| document_parsing            |    38 |
+| cli_libraries               |    29 |
+| background_jobs             |    31 |
+```
+
+</td>
+<td>
+
+```bash
+$ rubygemdb-tui gems-inventory.csv
+
+┌─ RubyGemDB Explorer ─────────────────────────────┐
+│ Filter Classification          │ Name  │ Category │
+│ ○ All Categories               │ rails │ web_fram │
+│ ● web_frameworks               │ pg    │ persiste │
+│ ● cli_libraries                │ side..│ cli_lib..│
+│ ...                           │       │          │
+└────────────────────────────────┴───────┴──────────┘
+```
+
+</td>
+</tr>
+</table>
 
 ### CLI: Batch Classification
 
@@ -145,13 +175,15 @@ uv run rubygemdb gems-inventory.csv --out output/ --embed
 
 ### CLI: Import GitHub Starred Gems
 
-Fetch starred Ruby repositories from GitHub, resolve them to published RubyGems (repo-name matching or remote gemspec inspection), enrich inventory records with source repositories and Context7 IDs, infer GenAI tooling roles, and run an approval-gated prune audit:
+Fetch starred Ruby repositories from GitHub, resolve them to published RubyGems (repo-name matching or remote gemspec inspection), enrich inventory records with source repositories and Context7 IDs, infer GenAI tooling roles, and run an approval-gated prune audit. Set `GITHUB_TOKEN` (or `GH_TOKEN`) to authenticate GitHub API requests and raise rate limits; when unset, the client falls back to `gh auth token` from the GitHub CLI:
 
 ```bash
 uv run rubygemdb import-stars --dry-run          # safe preview: no SQLite or disk writes
 uv run rubygemdb import-stars --classify --embed # import, classify, and build the vector index
 uv run rubygemdb import-stars --select-prune     # interactively multi-select prune candidates
 uv run rubygemdb import-stars --apply-prune      # import and auto-prune stale/overlapping gems
+uv run rubygemdb import-stars --user username --language Ruby  # override the defaults (--user b08x, --language Ruby)
+uv run rubygemdb import-stars --prune-list prune.txt           # prune only approved gems from a file or report
 ```
 
 ### CLI: Interactive Gem Pruning
@@ -175,6 +207,8 @@ Turn a context query into a curated, layered stack manifest (substrate -> qualit
 ```bash
 uv run rubygemdb stack "CLI data pipeline tool" --max-gems 6
 ```
+
+The manifest is advisory, not a dependency resolver.
 
 ### TUI: Interactive Explorer
 
@@ -202,7 +236,7 @@ print(response)
 
 Chat sessions persist across restarts: every turn is saved to `data/sessions.sqlite` and indexed for semantic search as a `session_turn` document. The TUI chat tab auto-restores the most recent session on open.
 
-GraphRAG-grounded turns are citation-tagged: each retrieved symbol and code example carries a `[C1]`-style tag with its source file, replies close with a `### Citations` summary, and the answer is prompt-constrained to the APIs the citations contain — unsupported capabilities are stated explicitly and missing logic is supplied as clearly-distinguished custom Ruby. Turns without a grounded context run as ordinary ungrounded chat. Citations persist with each turn (the `rag_messages` table gains its `citations` column automatically on existing stores) and render in markdown/JSON transcript exports. Agent response length is capped by `AGENT_MAX_TOKENS` (default: 4096).
+The chat agent can also ground answers in gem source via the containerized GraphRAG pipeline (see README 'Contextual GraphRAG Flow'); those grounded turns are citation-tagged: each retrieved symbol and code example carries a `[C1]`-style tag with its source file, replies close with a `### Citations` summary, and the answer is prompt-constrained to the APIs the citations contain — unsupported capabilities are stated explicitly and missing logic is supplied as clearly-distinguished custom Ruby. Turns without a grounded context run as ordinary ungrounded chat. Citations persist with each turn (the `rag_messages` table gains its `citations` column automatically on existing stores) and render in markdown/JSON transcript exports. Agent response length is capped by `AGENT_MAX_TOKENS` (default: 4096).
 
 ### Embedding Cache Management
 
@@ -210,6 +244,7 @@ Inspect, prune, and clear the shared vector embedding cache (`data/cache/embeddi
 
 ```bash
 uv run rubygemdb cache stats                           # Rich table of vector counts, models, and disk footprint
+uv run rubygemdb cache stats --model "model_name"     # filter the table by embedding model
 uv run rubygemdb cache clear                           # purge all vectors and reclaim disk space via VACUUM
 uv run rubygemdb cache clear --model "model_name"     # clear vectors for a specific model only
 uv run rubygemdb cache prune                           # prune expired vectors (>180d) and cap at 100k entries
@@ -235,7 +270,11 @@ Pass `--no-vacuum` on `clear` or `prune` to skip physical SQLite page reclamatio
 | `n` | Clear selection |
 | `u` | Bulk update Context7 IDs |
 | `x` | Export selected gems |
+| `w` | Expand details panel |
+| `b` | Toggle sidebar |
 | `t` | Switch tab |
+| `p` | Toggle preferred flag (+0.005 RRF rank boost) |
+| `/` | Focus search |
 
 ---
 
@@ -245,10 +284,10 @@ Environment variables loaded via `.env` file or system environment using Pydanti
 
 ```bash
 # LLM Classification (optional - falls back to heuristic only)
-MISTRAL_API_KEY=your_mistral_key
-LLM_ENDPOINT=https://api.mistral.ai/v1/chat/completions
-RUBYGEMDB_MODEL=mistral-medium-latest
-RUBYGEMDB_AGENT_MODEL=mistral/mistral-small-latest
+OPENROUTER_API_KEY=your_openrouter_key    # default provider (config.py:18-19)
+RUBYGEMDB_PROVIDER=openrouter
+RUBYGEMDB_MODEL=upstage/solar-mini4           # default (config.py:23-24)
+RUBYGEMDB_AGENT_MODEL=openrouter/z-ai/glm-5.3-flash  # default (config.py:27-28)
 LLM_RATE_DELAY=0.5
 LLM_BATCH_SIZE=10
 
@@ -257,10 +296,12 @@ CONTEXT7_API_KEY=your_context7_key
 
 # RubyGems API
 RUBYGEMS_API_URL=https://rubygems.org/api/v1/gems/{name}.json
-RATE_LIMIT_DELAY=0.5
+RATE_LIMIT_DELAY=0.5  # defined but currently unread; the RubyGems client hardcodes a 0.1s delay (rubygems.py:13)
+
+# GitHub API (import-stars; unset falls back to `gh auth token` when the gh CLI is installed)
+GITHUB_TOKEN=your_github_token
 
 # Agent Configuration
-RUBYGEMDB_AGENT_MODEL=mistral/mistral-small-latest
 AGENT_MAX_TOKENS=4096               # cap on agent response tokens; raise if long grounded answers truncate
 
 # Storage Paths
@@ -285,6 +326,7 @@ RERANKER_CANDIDATE_MULTIPLIER=3 # candidate pool = top_k × multiplier, clamped 
 # Embedding Cache Retention (universal vector cache, data/cache/embeddings_cache.sqlite)
 # EMBEDDINGS_CACHE_MAX_ENTRIES= # unset = 100000 (oldest vectors pruned above the cap)
 # EMBEDDINGS_CACHE_TTL_DAYS=    # unset = 180
+# EMBEDDINGS_CACHE_FILE=        # unset = ./data/cache/embeddings_cache.sqlite
 
 # Langfuse Observability (optional - tracing is a no-op until both keys are set)
 LANGFUSE_PUBLIC_KEY=
@@ -294,6 +336,18 @@ LANGFUSE_SECRET_KEY=
 ```
 
 Legacy aliases (`EXPANDER_*`, `CROSS_ENCODER_*`, `CANDIDATE_MULTIPLIER`, `MODEL_CACHE_DIR`) are also accepted. Both stages fall back to baseline retrieval when the models are disabled, missing, or fail at runtime.
+
+---
+
+## Agent Skill Deployment
+
+Deploy the repository-canonical agent skill (`.skills/rubygemdb/`) to `~/.agents/skills/rubygemdb`:
+
+```bash
+uv run rubygemdb install-skill                             # copy SKILL.md and scripts/gem.py to ~/.agents/skills/rubygemdb
+uv run rubygemdb install-skill --link                      # symlink the skill directory
+uv run rubygemdb install-skill --target /path/to/skills    # custom destination directory
+```
 
 ---
 
@@ -350,33 +404,3 @@ uv run mypy src/rubygemdb/
 ## Contributing
 
 Contributions welcome. Run `uv run ruff check` and `uv run mypy` before submitting.
-
----
-
-## Input/Output
-
-### CSV Input Format
-
-```csv
-name,version,category,description,homepage,source_code_uri,context7_id
-rails,7.1.0,framework,Ruby on Rails,...
-nokogiri,1.15.0,,HTML/XML parser,...
-```
-
-**Required columns:** `name` or `gem`
-
-### Output Files
-
-| File | Description |
-|------|-------------|
-| `data/rubygemdb.sqlite` | Primary SQLite database |
-| `data/sessions.sqlite` | Persistent GraphRAG session store (chat history, citations, traces) |
-| `output/{category}.yaml` | Classification reports by category |
-| `output/cheatsheets/*.md` | Context7 documentation cheatsheets |
-| `data/cache/gem_cache.json` | RubyGems API response cache |
-| `data/cache/llm_cache.json` | LLM prompt/response cache |
-| `data/cache/embeddings_cache.sqlite` | Universal embedding vector cache (shared across GraphRAG, classification, and sessions; 180-day TTL and 100,000-entry cap with inline pruning after batch writes — manage via `rubygemdb cache {stats, clear, prune}`) |
-| `data/txtai/` | Vector embedding index |
-| `data/models/` | Local GGUF model cache (query expansion & reranker weights, lazily downloaded from Hugging Face) |
-| `data/mcp.pid` | MCP daemon PID file (`data/mcp.json` sidecar records host/port) |
-| `data/mcp.log` | MCP daemon log |

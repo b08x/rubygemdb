@@ -8,12 +8,14 @@ RubyGemDB is a Ruby gem analysis and classification tool that categorizes gems i
 
 ## Architecture
 
+The system is three layers — a Pydantic/config core, services that classify and retrieve, and SQLite/JSON storage — wired as follows:
+
 ### Core Classification System
 - **21 Functional Categories** (defined in `src/rubygemdb/models/categories.py`, each with a stack layer): web_frameworks, http_networking, servers_concurrency, background_jobs, persistence, document_parsing, document_generation, static_site_generation, cli_libraries, testing_qa, code_quality_typing, runtime_validation, developer_tools, ai_llm, mcp_tooling, text_search, security_auth, media_processing, gui_desktop, native_bindings, core_extensions
 - **Stack Layers**: every category is tagged substrate / plumbing / composition / quality so results can be presented as a layered stack for back-end tooling design
 - **Scoring Pipeline**: keyword rules (name + dependencies) + RubyGems description-text scoring + txtai embedding similarity against category descriptions; best score wins. After the primary category is chosen, a taxonomy-driven pass (`GemClassifier.detect_sub_categories`) matches the category's `sub_categories` vocabulary against the gem's name, description, and dependencies
-- **LLM Refinement**: the Mistral/Devstral LLM is always consulted for the agent description; heuristic confidence < 0.7 is what lets its category (confidence > 0.6) override the heuristic pick
-- **Confidence Scoring**: Risk assessment based on invasiveness, coupling, and abstraction leak potential
+- **LLM Refinement**: the configured LLM (default openrouter/upstage/solar-mini4, config.py:18-24) is always consulted for the agent description; heuristic confidence < 0.7 is what lets its category (confidence > 0.6) override the heuristic pick
+- **Risk Assessment**: invasiveness, coupling, and abstraction-leak scoring (confidence thresholds below)
 
 ### Data Flow
 1. CSV input → RubyGems API → Heuristic classification → LLM enhancement → SQLite/YAML output
@@ -48,7 +50,7 @@ src/rubygemdb/
 │   ├── github_stars.py # GitHub starred-repo fetch & gem resolution (import-stars)
 │   ├── import_stars_pipeline.py # Starred-gem import, enrichment & prune audit pipeline
 │   ├── rubygems.py    # RubyGems API client with caching
-│   ├── llm.py         # Mistral LLM client for fallback classification
+│   ├── llm.py         # Provider-configured LLM client for fallback classification
 │   ├── context7.py    # Context7 API client for cheatsheet generation
 │   └── tracing.py     # Langfuse v5 observability context managers (optional; no-op fallback)
 └── storage/           # Data persistence layer
@@ -83,8 +85,13 @@ pip install -e .
 ### Environment Setup
 Required environment variables for full functionality:
 ```bash
-export MISTRAL_API_KEY="your_key"          # For LLM classification
+export OPENROUTER_API_KEY="your_key"     # For LLM classification (default provider; MISTRAL_API_KEY when RUBYGEMDB_PROVIDER=mistral)
 export CONTEXT7_API_KEY="your_key"        # For cheatsheet generation
+```
+
+Optional GitHub token for `import-stars` (raises API rate limits; falls back to `gh auth token` when unset):
+```bash
+export GITHUB_TOKEN="your_github_token"
 ```
 
 Optional Langfuse tracing & observability (disabled when keys are unset or `LANGFUSE_ENABLED=false`):
@@ -129,6 +136,12 @@ uv run rubygemdb gems-inventory.csv --out output/
 
 # Fresh start reclassification with embedding cache purge
 uv run rubygemdb reclassify --clear-embeddings-cache --apply-prune
+
+# Interactive candidate selection before reclassifying
+uv run rubygemdb reclassify --select-prune --embed
+
+# Prune gems parsed from an approved markdown report, then rebuild
+uv run rubygemdb reclassify --prune-list data/prune-report.md --embed
 ```
 
 ### Importing GitHub Starred Gems
@@ -138,6 +151,8 @@ uv run rubygemdb import-stars --dry-run          # safe preview: no SQLite or di
 uv run rubygemdb import-stars --classify --embed # import, classify, and build the vector index
 uv run rubygemdb import-stars --select-prune     # interactively multi-select prune candidates
 uv run rubygemdb import-stars --apply-prune      # import and auto-prune stale/overlapping gems
+uv run rubygemdb import-stars --user username --language Ruby  # custom GitHub user or language filter
+uv run rubygemdb import-stars --prune-list prune.txt           # prune only approved gems from a file or report
 ```
 
 ### Interactive Gem Pruning
@@ -163,11 +178,14 @@ The MCP `compose_stack(query, max_gems=10)` tool exposes the same refined select
 Inspect, prune, and clear vector entries:
 ```bash
 uv run rubygemdb cache stats                           # Rich table of vector counts, models, disk sizes
+uv run rubygemdb cache stats --model "model_name"     # filter the table by embedding model
 uv run rubygemdb cache clear                           # purge vectors and reclaim disk space via VACUUM
 uv run rubygemdb cache clear --model "model_name"     # clear vectors for a single model
 uv run rubygemdb cache prune                           # prune expired vectors (>180d) and cap at 100k
 uv run rubygemdb cache prune --max-age-days 90 --max-entries 50000  # custom retention limits
 ```
+
+Pass `--no-vacuum` on `clear` or `prune` to skip physical SQLite page reclamation.
 
 ### Running the TUI Explorer
 Launch interactive terminal UI for browsing and managing classified gems:
@@ -196,6 +214,14 @@ uv run rubygemdb-mcp --daemon stop
 
 Catalog tools (`search_gems`, `get_gem`, `compose_stack`, `list_categories`, `build_gem_graphrag`, `query_gem_graphrag`), resources (`rubygemdb://taxonomy`, `rubygemdb://stack-seeds`), and prompts (`design-ruby-stack`, `gem-architect-rag`) are strictly read-only against the gem database: SQLite connections open `mode=ro` and every mutating `SQLiteStorage` method raises `PermissionError`. Session tools (`list_rag_sessions`, `get_rag_session`, `resume_rag_session`, `export_rag_session_transcript`, `delete_rag_session`) write only to the separate `data/sessions.sqlite` store. `build_gem_graphrag` and `query_gem_graphrag` accept an optional `session_id` (auto-generated when omitted) and return the `session_id` they recorded the turn in; `query_gem_graphrag` results also carry a top-level `citations` list (id, gem, file, node_id, node_type, symbol, signature, summary) for every retrieved symbol and example. The daemon writes `data/mcp.pid`, a `data/mcp.json` host/port sidecar, and `data/mcp.log`.
 
+### Agent Skill Deployment (`rubygemdb install-skill`)
+Deploy or symlink the repository-canonical agent skill (`.skills/rubygemdb/`) to `~/.agents/skills/rubygemdb`:
+```bash
+uv run rubygemdb install-skill                             # copy SKILL.md and scripts/gem.py to ~/.agents/skills/rubygemdb
+uv run rubygemdb install-skill --link                      # symlink the skill directory
+uv run rubygemdb install-skill --target /path/to/skills    # custom destination directory
+```
+
 ### Development Workflow
 ```bash
 # Lint code
@@ -213,6 +239,8 @@ uv run rubygemdb data/gems-inventory.csv --out test-output/
 
 ## Classification Logic
 
+One of the 21 categories wins by best score; two thresholds then decide LLM override:
+
 ### Heuristic Signals
 - **Keyword rules** (from `models/categories.py`): gem-name token matches score 0.8; dependency substring matches score 0.65
 - **Description scoring**: RubyGems `info` term hits against category keywords/descriptions (≤ 0.6)
@@ -221,8 +249,8 @@ uv run rubygemdb data/gems-inventory.csv --out test-output/
 - **Defaults**: unmatched gems fall to `core_extensions` at 0.4 confidence
 
 ### Confidence Thresholds
-- High confidence (>0.7): Keep heuristic classification (the LLM still generates the agent description)
-- Low confidence (<0.7): The LLM's category may override the heuristic pick
+- Heuristic confidence ≥ 0.7: keep the heuristic pick (the LLM still generates the agent description)
+- < 0.7: the LLM's category (>0.6 confidence) may override the heuristic pick
 - LLM confidence threshold: 0.6 to override heuristics
 
 ## Input Data Format
@@ -230,47 +258,6 @@ uv run rubygemdb data/gems-inventory.csv --out test-output/
 CSV files must contain either:
 - `name` column (primary) or `gem` column  
 - Optional columns: `group`, `category`, `description`, `homepage`, `source_code_uri`, `context7_id`
-
-## Storage and Caching Strategy
-
-### Primary Storage
-- **SQLite Database**: `data/rubygemdb.sqlite` - Central storage for inventory and classified gems; the `classified_gems` table carries a `sub_categories` column (auto-added by migration on existing databases)
-- **Session Store**: `data/sessions.sqlite` - Separate SQLite database for persistent GraphRAG sessions (`rag_sessions`, `rag_messages`, `rag_traces` tables, auto-created on first use by `storage/session_storage.py`); `rag_messages` carries a `citations` column, auto-added by `ALTER TABLE` migration on existing stores
-- **Read-Only Mode**: `SQLiteStorage(read_only=True, db_path=...)` opens `file:...?mode=ro` URI connections, skips schema init, and raises `PermissionError` on every mutating method — this is what the MCP server uses for the gem catalog; `get_classified_gem(name)` / `get_inventory_gem(name)` back the `get_gem` MCP tool
-- **YAML Output**: Per-category files in output directory for batch processing results
-
-### Caching Layers
-- **API Cache**: `data/cache/gem_cache.json` - Persistent cache for RubyGems API responses
-- **LLM Cache**: `data/cache/llm_cache.json` - SHA256-hashed prompt caching for LLM responses (temperature 0)
-- **Results Cache**: `data/classified_gems.json` - Persists TUI state between sessions
-- **Embedding Cache**: `data/cache/embeddings_cache.sqlite` - Universal content-addressable vector cache (SHA-256 of model path + text, `services/embedding_cache.py`) shared by GraphRAG indexing, classifier embedding scoring, and agent sessions via `wrap_embeddings()`; repeat vectorization of known texts skips the embedding model. Configurable capacity and TTL retention policies (`settings.embeddings_cache_max_entries` default 100,000; `settings.embeddings_cache_ttl_days` default 180), opportunistic inline eviction during `put_many`, and operator CLI management via `rubygemdb cache {stats, clear, prune}` and `rubygemdb reclassify --clear-embeddings-cache`
-- **GGUF Model Cache**: `data/models/` - Query-expansion and reranker weights, lazily downloaded from Hugging Face via `services/model_manager.py`
-
-## TUI Interface Features
-
-### Navigation
-- Tab between gem list and details panels
-- Filter by classification category
-- Search gems by name
-- Batch operations for reclassification
-
-### Context7 Integration
-- Generate usage cheatsheets for selected gems
-- Saves to `output/cheatsheets/`
-- Requires CONTEXT7_API_KEY environment variable
-- Library IDs are repo-anchored: `verify_library` canonicalizes IDs to `/owner/repo` form derived from the gem's source/homepage repo URL, preferring an exact repo-path match over the first search result
-
-## Error Handling Patterns
-
-### Robust API Calls
-- Exponential backoff with jitter for rate limiting
-- Configurable retry attempts (default: 5 for network, 3 for gems)
-- Graceful degradation when APIs are unavailable
-
-### Rate Limiting
-- `RATE_LIMIT_DELAY = 0.5` seconds between RubyGems requests
-- `LLM_RATE_DELAY = 0.5` seconds between LLM requests  
-- `LLM_BATCH_SIZE = 10` for efficient bulk processing
 
 ## Output Structure
 
@@ -295,6 +282,47 @@ Classification results saved as `{category}.yaml` in output directory:
     native_ext: boolean
 ```
 
+## Storage and Caching Strategy
+
+### Primary Storage
+- **SQLite Database**: `data/rubygemdb.sqlite` - Central storage for inventory and classified gems; the `classified_gems` table carries a `sub_categories` column (auto-added by migration on existing databases)
+- **Session Store**: `data/sessions.sqlite` - Separate SQLite database for persistent GraphRAG sessions (`rag_sessions`, `rag_messages`, `rag_traces` tables, auto-created on first use by `storage/session_storage.py`); `rag_messages` carries a `citations` column, auto-added by `ALTER TABLE` migration on existing stores
+- **Read-Only Mode**: `SQLiteStorage(read_only=True, db_path=...)` opens `file:...?mode=ro` URI connections, skips schema init, and raises `PermissionError` on every mutating method — this is what the MCP server uses for the gem catalog; `get_classified_gem(name)` / `get_inventory_gem(name)` back the `get_gem` MCP tool
+- **YAML Output**: Per-category files in output directory for batch processing results
+
+### Caching Layers
+- **API Cache**: `data/cache/gem_cache.json` - Persistent cache for RubyGems API responses
+- **LLM Cache**: `data/cache/llm_cache.json` - SHA256-hashed prompt caching for LLM responses (temperature 0)
+- **Results Cache**: `data/classified_gems.json` - Persists TUI state between sessions
+- **Embedding Cache**: `data/cache/embeddings_cache.sqlite` - Universal content-addressable vector cache (SHA-256 of model path + text, `services/embedding_cache.py`) shared by GraphRAG indexing, classifier embedding scoring, and agent sessions via `wrap_embeddings()`; repeat vectorization of known texts skips the embedding model. Configurable capacity and TTL retention policies (`settings.embeddings_cache_max_entries` default 100,000; `settings.embeddings_cache_ttl_days` default 180), opportunistic inline eviction during `put_many`, and operator CLI management via `rubygemdb cache {stats, clear, prune}` and `rubygemdb reclassify --clear-embeddings-cache`
+- **GGUF Model Cache**: `data/models/` - Query-expansion and reranker weights, lazily downloaded from Hugging Face via `services/model_manager.py`
+
+## TUI Interface Features
+
+### Navigation
+- Tab between gem list and details panels
+- Filter by classification category
+- Search gems by name
+- Batch operations for reclassification
+
+## Context7 Integration
+- Generate usage cheatsheets for selected gems
+- Saves to `output/cheatsheets/`
+- Requires CONTEXT7_API_KEY environment variable
+- Library IDs are repo-anchored: `verify_library` canonicalizes IDs to `/owner/repo` form derived from the gem's source/homepage repo URL, preferring an exact repo-path match over the first search result
+
+## Error Handling Patterns
+
+### Robust API Calls
+- Linear retry backoff: 1s, 2s, 3s between gem-fetch attempts (services/rubygems.py); LLM calls are single-shot with a 15s timeout (services/llm.py)
+- fetch_gem_info accepts a retries parameter (default 3, services/rubygems.py); LLM calls have no retry knob
+- Failed API calls return None and classification proceeds on heuristics (rubygems.py, llm.py); embedding scoring falls back to keyword + description signals when ollama is down (embedding_scorer.py:57-74)
+
+### Rate Limiting
+- 0.1s between RubyGems requests (hardcoded, services/rubygems.py:13; the RATE_LIMIT_DELAY setting is currently unread)
+- LLM calls have no delay (single-shot, 15s timeout); the `LLM_RATE_DELAY` setting is currently unread
+- `LLM_BATCH_SIZE = 10` for efficient bulk processing
+
 ## Debugging Tips
 
 ### API Issues
@@ -304,7 +332,7 @@ Classification results saved as `{category}.yaml` in output directory:
 
 ### LLM Classification Problems  
 - Review prompts in `llm_cache.json` using prompt hash
-- Check Mistral endpoint configuration and API key (`MISTRAL_API_KEY`)
+- Check LLM provider configuration and API key (default: OPENROUTER_API_KEY; MISTRAL_API_KEY when RUBYGEMDB_PROVIDER=mistral)
 - Validate JSON parsing of LLM responses
 
 ### TUI Navigation Issues

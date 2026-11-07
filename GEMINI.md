@@ -1,24 +1,26 @@
 # RubyGemDB
 
-RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into architectural patterns. It leverages heuristic-based analysis (name, dependencies, and metadata) and LLM fallback (via Mistral AI/Devstral) to categorize gems, providing insights into their role and potential risks within an ecosystem.
+RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into architectural patterns. It leverages heuristic-based analysis (name, dependencies, and metadata) and LLM fallback via the configured provider (default openrouter, config.py:18-19) to categorize gems, providing insights into their role and potential risks within an ecosystem.
 
 ## Project Overview
 
 - **Functional Categories** (21, defined in `src/rubygemdb/models/categories.py`): `web_frameworks`, `http_networking`, `servers_concurrency`, `background_jobs`, `persistence`, `document_parsing`, `document_generation`, `static_site_generation`, `cli_libraries`, `testing_qa`, `code_quality_typing`, `runtime_validation`, `developer_tools`, `ai_llm`, `mcp_tooling`, `text_search`, `security_auth`, `media_processing`, `gui_desktop`, `native_bindings`, `core_extensions`.
 - **Stack Layers**: each category carries a layer (substrate, plumbing, composition, quality) plus curated base-gem seeds (dotenv, drydock, pry, rubocop, journald-logger), enabling layered gem-stack recommendations for back-end tooling design.
-- **Modular Engine**: Structured under `src/rubygemdb/` for scalability:
+- **Modular Engine**: package layout under `src/rubygemdb/` — core/, models/, services/, storage/, ui/:
   - `core/config.py`: Centralized settings using `pydantic-settings` and `.env` support.
-  - `models/gem.py`: Robust data models for gem entries, classifications, and risks.
+  - `models/gem.py`: Pydantic data models for gem entries, classifications, and risks.
   - `models/session.py`: GraphRAG session models (`RAGSession`, `RAGMessage`, `RAGTrace`).
   - `services/`: Specialized services for RubyGems API, LLM classification, Context7 integration, Langfuse tracing (`services/tracing.py`), and a universal SQLite embedding cache (`services/embedding_cache.py`).
   - `storage/`: Multi-backend storage (SQLite + JSON) for inventory and results, plus a persistent GraphRAG session store (`storage/session_storage.py`).
 - **Persistent GraphRAG Sessions**: Conversations, retrieved-node citations, and execution traces persist in `data/sessions.sqlite` (`rag_sessions`, `rag_messages`, `rag_traces` tables, auto-created on first use). The TUI chat tab auto-restores the most recent session on open and offers New Session / Delete Session buttons; every turn is indexed into txtai as a `session_turn` document.
-- **Interactive Explorer (TUI)**: A feature-rich Textual-based UI for browsing, filtering, and managing gem classifications.
+- **Interactive Explorer (TUI)**: A Textual-based TUI (ui/tui.py) with 13 key bindings (tui.py), category filtering, and a GraphRAG chat tab.
 - **Contextual GraphRAG (TUI Chat)**: Spins up an ephemeral container (`rubygemdb-indexer:latest`) to extract AST symbol hierarchies (`rubydex`) and structured documentation (`decode`) from shallow-cloned gem repositories (with `.gem` unpack fallback), embedding results into ephemeral `txtai` vector stores with two-stage grounded retrieval (optionally local-GGUF query expansion and cross-encoder reranking, both off by default), persistent sessions, and markdown/JSON transcript export. Grounded answers are citation-tagged (`[C1]`-style, source file included) and prompt-constrained to the APIs the citations contain — unsupported capabilities are stated explicitly and missing logic is supplied as clearly-distinguished custom Ruby; turns without a grounded context run as ordinary ungrounded chat. Agent output is capped by `AGENT_MAX_TOKENS` (default 4096).
 
+Agent-side integrations:
+
 - **Codebase Memory MCP**: Native integration with the codebase-memory-mcp server to ground LLM-generated integration plans in the actual architectural structure of target projects.
-- **Other Steve Prompt Architect**: A highly aggressive system persona that intercepts raw user queries, strips out conversational slop, and generates concrete, SFL-compliant queries for the txtai vector database.
-- **Context7 Integration**: Deep integration with Context7 for library search, manual ID entry, and batch cheatsheet generation for gems and their dependencies. Library IDs are canonicalized to `/owner/repo` form, derived from source/homepage repo URLs when possible.
+- **Query Expansion (optional)**: QUERY_EXPANSION_ENABLED=true expands queries into lexical/vector variations via a local GGUF model (off by default; degrades to baseline retrieval)
+- **Context7 Integration**: services/context7.py provides library search, manual ID entry, and batch cheatsheet generation; IDs canonicalize to /owner/repo form
 
 ## Building and Running
 
@@ -35,12 +37,13 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
 2.  **API Keys (Required for full functionality)**:
     Create a `.env` file or export the following variables:
     ```bash
-    MISTRAL_API_KEY="your_mistral_key" # For LLM classification (read by core/config.py)
+    OPENROUTER_API_KEY="your_openrouter_key" # default provider key (config.py:180-191); MISTRAL_API_KEY only when RUBYGEMDB_PROVIDER=mistral
     CONTEXT7_API_KEY="your_context7_key" # For cheatsheet generation in TUI
     LANGFUSE_PUBLIC_KEY="pk-lf-..." # Optional Langfuse tracing & observability
     LANGFUSE_SECRET_KEY="sk-lf-..."
     LANGFUSE_BASE_URL="http://localhost:3000" # or LANGFUSE_HOST
     LANGFUSE_ENABLED="true"
+    GITHUB_TOKEN="your_github_token" # Optional: import-stars auth (falls back to `gh auth token` when unset)
     ```
 
     Optional retrieval-quality stages (both off by default): set `QUERY_EXPANSION_ENABLED` / `RERANKER_ENABLED` to enable local GGUF query expansion and cross-encoder reranking. Models download lazily from Hugging Face into `data/models/`; retrieval degrades to baseline when they are unavailable.
@@ -68,6 +71,7 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
   uv run rubygemdb reclassify --select-prune --embed # interactive multi-select candidates to prune
   uv run rubygemdb reclassify --apply-prune --embed --out output/
   uv run rubygemdb reclassify --clear-embeddings-cache --apply-prune
+  uv run rubygemdb reclassify --prune-list data/prune-report.md --embed # prune approved gems from a markdown report
   ```
 - **Import GitHub Starred Gems (CLI)**:
   Fetches starred Ruby repositories from GitHub, resolves them to published RubyGems, enriches existing records with source repositories/Context7 IDs, infers GenAI backend tooling roles (`genai_uses`), and runs an approval-gated prune audit:
@@ -76,6 +80,8 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
   uv run rubygemdb import-stars --classify --embed # full import, taxonomy classification, and vector indexing
   uv run rubygemdb import-stars --select-prune     # interactively multi-select prune candidates from audit
   uv run rubygemdb import-stars --apply-prune      # import and prune stale/overlapping gems
+  uv run rubygemdb import-stars --user username --language Ruby  # custom GitHub user or language filter
+  uv run rubygemdb import-stars --prune-list prune.txt           # prune only approved gems from a file or report
   ```
 - **Interactive Gem Pruning (`rubygemdb prune`)**:
   Audit inventory for stale or overlapping gems and interactively choose gems to remove using a dual-engine CLI multi-selector (`gum choose --no-limit` or Textual `SelectionList` fallback). Accepts candidates from plain text files, markdown reports (`data/prune-report.md`), or an automated inventory audit:
@@ -93,11 +99,13 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
   Inspect, prune, and clear the shared vector embedding cache:
   ```bash
   uv run rubygemdb cache stats                           # formatted table of vector counts, models, and disk sizes
+  uv run rubygemdb cache stats --model "model_name"     # filter the table by embedding model
   uv run rubygemdb cache clear                           # purge all vectors and reclaim host disk space via VACUUM
   uv run rubygemdb cache clear --model "model_name"     # clear vectors for a specific model only
   uv run rubygemdb cache prune                           # prune expired vectors (>180d) and cap at 100k entries
   uv run rubygemdb cache prune --max-age-days 90 --max-entries 50000  # custom retention limits
   ```
+  Pass `--no-vacuum` on `clear` or `prune` to skip physical SQLite page reclamation.
 - **Gem-Stack Composition**:
   Turns a context query into a curated, layered stack manifest (substrate -> quality) plus a Gemfile snippet using two-stage retrieval and second-pass curation (LLM synthesis or offline fallback), capped by `--max-gems` (default 10).
   ```bash
@@ -115,25 +123,29 @@ RubyGemDB is a specialized tool for analyzing and classifying Ruby gems into arc
   uv run rubygemdb-mcp --daemon stop
   uv run rubygemdb-mcp --sse                 # shortcut for --daemon start
   ```
-  Other flags: `--transport stdio|sse` (default `stdio`), `--host` (default `127.0.0.1`), `--port` (default `8000`), `--foreground`, `--pid-file` (default `data/mcp.pid`), `--log-file` (default `data/mcp.log`). Catalog tools are strictly read-only: SQLite `mode=ro` connections; mutating storage methods raise `PermissionError`. Session tools write only to the separate `data/sessions.sqlite` store. `build_gem_graphrag` and `query_gem_graphrag` accept an optional `session_id` (auto-generated when omitted) and return the `session_id` they recorded the turn in; `query_gem_graphrag` results also carry a top-level `citations` list for every retrieved symbol and example.
+  Other flags: `--transport stdio|sse` (default `stdio`), `--host` (default `127.0.0.1`), `--port` (default `8000`), `--foreground`, `--pid-file` (default `data/mcp.pid`), `--log-file` (default `data/mcp.log`). Catalog tools are strictly read-only: SQLite `mode=ro` connections; mutating storage methods raise `PermissionError`. Session tools write only to the separate `data/sessions.sqlite` store. `build_gem_graphrag` and `query_gem_graphrag` accept an optional `session_id` (auto-generated when omitted) and return the `session_id` they recorded the turn in; `query_gem_graphrag` results also carry a top-level `citations` list for every retrieved symbol and example. `compose_stack` accepts `max_gems` (default 10) to cap stack density.
+- **Agent Skill Deployment (`rubygemdb install-skill`)**:
+  Deploy or symlink the repository-canonical agent skill (`.skills/rubygemdb/`) to `~/.agents/skills/rubygemdb`:
+  ```bash
+  uv run rubygemdb install-skill                             # copy SKILL.md and scripts/gem.py to ~/.agents/skills/rubygemdb
+  uv run rubygemdb install-skill --link                      # symlink the skill directory
+  uv run rubygemdb install-skill --target /path/to/skills    # custom destination directory
+  ```
 
-## Development Conventions
+## Classification Logic
+- **Heuristics First**: Gems are first matched against keyword rules and scored by description text and txtai embedding similarity against category descriptions (e.g., `nokogiri` -> `document_parsing`).
+- **Sub-Category Facets**: after the primary category wins, `detect_sub_categories` matches that category's `sub_categories` vocabulary (example gems, sub-slug tokens) against the gem's name, description, and dependencies. Facets persist in the `classified_gems.sub_categories` column and appear in YAML/TUI output.
+- **LLM Fallback**: name-keyword matches score 0.8, dependency-only 0.65, description/embedding-only ≤0.6 (default 0.4); the configured LLM (default openrouter/upstage/solar-mini4) is always consulted for the agent description, and when heuristic confidence is below 0.7, its category may override the heuristic pick.
+- **Confidence Threshold**: LLM results require a confidence > 0.6 to override initial heuristics.
+- **Metadata Update**: Users can manually refine Context7 IDs and Source URIs directly from the TUI, which updates the SQLite storage.
 
-### Caching Strategy
+## Caching Strategy
 - `rubygemdb.sqlite`: Central SQLite database for inventory, verified results, and manual metadata updates (Source URIs, Context7 IDs).
 - `data/cache/gem_cache.json`: Caches raw responses from the RubyGems API.
 - `data/cache/llm_cache.json`: Caches prompts and responses from the LLM classifier.
 - `data/cache/embeddings_cache.sqlite`: Universal content-addressable vector cache (SHA-256 of model path + text) shared by GraphRAG indexing, classifier embedding scoring, and agent sessions — repeat vectorization of known texts skips the embedding model entirely. Configurable capacity (default 100,000) and TTL retention (default 180 days), opportunistic inline eviction during `put_many`, and operator CLI lifecycle management (`rubygemdb cache`).
 - `classified_gems.json`: A unified JSON export of all classified gems for TUI consumption.
-- `sessions.sqlite`: Persistent GraphRAG session store (`data/sessions.sqlite`; `rag_sessions`, `rag_messages`, `rag_traces` tables, auto-created on first use).
 - `data/models/`: Local GGUF model cache for query expansion and reranking (lazily downloaded from Hugging Face).
-
-### Classification Logic
-- **Heuristics First**: Gems are first matched against keyword rules and scored by description text and txtai embedding similarity against category descriptions (e.g., `nokogiri` -> `document_parsing`).
-- **Sub-Category Facets**: after the primary category wins, `detect_sub_categories` matches that category's `sub_categories` vocabulary (example gems, sub-slug tokens) against the gem's name, description, and dependencies. Facets persist in the `classified_gems.sub_categories` column and appear in YAML/TUI output.
-- **LLM Fallback**: the LLM (Mistral/Devstral) is always consulted for the agent description; when heuristic confidence is below 0.7, its category may override the heuristic pick.
-- **Confidence Threshold**: LLM results require a confidence > 0.6 to override initial heuristics.
-- **Metadata Update**: Users can manually refine Context7 IDs and Source URIs directly from the TUI, which updates the SQLite storage.
 
 ### Key Data Files
 - `data/gems-inventory.csv`: The primary input format for populating the database.

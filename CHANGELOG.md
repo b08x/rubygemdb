@@ -1,5 +1,25 @@
 ## [Unreleased]
 
+### 🚀 Features
+
+- Migrate `rubygemdb` agent skill into repository at `.skills/rubygemdb/` (`SKILL.md`, `scripts/gem.py`, `install.py`), cleaning up legacy `~/.syncopated/skills/rubygemdb`.
+- Add skill installer (`.skills/rubygemdb/install.py` and `uv run rubygemdb install-skill`) deploying the skill to `~/.agents/skills/rubygemdb` with `--target` override and `--link` symlink support.
+- Upgrade `.skills/rubygemdb/scripts/gem.py`:
+  - `search`: add `--category <slug>` filtering, plus optional local GGUF `--expand` (query expansion) and `--rerank` (cross-encoder) flags.
+  - `stack`: add `--max-gems N` (default 10) to cap curated stack density.
+  - `categories` and `info`: surface 80 `sub_categories` facets (with example gems) and `genai_uses` metadata in text and JSON modes.
+  - `graphrag`: add `build` and `query` subcommands integrating containerized AST/doc indexing, 2-stage retrieval, `[C1]` grounded citations, and persistent session history.
+  - `sessions`: add `list`, `show`, `export` (markdown/json), and `delete` subcommands over `data/sessions.sqlite`.
+- Refactor `.skills/rubygemdb/SKILL.md`:
+  - Introduce 3-tier routing architecture: Tier 1 native MCP server (`rubygemdb-mcp`) first for read-only catalog queries, GraphRAG, and session persistence; Tier 2 `scripts/gem.py` for CLI fallback and single-gem catalog mutations (`add`, `remove`, `prefer`, `unprefer`); Tier 3 repository operator CLI (`uv run rubygemdb ...`) for bulk maintenance.
+  - Document all 11 MCP tools, resources (`rubygemdb://taxonomy`, `rubygemdb://stack-seeds`), prompts (`design-ruby-stack`, `gem-architect-rag`), and background SSE daemon lifecycle.
+  - Document containerized GraphRAG (`rubygemdb-indexer:latest`) and the grounded `[C1]` citation contract.
+  - Document updated environment variables, replacing deprecated `DEVSTRAL_API_KEY` with `OPENROUTER_API_KEY`.
+
+### 🧪 Testing
+
+- Add automated test suite `tests/test_skill_gem_cli.py` covering installer deployment (copy and symlink modes), SKILL.md synchronization, all `gem.py` subcommands against isolated SQLite fixtures, and schema migrations.
+
 ## [0.9.0] - 2026-10-25
 
 ### 🚀 Features
@@ -14,7 +34,7 @@
 - Tracing is disabled unless both keys are set; `LANGFUSE_ENABLED=false` disables it even with keys present. When disabled, traced blocks yield no-op observations and the Langfuse client is never initialized (the SDK imports lazily, only when enabled)
 - Trace names are kebab-case (`classify-gem`, `classify-gem-llm`, `rag-chat-turn`, `graphrag-retrieve`, `mcp-build-gem-graphrag`, …) and tagged `rubygemdb`; GraphRAG chat turns group traces by session id
 - Exceptions raised inside a traced operation are recorded with `level=ERROR` and a status message before being re-raised
-- The CLI flushes buffered traces via `flush_tracing()` when `process`, `reclassify`, `stack`, or `build-indexer` finish, on success or failure
+- The CLI flushes buffered traces via `flush_tracing()` in a `try/finally` around command dispatch, so every subcommand flushes when it finishes, on success or failure
 - Add `langfuse>=5.0.4` runtime dependency (pulls in the OpenTelemetry SDK family)
 - Add universal embedding cache (`services/embedding_cache.py`): a content-addressable SQLite vector cache at `data/cache/embeddings_cache.sqlite`, keyed by SHA-256 of model path + text, shared across GraphRAG indexing, classifier embedding scoring, and agent sessions via `wrap_embeddings()` wrapping txtai `Embeddings` instances
 - Repeat vectorization of previously-seen texts skips the embedding model entirely — only missed texts are encoded and written through, in the original order; GraphRAG vectorization progress messages now report cache hits/misses per chunk

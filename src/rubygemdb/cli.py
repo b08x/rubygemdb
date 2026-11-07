@@ -7,6 +7,7 @@ import logging
 import requests
 from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
 from rich.table import Table
@@ -670,6 +671,28 @@ def run_import_stars(args):
         console.print("[green]Import process completed successfully![/green]")
 
 
+def run_install_skill(args):
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    install_script = repo_root / ".skills" / "rubygemdb" / "install.py"
+    if not install_script.exists():
+        console.print(f"[red]Installer script not found at {install_script}[/red]")
+        sys.exit(1)
+
+    spec = importlib.util.spec_from_file_location("rubygemdb_skill_install", install_script)
+    if spec is None or spec.loader is None:
+        console.print(f"[red]Cannot load installer from {install_script}[/red]")
+        sys.exit(1)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    target_path = Path(args.target)
+    dest = mod.install_skill(target_dir=target_path, link=args.link)
+    action = "Linked" if args.link else "Installed"
+    console.print(f"[green]{action} rubygemdb skill to {dest}[/green]")
+
+
 def run_cli():
     parent_parser = argparse.ArgumentParser(add_help=False)
     parent_parser.add_argument("--cuda", action="store_true", default=argparse.SUPPRESS, help="Force enable CUDA acceleration")
@@ -746,6 +769,11 @@ def run_cli():
     import_stars_parser.add_argument("--backend", choices=["auto", "gum", "textual"], default="auto", help="Multi-selector UI engine (default: auto)")
     import_stars_parser.add_argument("--out", default="output", help="Output directory for YAML files (when --classify is passed)")
 
+    # Install Skill Subcommand
+    install_skill_parser = subparsers.add_parser("install-skill", parents=[parent_parser], help="Deploy the rubygemdb skill to ~/.agents/skills")
+    install_skill_parser.add_argument("--target", default=str(Path.home() / ".agents" / "skills"), help="Target directory for installed skills (default: ~/.agents/skills)")
+    install_skill_parser.add_argument("--link", action="store_true", help="Symlink the skill directory instead of copying")
+
     args = parser.parse_args()
 
     if getattr(args, "cuda", False):
@@ -768,6 +796,8 @@ def run_cli():
             run_prune(args)
         elif args.command == "import-stars":
             run_import_stars(args)
+        elif args.command == "install-skill":
+            run_install_skill(args)
     finally:
         flush_tracing()
 

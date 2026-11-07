@@ -49,9 +49,8 @@ Each category also carries curated `base_gems` stack seeds (e.g. dotenv, drydock
 ## Architecture
 
 ### Data Flow
-1. Read gem inventory from CSV → Fetch RubyGems API data → Heuristic classification → LLM enhancement (optional) → Save results to YAML/SQLite
-2. Caching layers to minimize redundant API/LLM/embedding calls
-3. Persistent storage for classified gem results
+1. Read gem inventory from CSV → Fetch RubyGems API data → Heuristic classification → LLM agent-description generation (always attempted, classifier.py:263; category override gated at <0.7) → Save results to YAML/SQLite (cache layers in data/cache/* short-circuit repeat calls between steps)
+2. Persistent storage for classified gem results
 
 ### Core Component Directory Structure
 ```
@@ -82,7 +81,7 @@ src/rubygemdb/
 │   ├── prune.py        # Overlap/stale gem prune reports
 │   ├── stack.py        # Layered gem-stack composition
 │   ├── rubygems.py     # RubyGems API client with caching
-│   ├── llm.py          # Mistral LLM client for fallback classification
+│   ├── llm.py          # Provider-configured LLM client for fallback classification
 │   ├── context7.py     # Context7 API client; repo-anchored library-ID verification
 │   └── tracing.py      # Langfuse v5 observability context managers & graceful no-op fallback
 └── storage/
@@ -98,6 +97,8 @@ docker/
 ---
 
 ## Key Commands
+
+Every workflow below is one rubygemdb subcommand; each block is copy-pasteable and idempotent unless flagged:
 
 ### Install Dependencies
 ```bash
@@ -143,7 +144,7 @@ Fetch starred Ruby repositories for a user on GitHub, resolve them to published 
 uv run rubygemdb import-stars --dry-run                    # safe preview: inspect discovered gems and prune audit without writes
 uv run rubygemdb import-stars                              # import and enrich gems in inventory
 uv run rubygemdb import-stars --classify --embed           # import, classify into 21 categories, and rebuild vector index
-uv run rubygemdb import-stars --user username --language Ruby  # custom user or language filter
+uv run rubygemdb import-stars --user username --language Ruby  # override the defaults (--user b08x, --language Ruby)
 uv run rubygemdb import-stars --select-prune              # launch interactive CLI multi-selector to choose audit gems to prune
 uv run rubygemdb import-stars --apply-prune               # auto-prune stale/overlapping gems identified in audit
 uv run rubygemdb import-stars --prune-list prune.txt      # prune only approved gems listed in text file
@@ -159,6 +160,7 @@ uv run rubygemdb prune --backend textual                   # force Textual Selec
 uv run rubygemdb prune --backend gum                       # force Charmbracelet gum engine
 uv run rubygemdb prune --dry-run                           # simulate selection and report without deleting
 uv run rubygemdb prune --all                               # prune all stale and overlapping candidates without prompting
+uv run rubygemdb prune --select                           # force the interactive selector (default in interactive terminals)
 uv run rubygemdb prune --prune-list prune.txt              # prune approved gems from text or markdown file
 uv run rubygemdb prune --output-list approved.txt          # save interactive selections to file for reuse
 ```
@@ -174,12 +176,13 @@ uv run rubygemdb reclassify --prune-list data/prune-report.md --embed  # prune g
 uv run rubygemdb reclassify --clear-embeddings-cache  # also purge and vacuum universal embedding cache
 ```
 The prune list file accepts markdown reports (tables and lists), plain text (one gem per line), and `#` comments.
-A dated SQLite backup (`data/rubygemdb.sqlite.bak-<date>`) is written before anything is wiped. Run with ollama up for best embedding-assisted classification.
+A dated SQLite backup (`data/rubygemdb.sqlite.bak-<date>`) is written before anything is wiped. Embedding-assisted classification requires ollama serving embeddinggemma-2:440m (config.py); without it, scoring degrades to keyword + description signals (embedding_scorer.py:57-74).
 
 ### Universal Embedding Cache Management (`rubygemdb cache`)
 Inspect, prune, and clear the shared vector embedding cache (`data/cache/embeddings_cache.sqlite`):
 ```bash
 uv run rubygemdb cache stats                           # display Rich table of vector counts, models, and disk sizes
+uv run rubygemdb cache stats --model "model_name"     # filter the table by embedding model
 uv run rubygemdb cache clear                           # wipe all vectors and reclaim host disk space via VACUUM
 uv run rubygemdb cache clear --model "model_name"     # clear vectors for a specific model only
 uv run rubygemdb cache prune                           # prune expired vectors (>180d) and cap at 100k entries
@@ -210,7 +213,24 @@ uv run rubygemdb-mcp --sse          # shortcut for --daemon start
 ```
 Other flags: `--transport stdio|sse` (default `stdio`), `--host` (default `127.0.0.1`), `--port` (default `8000`), `--foreground` (SSE in the foreground; used by the daemon worker), `--pid-file` (default `data/mcp.pid`), `--log-file` (default `data/mcp.log`). Daemon artifacts: `data/mcp.pid`, `data/mcp.json` (host/port sidecar), `data/mcp.log`.
 
-`search_gems` filters: `category` — one of the 21 slugs; `phase` — `skeleton`/`input`/`processing`/`output`. FTS5 first; the txtai vector index loads lazily and only when FTS returns zero hits. Catalog tools open the gem database read-only (`mode=ro`); mutating storage methods raise `PermissionError` in that mode. Session tools write only to the separate `data/sessions.sqlite` store — the gem catalog is never modified. `build_gem_graphrag` and `query_gem_graphrag` accept an optional `session_id` (auto-generated when omitted) and return the `session_id` they recorded the turn in; `query_gem_graphrag` results also carry a top-level `citations` list (id, gem, file, node_id, node_type, symbol, signature, summary) for every retrieved symbol and code example. `resume_rag_session` pre-warms the session's gem index and returns the last 5 messages (full context restore happens in the TUI).
+| Tool | Parameter | Behavior |
+|------|-----------|----------|
+| `search_gems` | `category` | one of the 21 slugs |
+| `search_gems` | `phase` | `skeleton` / `input` / `processing` / `output` |
+| `compose_stack` | `max_gems` | default 10; caps stack density |
+| `search_gems` | vector index | txtai loads lazily, only when FTS5 returns zero hits |
+
+Catalog tools open the gem database read-only (`mode=ro`) — mutating storage methods raise `PermissionError` in that mode, and session tools write only to the separate `data/sessions.sqlite` store, so the gem catalog is never modified.
+
+`build_gem_graphrag` and `query_gem_graphrag` accept an optional `session_id` (auto-generated when omitted) and return the `session_id` they recorded the turn in; `query_gem_graphrag` results also carry a top-level `citations` list (id, gem, file, node_id, node_type, symbol, signature, summary) for every retrieved symbol and code example, and `resume_rag_session` pre-warms the session's gem index and returns the last 5 messages (full context restore happens in the TUI).
+
+### Agent Skill Deployment (`rubygemdb install-skill`)
+Deploy or symlink the repository-canonical agent skill (`.skills/rubygemdb/`) to `~/.agents/skills/rubygemdb`:
+```bash
+uv run rubygemdb install-skill                             # copy SKILL.md and scripts/gem.py to ~/.agents/skills/rubygemdb
+uv run rubygemdb install-skill --link                      # symlink the skill directory
+uv run rubygemdb install-skill --target /path/to/skills    # custom destination directory
+```
 
 ### Linting & Type Checking
 ```bash
@@ -223,15 +243,33 @@ uv run mypy src/rubygemdb/
 
 ---
 
+## Agent & Retrieval
+
+### Dynamic RAG Workflow
+1. User enters a query (optionally selecting a target codebase project from the TUI dropdown).
+2. The query runs through hybrid_search() (services/hybrid_search.py); when QUERY_EXPANSION_ENABLED is on, the local GGUF QueryExpander adds lexical/vector variations (services/query_expander.py).
+3. The variations are searched against the `txtai` database (documents carry `category` and `layer` metadata). When `QUERY_EXPANSION_ENABLED` is on, the local GGUF `QueryExpander` adds lexical/vector variations of its own (multi-pass, RRF-fused over an oversampled candidate pool); when `RERANKER_ENABLED` is on, the fused candidates are re-scored by the local cross-encoder before truncation. Both stages are off by default and fall back to baseline retrieval when their models are unavailable.
+4. For back-end tooling queries, results are presented grouped by layer (substrate first, quality last), and recommendations start from the category `base_gems` seeds before context-specific gems.
+5. If a target project is selected, the agent calls `get_architecture` and `search_graph` via Codebase Memory MCP to inspect the target structure.
+6. The agent answers gem questions using search_memory_tool matches, fetch_rubygems_info metadata, Context7 docs, and — when a target project is selected — Codebase Memory get_architecture/search_graph (agent.py:372 explicitly excludes implementation backlogs and code scaffolding).
+7. Chat sessions persist across restarts: every turn is saved to `data/sessions.sqlite` and indexed into txtai as a `session_turn` document tagged with its session id; the TUI restores the most recent session (active gems, intention, chat history, last 200 execution traces) on open.
+
+Grounded chat-tab turns are citation-tagged and prompt-constrained: every retrieved method, class, module, and code example carries a sequential `[C1]`-style tag with its source file, replies must cite those tags inline and close with a `### Citations` summary, and only APIs present in the citations may be used — unsupported capabilities are stated explicitly, with missing logic supplied as clearly-distinguished custom application Ruby. Turns without a grounded context (no gems selected) run as ordinary ungrounded chat; the contract binds grounded answers, it does not refuse ungrounded ones. `query_gem_graphrag` returns the same citation-tagged context and `citations` list raw — the calling agent consumes them under its own prompt discipline.
+
+---
+
 ## Environment Variables
 
 Required for full functionality:
 ```bash
-# Mistral API key for LLM fallback classification
-export MISTRAL_API_KEY="your_mistral_key"
+# Default provider key for LLM fallback classification
+export OPENROUTER_API_KEY="your_openrouter_key"  # default provider (config.py:180-191); export MISTRAL_API_KEY instead only when RUBYGEMDB_PROVIDER=mistral
 
 # Context7 API key for generating gem usage cheatsheets
 export CONTEXT7_API_KEY="your_context7_key"
+
+# Optional GitHub token for import-stars (raises API rate limits; falls back to `gh auth token` when unset)
+export GITHUB_TOKEN="your_github_token"
 
 # Optional Langfuse tracing & observability (disabled when unset or LANGFUSE_ENABLED=false)
 export LANGFUSE_PUBLIC_KEY="pk-lf-..."
@@ -251,6 +289,7 @@ Optional embedding cache retention policies:
 ```bash
 export EMBEDDINGS_CACHE_MAX_ENTRIES="100000"  # maximum cached vectors before oldest entries are pruned (default: 100,000)
 export EMBEDDINGS_CACHE_TTL_DAYS="180"         # vector time-to-live in days (default: 180)
+export EMBEDDINGS_CACHE_FILE="data/cache/embeddings_cache.sqlite"  # cache database path (default shown)
 ```
 
 Agent output cap:
@@ -263,23 +302,13 @@ Responses were previously uncapped; raise the setting when long, citation-tagged
 
 ## Classification Logic
 
-
-### Dynamic RAG Workflow
-1. User enters a query (optionally selecting a target codebase project from the TUI dropdown).
-2. The query is processed by the "Other Steve" Prompt Architect to generate strict, SFL-compliant semantic variations.
-3. The variations are searched against the `txtai` database (documents carry `category` and `layer` metadata), applying a 30% recency boost for updated gems. When `QUERY_EXPANSION_ENABLED` is on, the local GGUF `QueryExpander` adds lexical/vector variations of its own (multi-pass, RRF-fused over an oversampled candidate pool); when `RERANKER_ENABLED` is on, the fused candidates are re-scored by the local cross-encoder before truncation. Both stages are off by default and fall back to baseline retrieval when their models are unavailable.
-4. For back-end tooling queries, results are presented grouped by layer (substrate first, quality last), and recommendations start from the category `base_gems` seeds before context-specific gems.
-5. If a target project is selected, the agent calls `get_architecture` and `search_graph` via Codebase Memory MCP to inspect the target structure.
-6. The agent synthesizes the Context7 cheatsheets, semantic gem matches, and actual codebase structure to output a strict Pragmatic Implementation Backlog.
-7. Chat sessions persist across restarts: every turn is saved to `data/sessions.sqlite` and indexed into txtai as a `session_turn` document tagged with its session id; the TUI restores the most recent session (active gems, intention, chat history, last 200 execution traces) on open.
-
-Grounded chat-tab turns are citation-tagged and prompt-constrained: every retrieved method, class, module, and code example carries a sequential `[C1]`-style tag with its source file, replies must cite those tags inline and close with a `### Citations` summary, and only APIs present in the citations may be used — unsupported capabilities are stated explicitly, with missing logic supplied as clearly-distinguished custom application Ruby. Turns without a grounded context (no gems selected) run as ordinary ungrounded chat; the contract binds grounded answers, it does not refuse ungrounded ones. `query_gem_graphrag` returns the same citation-tagged context and `citations` list raw — the calling agent consumes them under its own prompt discipline.
+Classification scores three signals per gem; two thresholds decide when the LLM pass may override.
 
 ### Classification Pipeline
 Classification combines three scoring signals; the best-scoring category wins:
 - Keyword rules: gem name (token match) and dependency substrings, re-keyed to the new slugs via `categories.py`
 - Description-text scoring: RubyGems `info` term hits per category keywords/description
-- txtai embedding similarity (`EmbeddingScorer`, model `ollama/embeddinggemma`) between `"{name}: {description}"` and category description vectors; degrades gracefully to keyword + description scoring when ollama is down
+- txtai embedding similarity (`EmbeddingScorer`, model `ollama/embeddinggemma`) between `"{name}: {description}"` and category description vectors; falls back to keyword + description scoring when the ollama embedding call fails (services/embedding_scorer.py:57-74)
 
 Name-keyword matches score 0.8 confidence; dependency-only 0.65; description/embedding-only ≤ 0.6; unknown gems default to `core_extensions` at 0.4.
 
@@ -291,13 +320,13 @@ After the primary category is chosen, `GemClassifier.detect_sub_categories` scor
 Facets scoring ≥ 2.0 are kept, best-first; if none clears the bar, the best description-token sub-slug is used as a fallback. Detection re-runs after an LLM category override, so facets always match the final primary category.
 
 ### LLM Fallback
-The Mistral LLM API is always consulted to generate the agent description; the heuristic-confidence gate (< 0.7) only decides whether the LLM's category (itself requiring > 0.6 confidence) may override the heuristic pick.
+The configured LLM (default openrouter/upstage/solar-mini4, config.py:18-24) is always consulted to generate the agent description (classifier.py:263); the heuristic-confidence gate (< 0.7) only decides whether the LLM's category (itself requiring > 0.6 confidence) may override the heuristic pick.
 
 ---
 
 ## Caching Strategy
 
-Local cache files:
+Persistent data and cache files:
 1. `data/cache/gem_cache.json`: Raw RubyGems API responses
 2. `data/cache/llm_cache.json`: SHA256-hashed LLM prompt/response pairs
 3. `classified_gems.json`: Persisted TUI classification results
@@ -360,7 +389,7 @@ Per-category YAML files contain structured gem classification data:
 1. **Confidence Thresholds**: Heuristic results <0.7 trigger LLM processing; LLM results must have >0.6 confidence to override heuristics
 2. **Agent Output Cap**: `agent_max_tokens` (env `AGENT_MAX_TOKENS`, default 4096) caps GraphRAG agent responses — previously uncapped; long grounded implementations may truncate mid-answer, which sits in tension with the prompt contract's completeness rule, so raise the setting when answers cut off
 3. **Cache Persistence**: Cache files are automatically saved after successful API/LLM calls
-4. **Rate Limiting**: Built-in delays between API requests: 0.5s between RubyGems calls, 0.5s between LLM calls
+4. **Rate Limiting**: Built-in delays: 0.1s between RubyGems calls (hardcoded, rubygems.py:13) and 0.2s between Context7 calls (context7.py:11); LLM calls are single-shot with a 15s timeout and no delay. The RATE_LIMIT_DELAY/LLM_RATE_DELAY settings (config.py:216-217) are currently unread.
 5. **Batch Size**: Default LLM batch size is 10 for efficient bulk processing
 6. **TUI Requirements**: CSV input only required for first run to populate SQLite database
 

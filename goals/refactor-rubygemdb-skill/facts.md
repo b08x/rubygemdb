@@ -1,0 +1,14 @@
+# Facts
+
+- The canonical `rubygemdb` skill lives inside the repository at `/home/b08x/WorkspaceV3/rubygemdb/.skills/rubygemdb/` (`SKILL.md` and `scripts/gem.py`), migrated from `~/.syncopated/skills/rubygemdb/`.
+- An installer (`uv run rubygemdb install-skill` and `.skills/rubygemdb/install.py`) deploys `/home/b08x/WorkspaceV3/rubygemdb/.skills/rubygemdb` to `~/.agents/skills/rubygemdb` (with `--target` override and `--link` / copy support).
+- SKILL.md documents a 3-tier routing model: rubygemdb-mcp tools first when mounted (for read-only catalog search, stack composition, GraphRAG, and sessions), `scripts/gem.py` (`~/.agents/skills/rubygemdb/scripts/gem.py`) for CLI fallback and single-gem catalog mutations (add, remove, prefer, unprefer), and `uv run rubygemdb` for bulk operator workflows (import-stars, prune, reclassify, cache, install-skill).
+- SKILL.md documents the native rubygemdb-mcp tools (search_gems, get_gem, compose_stack, list_categories, build_gem_graphrag, query_gem_graphrag, list_rag_sessions, get_rag_session, resume_rag_session, export_rag_session_transcript, delete_rag_session), resources (rubygemdb://taxonomy, rubygemdb://stack-seeds), prompts (design-ruby-stack, gem-architect-rag), and SSE daemon lifecycle (`--daemon start|status|stop`).
+- SKILL.md documents containerized GraphRAG (`rubygemdb-indexer:latest`) and the grounded `[C1]` citation contract, plus updated environment and retrieval knobs (`OPENROUTER_API_KEY` replacing `DEVSTRAL_API_KEY`, `QUERY_EXPANSION_ENABLED`, `RERANKER_ENABLED`, `EMBEDDINGS_CACHE_*`, `AGENT_MAX_TOKENS`).
+- SKILL.md documents the bulk operator CLI commands (`import-stars`, `prune`, `reclassify`, `cache`, `install-skill`) with representative invocation examples.
+- `gem.py search` accepts `--category <slug>` and passes optional local GGUF `QueryExpander` and `CrossEncoderReranker` instances to `hybrid_search` when enabled in settings or requested via CLI flags.
+- `gem.py stack` accepts `--max-gems N` (default 10) and forwards `max_gems` to `StackService.build_stack`.
+- `gem.py categories` and `gem.py info` surface the 80 `sub_categories` facets (including example gems for a single category slug) and `genai_uses` metadata from SQLite.
+- `gem.py graphrag` provides `build` and `query` subcommands wrapping `GraphRAGService` and `SessionStorage`, returning grounded context, `[C1]`-style `citations`, and `session_id` in text and `--json` modes.
+- `gem.py sessions` provides `list`, `show`, `export`, and `delete` subcommands over `SessionStorage` (`data/sessions.sqlite`) in text and `--json` modes.
+- Automated pytest suite `tests/test_skill_gem_cli.py` in the rubygemdb repository verifies the repo-local `.skills/rubygemdb/scripts/gem.py` subcommands, the skill installer deployment to a target directory, and `SKILL.md` synchronization.
